@@ -157,6 +157,47 @@ func (r *NetworkOrderRepo) ListUnanswered(ctx context.Context) ([]*networkorder.
 	return out, nil
 }
 
+// ListAll returns every order regardless of state, for the read-only MCP
+// list_network_orders tool. Ordered by received_at so pagination (were
+// it ever added) would be stable; today the whole set is returned.
+func (r *NetworkOrderRepo) ListAll(ctx context.Context) ([]*networkorder.NetworkOrder, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT network_ref
+		FROM network_orders
+		ORDER BY received_at
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []shared.NetworkRef
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		refs = append(refs, shared.NetworkRef(ref))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]*networkorder.NetworkOrder, 0, len(refs))
+	for _, ref := range refs {
+		o, err := r.FindByRef(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		if o == nil {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 // scanOrder rehydrates one aggregate from an order row plus its lines.
 func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef, row pgx.Row) (*networkorder.NetworkOrder, error) {
 	var (

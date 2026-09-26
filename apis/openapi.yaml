@@ -62,6 +62,14 @@ tags:
   - name: operations
     description: >
       Liveness, and whether the inbound polling leg is actually working.
+  - name: reports
+    description: >
+      The "Network Order Acknowledgement & Translation" analytics data
+      product: read-only, derived entirely from this context's own
+      domain events, and served by a SEPARATE deployable
+      (`netfulfil-reports`) from the OLTP API documented above. It never
+      shares a process, a database, or a request path with `/healthz`,
+      `/network-orders`, or `/inbound-status`.
 
 paths:
   /healthz:
@@ -182,6 +190,84 @@ paths:
                 $ref: "#/components/schemas/NetworkOrder"
         "404":
           $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /reports/acknowledgement:
+    get:
+      operationId: getAcknowledgementReport
+      tags: [reports]
+      summary: Network Order Acknowledgement & Translation report
+      description: >
+        Bucketed by day: how much demand arrived, how it was answered, and
+        how fast. `ordersRejected` is split by cause —
+        `ordersRejectedUntranslatableSku` (a catalogue gap: the Anti-
+        Corruption Layer had no SKU mapping) is a different operational
+        signal from `ordersRejectedDomain` (order-management's promise
+        policy could not meet the deadline) or
+        `acknowledgementDeadlinesMissed` (the 24-hour window closed with no
+        answer ever sent — an operational failure, not a business
+        decision).
+
+
+        Served by the `netfulfil-reports` deployable, reading a Postgres
+        read model that `netfulfil-projector` maintains from this
+        context's own domain events. Never the OLTP database.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive start of the window (RFC3339).
+          schema:
+            type: string
+            format: date-time
+          example: "2026-06-01T00:00:00Z"
+        - name: to
+          in: query
+          required: true
+          description: Exclusive end of the window (RFC3339).
+          schema:
+            type: string
+            format: date-time
+          example: "2026-06-08T00:00:00Z"
+        - name: granularity
+          in: query
+          required: false
+          description: Bucket size. Only `day` exists today; omit for the default.
+          schema:
+            type: string
+            enum: [day]
+            default: day
+      responses:
+        "200":
+          description: The report, one row per day bucket in range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcknowledgementReport"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /reports/acknowledgement/freshness:
+    get:
+      operationId: getAcknowledgementReportFreshness
+      tags: [reports]
+      summary: How far the report lags real time
+      description: >
+        Seconds between now and the `occurredAt` of the most recently
+        projected domain event. Matches every sibling data product's
+        `/freshness` convention exactly: it is how an operator tells "the
+        report is caught up" from "the projector is stuck or the topic is
+        stalled" without reading projector logs.
+      responses:
+        "200":
+          description: Current freshness lag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Freshness"
         "500":
           $ref: "#/components/responses/Problem"
 
@@ -332,6 +418,73 @@ components:
           description: >
             Of those, how many have already missed their acknowledgement
             window. Above zero is worth alerting on.
+
+    AcknowledgementReport:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/AcknowledgementReportRow"
+
+    AcknowledgementReportRow:
+      type: object
+      description: One day bucket of the acknowledgement & translation report.
+      required:
+        - dayBucket
+        - ordersReceived
+        - ordersAcknowledged
+        - ordersRejectedUntranslatableSku
+        - ordersRejectedDomain
+        - acknowledgementDeadlinesMissed
+        - avgAcknowledgementLatencySeconds
+      properties:
+        dayBucket:
+          type: string
+          format: date-time
+          description: The UTC day this row summarizes (RFC3339, midnight).
+        ordersReceived:
+          type: integer
+          description: Orders received into this bucket (NetworkOrderReceived).
+        ordersAcknowledged:
+          type: integer
+          description: Orders acknowledged in full (NetworkOrderAcknowledged).
+        ordersRejectedUntranslatableSku:
+          type: integer
+          description: >
+            Rejected because the Anti-Corruption Layer had no SKU mapping
+            for one or more lines — a catalogue gap, not a business
+            refusal.
+        ordersRejectedDomain:
+          type: integer
+          description: >
+            Rejected because order-management's promise policy could not
+            meet the network's requiredShipBy.
+        acknowledgementDeadlinesMissed:
+          type: integer
+          description: >
+            The 24-hour acknowledgement window closed with no answer ever
+            sent (the sweep's own rejection). An operational failure, not
+            a business decision.
+        avgAcknowledgementLatencySeconds:
+          type: number
+          format: double
+          description: >
+            Average seconds between an order's receipt and its
+            acknowledgement, over the orders acknowledged in this bucket.
+            Zero when none were acknowledged in the bucket (never NaN).
+
+    Freshness:
+      type: object
+      required: [lagSeconds]
+      properties:
+        lagSeconds:
+          type: number
+          format: double
+          description: >
+            Seconds between now and the occurredAt of the most recently
+            projected domain event. Zero when the read model is empty.
 
     Problem:
       type: object

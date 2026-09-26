@@ -21,6 +21,14 @@ type NetworkOrderRepo interface {
 	Save(ctx context.Context, o *networkorder.NetworkOrder) error
 	FindByRef(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error)
 	ListUnanswered(ctx context.Context) ([]*networkorder.NetworkOrder, error)
+	// ListAll returns every order regardless of state, for the read-only
+	// MCP list_network_orders tool (internal/adapters/inbound/mcp) and
+	// operator tooling. ListUnanswered above remains the one the sweep
+	// and the OLTP HTTP surface use; this is a separate, explicitly wider
+	// query rather than a state filter bolted onto it, so a caller that
+	// wants "just the working set" cannot be silently widened by a
+	// future change here.
+	ListAll(ctx context.Context) ([]*networkorder.NetworkOrder, error)
 }
 
 // NetworkGateway is the ONLY route to the external network. Every call

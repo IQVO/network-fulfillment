@@ -40,6 +40,9 @@ func (r failingRepo) FindByRef(context.Context, shared.NetworkRef) (*networkorde
 func (r failingRepo) ListUnanswered(context.Context) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.err
 }
+func (r failingRepo) ListAll(context.Context) ([]*networkorder.NetworkOrder, error) {
+	return nil, r.err
+}
 
 type testEnv struct {
 	orders  *memory.NetworkOrderRepo
