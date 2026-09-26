@@ -18,15 +18,15 @@ type DomainEvent interface {
 // acknowledgement clock is now running", independent of how we go on to
 // answer it.
 type NetworkOrderReceived struct {
-	NetworkRef     NetworkRef
-	SiteId         SiteId
-	RequiredShipBy time.Time
-	AcknowledgeBy  time.Time
+	NetworkRef     NetworkRef `json:"networkRef"`
+	SiteId         SiteId     `json:"siteId"`
+	RequiredShipBy time.Time  `json:"requiredShipBy"`
+	AcknowledgeBy  time.Time  `json:"acknowledgeBy"`
 	// LineCount is the number of lines that were successfully translated
 	// into our vocabulary. Zero for demand rejected as untranslatable
 	// (ReceiveUntranslatable) — that order is lineless by construction.
-	LineCount int
-	At        time.Time
+	LineCount int       `json:"lineCount"`
+	At        time.Time `json:"at"`
 }
 
 func (e NetworkOrderReceived) EventName() string     { return "NetworkOrderReceived" }
@@ -36,14 +36,14 @@ func (e NetworkOrderReceived) OccurredAt() time.Time { return e.At }
 // an order in full: the network has been told yes, and a local order has
 // been raised (and is about to be released) in order-management.
 type NetworkOrderAcknowledged struct {
-	NetworkRef   NetworkRef
-	SiteId       SiteId
-	LocalOrderId LocalOrderId
+	NetworkRef   NetworkRef   `json:"networkRef"`
+	SiteId       SiteId       `json:"siteId"`
+	LocalOrderId LocalOrderId `json:"localOrderId"`
 	// ReceivedAt is carried alongside At so a consumer can compute
 	// acknowledgement latency (At - ReceivedAt) without a second lookup —
 	// exactly the "Acknowledgement & Translation" report's own metric.
-	ReceivedAt time.Time
-	At         time.Time
+	ReceivedAt time.Time `json:"receivedAt"`
+	At         time.Time `json:"at"`
 }
 
 func (e NetworkOrderAcknowledged) EventName() string     { return "NetworkOrderAcknowledged" }
@@ -77,10 +77,10 @@ const (
 // the window (untranslatable product, infeasible deadline) or because the
 // window itself closed unanswered (the sweep).
 type NetworkOrderRejected struct {
-	NetworkRef NetworkRef
-	SiteId     SiteId
-	Reason     RejectionReason
-	At         time.Time
+	NetworkRef NetworkRef      `json:"networkRef"`
+	SiteId     SiteId          `json:"siteId"`
+	Reason     RejectionReason `json:"reason"`
+	At         time.Time       `json:"at"`
 }
 
 func (e NetworkOrderRejected) EventName() string     { return "NetworkOrderRejected" }
@@ -97,10 +97,10 @@ func (e NetworkOrderRejected) OccurredAt() time.Time { return e.At }
 // are already correct the day that leg is added; it is exercised here only
 // at the domain level (EventName/OccurredAt) until then.
 type NetworkOrderShipmentConfirmed struct {
-	NetworkRef   NetworkRef
-	SiteId       SiteId
-	LocalOrderId LocalOrderId
-	At           time.Time
+	NetworkRef   NetworkRef   `json:"networkRef"`
+	SiteId       SiteId       `json:"siteId"`
+	LocalOrderId LocalOrderId `json:"localOrderId"`
+	At           time.Time    `json:"at"`
 }
 
 func (e NetworkOrderShipmentConfirmed) EventName() string     { return "NetworkOrderShipmentConfirmed" }
