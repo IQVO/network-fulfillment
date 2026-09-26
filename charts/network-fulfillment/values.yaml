@@ -76,7 +76,8 @@ autoscaling:
   targetCPUUtilizationPercentage: 80
 
 # This context holds NO database and NO Kafka connection. Its whole
-# configuration surface is these four variables (cmd/netfulfil/main.go).
+# configuration surface is these five variables (cmd/netfulfil/main.go plus
+# corsAllowedOrigins for the inbound HTTP adapter's CORS middleware).
 config:
   port: "8080"
 
@@ -108,6 +109,12 @@ config:
   # so this decides how long the floor stays blocked by demand the
   # network never confirmed.
   sweepInterval: "5m"
+
+  # Browser origins allowed to call this read-only API directly
+  # (internal/adapters/inbound/http/server.go's corsMiddleware).
+  # 5173 is warehouse-console's own dev port, always included; 5188 is
+  # this context's own netfulfil_mfe remote dev port (web/vite.config.ts).
+  corsAllowedOrigins: "http://localhost:5173,http://localhost:5188"
 
 # External-network credentials. Used ONLY when config.networkMode is
 # "sandbox" or "live" -- in stub mode nothing here is read and no Secret
@@ -234,3 +241,37 @@ readinessProbe:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# The netfulfil_mfe Module Federation remote: a static SPA bundle served by
+# its own nginx pod, reached through warehouse-infra's Nginx web gateway at
+# /mfes/network-fulfillment/. Deliberately a SEPARATE workload from the OLTP
+# API above -- Kong never routes to it, and the OLTP Service must never
+# select it (see the distinct app.kubernetes.io/component labels on both
+# Deployments/Services in this chart).
+frontend:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: warehouse/network-fulfillment-frontend
+    pullPolicy: IfNotPresent
+    tag: ""
+  service:
+    port: 80
+    targetPort: 8080
+  # nginx-unprivileged runs as uid/gid 101.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    fsGroup: 101
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi

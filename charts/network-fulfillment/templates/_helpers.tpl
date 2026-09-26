@@ -56,3 +56,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- include "network-fulfillment.fullname" . }}-database
 {{- end }}
 {{- end }}
+
+{{/*
+Fully qualified name of the frontend Module Federation remote deployment/service.
+
+The remote is served by its own nginx pod and reached through warehouse-infra's
+Nginx web gateway at /mfes/network-fulfillment/. It is deliberately a separate
+workload from the API: Kong never routes to it, and the OLTP Service must never
+select it.
+*/}}
+{{- define "network-fulfillment.frontendFullname" -}}
+{{- include "network-fulfillment.fullname" . }}-frontend
+{{- end }}

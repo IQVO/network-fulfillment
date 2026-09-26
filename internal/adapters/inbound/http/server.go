@@ -16,6 +16,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
+
+	"github.com/go-chi/cors"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
@@ -52,7 +56,28 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /network-orders/{networkRef}", s.handleGetNetworkOrder)
 	mux.HandleFunc("GET /network-orders", s.handleListUnanswered)
 	mux.HandleFunc("GET /inbound-status", s.handleInboundStatus)
-	return mux
+	return corsMiddleware()(mux)
+}
+
+// corsMiddleware allows the warehouse-console browser SPA (and this
+// service's own netfulfil_mfe remote dev origin, :5188) to call this
+// read-only API directly from the browser. CORS_ALLOWED_ORIGINS overrides
+// the local-dev default (comma-separated) for staging/prod deployments.
+// Same shape as every sibling context's inbound HTTP adapter (see e.g.
+// facility-layout's corsMiddleware) -- only GET/OPTIONS are allowed here,
+// matching this context's read-only REST surface.
+func corsMiddleware() func(http.Handler) http.Handler {
+	origins := []string{"http://localhost:5173", "http://localhost:5188"}
+	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
+		origins = strings.Split(v, ",")
+	}
+	return cors.Handler(cors.Options{
+		AllowedOrigins:   origins,
+		AllowedMethods:   []string{http.MethodGet, http.MethodOptions},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	})
 }
 
 // handleHealthz stays liveness-only: it must not consult Postgres or the

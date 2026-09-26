@@ -4,6 +4,7 @@ metadata:
   name: {{ include "network-fulfillment.fullname" . }}
   labels:
     {{- include "network-fulfillment.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
@@ -11,6 +12,7 @@ spec:
   selector:
     matchLabels:
       {{- include "network-fulfillment.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
   template:
     metadata:
       annotations:
@@ -21,6 +23,7 @@ spec:
         {{- end }}
       labels:
         {{- include "network-fulfillment.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -61,6 +64,8 @@ spec:
               value: {{ .Values.config.orderManagementUrl | quote }}
             - name: SWEEP_INTERVAL
               value: {{ .Values.config.sweepInterval | quote }}
+            - name: CORS_ALLOWED_ORIGINS
+              value: {{ .Values.config.corsAllowedOrigins | quote }}
             {{- if or .Values.database.url .Values.database.existingSecret }}
             # Set only when a database is configured. With no DATABASE_URL
             # the binary runs on its in-memory repo, which is what keeps a
