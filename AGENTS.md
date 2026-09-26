@@ -59,6 +59,16 @@ There is still no `web/` and no live network call anywhere. Read
 code here — the boundary is **Accepted (2026-09-23)** and is a companion
 to `order-management` ADR 0020. Neither is meaningful without the other.
 
+**`docs/adr/0002-retail-network-not-amazon-counterpart.md` (Proposed)
+amends ADR 0001**: the counterpart this context is Conformist to is
+`retail-network`, a new bounded context inside this same fleet's orbit
+built to play that structural role — not a real e-commerce retailer's
+SP-API. Read ADR 0002 alongside ADR 0001 before writing any network-
+facing code; it renames the ACL adapter package and tightens the PII rule
+(see rules 1 and 2 below, both already updated to match ADR 0002's
+decision even though the ADR itself is still Proposed pending the
+companion `retail-network` ADR 0001's acceptance).
+
 **CI is ACTIVE** (`.github/workflows/ci.yml`), with eleven jobs: `lint`,
 `test`, `integration`, `api-lint`, `mutation-fast`, `vuln`, `arch-test`,
 `helm-lint` (`helm lint` plus the chart wiring tests in
@@ -168,7 +178,11 @@ internal/
     inbound/http/       read-only REST (apis/openapi.yaml)
     inbound/poller/     the inbound leg: polls the gateway, feeds Receive...
     outbound/network/   NETWORK_MODE switch + stub gateway + seed file — the
-                        ONLY place network vocabulary may exist
+                        ONLY place network vocabulary may exist TODAY.
+                        Renamed to outbound/retailnetwork/ in the Phase 3
+                        implementation PR per ADR 0002, once a live
+                        gateway calling retail-network's real Vendor API
+                        is added alongside the stub.
     outbound/ordermanagement/  held order, release, cancel (OM REST)
     outbound/postgres/  NetworkOrderRepo + migrations runner
     outbound/memory/    in-memory repo + product-translation file loader
@@ -177,27 +191,37 @@ migrations/             0001_init (network_orders, network_order_lines)
 charts/network-fulfillment/   Helm chart + Python wiring tests
 ```
 
-Still planned (ADR 0001), not in the tree: `CapabilityOffer` and its
-Kafka-fed caches, `outbound/kafka`, a credentialed `sandbox`/`live`
-gateway, shipment confirmation, transaction-status reconciliation, and an
-MCP adapter.
+Still planned (ADR 0001 + ADR 0002), not in the tree: `CapabilityOffer`
+and its Kafka-fed caches, `outbound/kafka`, the live `retailnetwork`
+gateway calling `retail-network`'s real Vendor API, shipment
+confirmation, transaction-status reconciliation, and an MCP adapter.
 
 `MUTATION_FAST_PKG` is `./internal/domain/networkorder`, the only aggregate.
 
 ## Hard rules for this context
 
 1. **The network's vocabulary stops at `adapters/outbound/network/`**
-   (today the stub gateway; the credentialed SP-API client will live
-   there too).
+   (today the stub gateway; per ADR 0002 this package is renamed to
+   `adapters/outbound/retailnetwork/` in the Phase 3 implementation PR,
+   when the live gateway calling `retail-network`'s real Vendor API is
+   added alongside the stub).
    `purchaseOrderNumber`, `itemSequenceNumber`, `buyerProductIdentifier`
-   (ASIN), `acknowledgementStatus` codes, `sellingParty`/`shipFromParty`,
-   `ShippingSpeedCategory` must never appear in `internal/domain` or in
-   anything published to the fleet. `arch-go` cannot catch a *vocabulary*
-   leak — that check is human.
-2. **Customer PII stops here.** Ship-to name/address/phone live in this
-   context and nowhere else in the fleet. `order-management` receives SKUs,
-   quantities and a deadline. This makes this repo the first in the fleet
-   that genuinely cannot run unauthenticated.
+   (ASIN) and other real-e-commerce-retailer field names must never
+   appear in `internal/domain` or in anything published to the fleet —
+   nor must `retail-network`'s own vocabulary (`poNumber`, `listingId`,
+   `nodeId`, its reason codes) leak past this one package once the live
+   gateway lands. `arch-go` cannot catch a *vocabulary* leak — that check
+   is human.
+2. **No ship-to PII reaches this context at all** (ADR 0002, amending ADR
+   0001's original "Customer PII stops here"). With `retail-network` as
+   the counterpart, ship-to name/address/phone live in `retail-network`'s
+   own `CustomerOrder` aggregate and are never sent to
+   `network-fulfillment` in either direction — this context receives only
+   a `poNumber`, line items, quantities and a `requiredShipBy`, and a
+   shipping-label request returns only `{labelRef, trackingNumber,
+   carrier}`. This context therefore does **not** need to run
+   authenticated for PII reasons (it holds none); it stays unauthenticated
+   for the same fleet-wide reason every other context does.
 3. **Never recompute promise math here.** Deadline feasibility is asked of
    `order-management`'s `PromisePolicy.FeasibleBy` (its ADR 0020). This
    context has the deadline and *could* consume the same caches — doing so
@@ -209,11 +233,14 @@ MCP adapter.
 5. **Network demand is ship-complete.** The network confirms or rejects a
    purchase order in its entirety; partial acknowledgements are rejected.
    OM ADR 0017's per-shipment-group promising must not apply to it.
-6. **`NETWORK_MODE=live|sandbox|stub`, default `stub`.** The kind cluster,
-   `e2e-tests` and CI must never need a credential. Log the chosen mode at
-   startup so the running value can be verified, not assumed — every
-   `*_MODE` in this fleet defaults permissive and several sat wrong in the
-   cluster for weeks.
+6. **`NETWORK_MODE=live|stub`, default `stub`.** Per ADR 0002, `sandbox` is
+   removed — it only ever meant a real vendor program's own sandbox tier,
+   which `retail-network` has no equivalent of (its one deployed instance
+   in the kind cluster is well-behaved by default and stressed only via
+   its own simulation knobs). The kind cluster, `e2e-tests` and CI must
+   never need a credential. Log the chosen mode at startup so the running
+   value can be verified, not assumed — every `*_MODE` in this fleet
+   defaults permissive and several sat wrong in the cluster for weeks.
 7. **Any FirstOffset-replay Kafka cache needs a consumer group id unique
    per process instance** (hostname+PID+timestamp). A shared group means a
    fresh process resumes from an earlier instance's committed offset and
@@ -223,7 +250,9 @@ MCP adapter.
    `submitShipmentConfirmations` return accepted-for-processing; reconcile
    via `getTransactionStatus` (~15 min for acks, ~10 for shipments). A 200
    is not a completed commitment — model submitted-but-unreconciled as its
-   own state.
+   own state. Per ADR 0002 D5, `network-fulfillment`/`order-management`
+   release work only once the acknowledgement submission has *reconciled*
+   to `SUCCESS`, never on the 202 alone.
 
 ## Key commands (harness v1 — see HARNESS.md for what each sensor costs)
 
@@ -249,6 +278,7 @@ Do not merge your own PR — leave it open for independent review.
 
 | Repo | ADR | Why it matters here |
 | --- | --- | --- |
+| `retail-network` | 0001 (drafted at `docs/planning/retail-network-adr-0001-DRAFT-for-new-repo.md` in this repo, pending that repo's creation) | Defines the organization this context is Conformist to — the companion to this repo's own ADR 0002 |
 | `order-management` | 0020 | The companion: `releaseOnAllocation` hold, `PromisePolicy.FeasibleBy`, `Network` promise basis |
 | `order-management` | 0014 | The promise is a CPT window derived from fulfillment capability |
 | `order-management` | 0004 | Release is the cancellation boundary — why network demand is held, not optimistically released |
