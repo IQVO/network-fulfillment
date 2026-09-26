@@ -1,0 +1,99 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "network-fulfillment.mcpFullname" . }}
+  labels:
+    {{- include "network-fulfillment.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  replicas: {{ .Values.mcp.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "network-fulfillment.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mcp
+  template:
+    metadata:
+      labels:
+        {{- include "network-fulfillment.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mcp
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "network-fulfillment.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mcp
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/mcp"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.mcp.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: MCP_ADDR
+              value: {{ .Values.mcp.httpAddr | quote }}
+            # cmd/mcp runs the OLTP migrations on start (idempotent) before
+            # opening the same read repository cmd/netfulfil serves off of.
+            - name: MIGRATIONS_PATH
+              value: {{ .Values.config.migrationsPath | quote }}
+            {{- if or .Values.database.url .Values.database.existingSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "network-fulfillment.databaseSecretName" . }}
+                  key: {{ .Values.database.existingSecretKey }}
+            {{- end }}
+            {{- if .Values.mcp.reportsBaseUrl }}
+            - name: REPORTS_BASE_URL
+              value: {{ .Values.mcp.reportsBaseUrl | quote }}
+            {{- else if .Values.analytics.enabled }}
+            - name: REPORTS_BASE_URL
+              value: "http://{{ include "network-fulfillment.reportsFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.analytics.reports.service.port }}"
+            {{- end }}
+            {{- if .Values.otel.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otel.endpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: "network-fulfillment-mcp"
+            - name: SERVICE_VERSION
+              value: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
+            - name: ENVIRONMENT
+              value: {{ .Values.environment | quote }}
+            {{- end }}
+            {{- range .Values.mcp.extraEnv }}
+            - {{ toYaml . | nindent 14 | trim }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.mcp.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

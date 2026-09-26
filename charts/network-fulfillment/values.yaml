@@ -75,11 +75,20 @@ autoscaling:
   maxReplicas: 5
   targetCPUUtilizationPercentage: 80
 
-# This context holds NO database and NO Kafka connection. Its whole
-# configuration surface is these five variables (cmd/netfulfil/main.go plus
-# corsAllowedOrigins for the inbound HTTP adapter's CORS middleware).
+# This context's OLTP configuration surface (cmd/netfulfil/main.go), plus
+# corsAllowedOrigins for the inbound HTTP adapter's CORS middleware. It
+# additionally gains an optional Kafka connection below (kafka.enabled) —
+# see the comment on eventPublisher for what that unlocks.
 config:
   port: "8080"
+
+  # log | kafka. log (the default) keeps the existing behaviour: domain
+  # events are logged and nothing else. kafka fans out to BOTH the
+  # integration topic (warehouse.network-fulfillment.events) and the
+  # analytics topic (warehouse.network-fulfillment.analytics) -- see
+  # cmd/netfulfil/main.go's wireEventPublisher. Naming mirrors
+  # facility-layout's and process-path-management's charts exactly.
+  eventPublisher: "log"   # "log" or "kafka"
 
   # How often the network is polled. Inbound is a poll and nothing else
   # (ADR 0001 section 5), so this is the only thing that brings demand in.
@@ -268,6 +277,91 @@ frontend:
     readOnlyRootFilesystem: true
     capabilities:
       drop: ["ALL"]
+
+# This service PUBLISHES onto warehouse.network-fulfillment.events (and, in
+# the same fan-out, warehouse.network-fulfillment.analytics) when
+# config.eventPublisher is "kafka" (KAFKA_BROKERS is only set in the
+# container env in that case) -- see cmd/netfulfil/main.go's
+# wireEventPublisher and config.eventPublisher above. Naming mirrors
+# facility-layout's and process-path-management's charts exactly; this
+# fleet does not invent a second name for the same knob per repo.
+kafka:
+  enabled: false
+  brokers: "kafka:9092"
+
+# --- analytics data product (ADR 0002) ---
+# The "Network Order Acknowledgement & Translation" report: a separate
+# analytics topic, a writer (netfulfil-projector) and a read-only reader
+# (netfulfil-reports), backed by a separate analytical database. Disabled
+# by default so existing releases are unaffected; set analytics.enabled=true
+# to deploy the two extra processes. Requires kafka.enabled=true (and
+# EVENT_PUBLISHER=kafka, wired automatically when kafka.enabled is true) on
+# the main deployment too, or the projector's Kafka topic never receives
+# events to consume.
+analytics:
+  enabled: false
+  # Directory (inside the image) of the analytical *.up.sql migrations the
+  # projector applies on start.
+  migrationsPath: "migrations/analytics"
+  database:
+    # cmd/netfulfil-projector and cmd/netfulfil-reports both read
+    # ANALYTICS_DATABASE_URL directly (see their main.go) -- unlike some
+    # siblings, this binary pair has no separate reader-role env var today,
+    # so there is deliberately one URL here, not a projector/reports pair.
+    url: ""
+    # Name of an existing Secret with an ANALYTICS_DATABASE_URL key. Takes
+    # precedence over url above.
+    existingSecret: ""
+  projector:
+    replicaCount: 1
+    # cmd/netfulfil-projector's own default ADMIN_ADDR (no port is exposed
+    # to a Service -- it is a pure consumer -- but the admin server still
+    # needs an address for its /healthz probe).
+    adminAddr: ":8091"
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  reports:
+    replicaCount: 1
+    # cmd/netfulfil-reports' own default HTTP_ADDR. NOTE this repo's reports
+    # binary defaults to :8092, matching its siblings' convention, but this
+    # value is read from the binary's actual source rather than assumed.
+    httpAddr: ":8092"
+    service:
+      type: ClusterIP
+      port: 80
+      targetPort: 8092
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+# --- MCP server (ADR 0003) ---
+# The Model Context Protocol server (cmd/mcp): a second deployable over the
+# same read use cases and OLTP database as the HTTP service, served over
+# Streamable HTTP at "/" and "/mcp" with a GET /healthz for the probes.
+# Disabled by default so existing releases are unaffected; set
+# mcp.enabled=true to deploy it.
+mcp:
+  enabled: false
+  replicaCount: 1
+  httpAddr: ":8090"
+  service:
+    type: ClusterIP
+    port: 8090
+    targetPort: 8090
+  # Overrides the reports base URL the get_acknowledgement_report tool
+  # calls. When empty and analytics.enabled=true, defaults to the
+  # in-cluster reports Service.
+  reportsBaseUrl: ""
+  extraEnv: []
   resources:
     limits:
       cpu: 500m
