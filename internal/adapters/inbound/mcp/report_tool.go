@@ -152,11 +152,7 @@ func GetAcknowledgementReportForTest(ctx context.Context, client ReportsClient, 
 	if in.From == "" || in.To == "" {
 		return AcknowledgementReportView{}, fmt.Errorf("from and to are required (RFC3339)")
 	}
-	return client.GetAcknowledgementReport(ctx, AcknowledgementReportQuery{
-		From:        in.From,
-		To:          in.To,
-		Granularity: in.Granularity,
-	})
+	return client.GetAcknowledgementReport(ctx, AcknowledgementReportQuery(in))
 }
 
 // registerReportTool adds the curated read-only acknowledgement-report
