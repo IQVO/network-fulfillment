@@ -4,7 +4,7 @@ slug: /adr/0001-retail-network-bounded-context
 title: "1. retail-network as its own organization: Open Host Service upstream of network-fulfillment"
 sidebar_label: "1. retail-network bounded context"
 sidebar_position: 1
-description: "ADR 0001 — why the ecosystem's own stand-in for an external retail network (not a real e-commerce retailer's SP-API) is a new, separate bounded context: one context (not a marketplace/sourcing split), Direct-Fulfillment-like protocol fidelity in the network's own vocabulary, a declared-plus-measured capability model, proportional-to-stock capacity sharing, release-on-reconciled-acceptance, and no auth."
+description: "ADR 0001 (Accepted) — why the ecosystem's own stand-in for an external retail network (not a real e-commerce retailer's SP-API) is a new, separate bounded context: one context (not a marketplace/sourcing split), Direct-Fulfillment-like protocol fidelity in the network's own vocabulary, a declared-plus-measured capability model, proportional-to-stock capacity sharing, release-on-reconciled-acceptance, and no auth."
 ---
 
 > **STAGING NOTE — read this before touching anything below.**
@@ -23,7 +23,7 @@ description: "ADR 0001 — why the ecosystem's own stand-in for an external reta
 
 ## Status
 
-Proposed. Companion to `network-fulfillment` ADR 0002 (drafted at
+**Accepted** (2026-09-26). Companion to `network-fulfillment` ADR 0002 (drafted at
 `network-fulfillment/docs/docs/adr/0002-retail-network-not-amazon-counterpart.md`
 in that repo's real ADR sequence). Neither is meaningful without the
 other: this record defines the organization `network-fulfillment` ADR

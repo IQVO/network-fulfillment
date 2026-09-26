@@ -4,14 +4,14 @@ slug: /adr/0002-retail-network-not-amazon-counterpart
 title: "2. The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API"
 sidebar_label: "2. retail-network, not the real network"
 sidebar_position: 2
-description: "ADR 0002 amends ADR 0001: the external retail fulfillment network this context is Conformist to is retail-network, a new service inside our own ecosystem playing that role — not an integration against a real e-commerce retailer's Selling Partner API. Renames the ACL adapter package, defers (not drops) a real SP-API adapter, and tightens the PII rule to zero ship-to data in this context at all."
+description: "ADR 0002 (Accepted) amends ADR 0001: the external retail fulfillment network this context is Conformist to is retail-network, a new service inside our own ecosystem playing that role — not an integration against a real e-commerce retailer's Selling Partner API. Renames the ACL adapter package, defers (not drops) a real SP-API adapter, and tightens the PII rule to zero ship-to data in this context at all."
 ---
 
 # 2. The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API
 
 ## Status
 
-Proposed. Companion to `retail-network` ADR 0001 (drafted at
+**Accepted** (2026-09-26). Companion to `retail-network` ADR 0001 (drafted at
 `docs/planning/retail-network-adr-0001-DRAFT-for-new-repo.md` in this
 repo, pending `retail-network`'s own creation as a repository in Phase 2
 of `2026-09-25_231500-retail-network-in-ecosystem.md`; move that file
