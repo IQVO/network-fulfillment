@@ -66,6 +66,12 @@ spec:
               value: {{ .Values.config.sweepInterval | quote }}
             - name: CORS_ALLOWED_ORIGINS
               value: {{ .Values.config.corsAllowedOrigins | quote }}
+            - name: EVENT_PUBLISHER
+              value: {{ .Values.config.eventPublisher | quote }}
+            {{- if .Values.kafka.enabled }}
+            - name: KAFKA_BROKERS
+              value: {{ .Values.kafka.brokers | quote }}
+            {{- end }}
             {{- if or .Values.database.url .Values.database.existingSecret }}
             # Set only when a database is configured. With no DATABASE_URL
             # the binary runs on its in-memory repo, which is what keeps a

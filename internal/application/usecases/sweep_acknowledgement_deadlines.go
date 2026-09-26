@@ -5,6 +5,7 @@ import (
 
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
+	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
 // SweepAcknowledgementDeadlines finds orders whose 24h acknowledgement
@@ -76,5 +77,13 @@ func (uc *SweepAcknowledgementDeadlines) missOne(ctx context.Context, o *network
 	if err := o.Reject(); err != nil {
 		return err
 	}
-	return uc.Orders.Save(ctx, o)
+	if err := uc.Orders.Save(ctx, o); err != nil {
+		return err
+	}
+	return uc.Events.Publish(ctx, shared.NetworkOrderRejected{
+		NetworkRef: o.NetworkRef(),
+		SiteId:     o.SiteId(),
+		Reason:     shared.RejectionReasonAcknowledgementDeadlineMissed,
+		At:         uc.Clock.Now(),
+	})
 }

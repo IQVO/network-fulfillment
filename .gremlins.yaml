@@ -27,5 +27,15 @@ unleash:
     # differs. See HARNESS.md's mutation-testing section for the
     # tagless-switch-under-reports pitfall before assuming a low number
     # means missing tests.
+    #
+    # Measured today on ./internal/domain/networkorder (`gremlins unleash
+    # ./internal/domain/networkorder`, single worker, after the 4 domain
+    # events + their use-case wiring landed): Killed 14, Lived 0,
+    # Not covered 1 (ARITHMETIC_BASE on the AcknowledgementWindow const
+    # declaration itself -- a const has no runtime coverage line to
+    # mutate against, so this one is not closable by adding tests).
+    # Test efficacy 100.00%, mutator coverage 93.33%. Thresholds below
+    # sit strictly below both, with headroom for legitimate new mutants
+    # as the domain grows rather than sitting right at the wire.
     efficacy: 99
     mutant-coverage: 92

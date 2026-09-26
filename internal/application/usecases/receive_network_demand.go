@@ -80,6 +80,9 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 	if err != nil {
 		return nil, err
 	}
+	if err := uc.publishReceived(ctx, o, len(lines), now); err != nil {
+		return nil, err
+	}
 
 	result, err := uc.Planner.RaiseHeldOrder(ctx, contract.HeldOrderRequest{
 		SiteId:         o.SiteId(),
@@ -91,9 +94,25 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 	}
 
 	if !result.Feasible {
-		return uc.reject(ctx, o, &result.LocalOrderId)
+		return uc.reject(ctx, o, &result.LocalOrderId, shared.RejectionReasonInfeasibleDeadline)
 	}
 	return uc.acknowledge(ctx, o, result)
+}
+
+// publishReceived raises NetworkOrderReceived. lineCount is passed in
+// separately from o.Lines() rather than derived from it because
+// ReceiveUntranslatable's order is deliberately lineless (see its own doc
+// comment) — the event still needs to say "zero lines translated", not
+// "translation was never attempted".
+func (uc *ReceiveNetworkDemand) publishReceived(ctx context.Context, o *networkorder.NetworkOrder, lineCount int, now time.Time) error {
+	return uc.Events.Publish(ctx, shared.NetworkOrderReceived{
+		NetworkRef:     o.NetworkRef(),
+		SiteId:         o.SiteId(),
+		RequiredShipBy: o.RequiredShipBy(),
+		AcknowledgeBy:  o.AcknowledgeBy(),
+		LineCount:      lineCount,
+		At:             now,
+	})
 }
 
 // translate maps every line into our own vocabulary, failing on the
@@ -123,7 +142,10 @@ func (uc *ReceiveNetworkDemand) rejectUntranslatable(ctx context.Context, demand
 	if err != nil {
 		return nil, err
 	}
-	return uc.reject(ctx, o, nil)
+	if err := uc.publishReceived(ctx, o, 0, now); err != nil {
+		return nil, err
+	}
+	return uc.reject(ctx, o, nil, shared.RejectionReasonUntranslatableSKU)
 }
 
 // reject answers the network in the negative and releases whatever we
@@ -134,7 +156,7 @@ func (uc *ReceiveNetworkDemand) rejectUntranslatable(ctx context.Context, demand
 // a cancel skipped on an error path leaves inventory reserved for demand
 // we have already refused — the orphaned-hold failure both ADRs flagged
 // as their honest open gap.
-func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.NetworkOrder, local *shared.LocalOrderId) (*networkorder.NetworkOrder, error) {
+func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.NetworkOrder, local *shared.LocalOrderId, reason shared.RejectionReason) (*networkorder.NetworkOrder, error) {
 	if local != nil {
 		if err := uc.Planner.CancelHeldOrder(ctx, *local); err != nil {
 			return nil, fmt.Errorf("cancel held order: %w", err)
@@ -148,6 +170,14 @@ func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.Netw
 	}
 	if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), false); err != nil {
 		return nil, fmt.Errorf("submit rejection: %w", err)
+	}
+	if err := uc.Events.Publish(ctx, shared.NetworkOrderRejected{
+		NetworkRef: o.NetworkRef(),
+		SiteId:     o.SiteId(),
+		Reason:     reason,
+		At:         uc.Clock.Now(),
+	}); err != nil {
+		return nil, fmt.Errorf("publish rejection: %w", err)
 	}
 	return o, nil
 }
@@ -176,6 +206,15 @@ func (uc *ReceiveNetworkDemand) acknowledge(ctx context.Context, o *networkorder
 	}
 	if err := uc.Planner.ReleaseHeldOrder(ctx, result.LocalOrderId); err != nil {
 		return nil, fmt.Errorf("release held order: %w", err)
+	}
+	if err := uc.Events.Publish(ctx, shared.NetworkOrderAcknowledged{
+		NetworkRef:   o.NetworkRef(),
+		SiteId:       o.SiteId(),
+		LocalOrderId: result.LocalOrderId,
+		ReceivedAt:   o.ReceivedAt(),
+		At:           uc.Clock.Now(),
+	}); err != nil {
+		return nil, fmt.Errorf("publish acknowledgement: %w", err)
 	}
 	return o, nil
 }

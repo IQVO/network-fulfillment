@@ -28,6 +28,9 @@ func (r *failingRepo) FindByRef(context.Context, shared.NetworkRef) (*networkord
 func (r *failingRepo) ListUnanswered(context.Context) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.listErr
 }
+func (r *failingRepo) ListAll(context.Context) ([]*networkorder.NetworkOrder, error) {
+	return nil, r.listErr
+}
 
 func TestReceive_RepositoryLookupFailureAborts(t *testing.T) {
 	f := newFixture(true)

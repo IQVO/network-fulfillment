@@ -14,11 +14,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
+	outboundevents "github.com/claudioed/network-fulfillment/internal/adapters/outbound/events"
+	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
@@ -31,11 +36,57 @@ type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
-type logPublisher struct{ logger *slog.Logger }
+// fanOutPublisher forwards every domain event to each wrapped
+// EventPublisher in order, so a single EVENT_PUBLISHER=kafka run publishes
+// to BOTH the integration topic and the analytics topic. A publish
+// failure on any target aborts and is returned, rather than silently
+// dropping a stream.
+type fanOutPublisher []ports.EventPublisher
 
-func (p logPublisher) Publish(_ context.Context, event any) error {
-	p.logger.Info("integration event", "event", event)
+func (f fanOutPublisher) Publish(ctx context.Context, event any) error {
+	for _, p := range f {
+		if err := p.Publish(ctx, event); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// wireEventPublisher chooses the outbound EventPublisher: EVENT_PUBLISHER=kafka
+// fans out to both the integration topic (warehouse.network-fulfillment.events)
+// and the analytics topic (warehouse.network-fulfillment.analytics); unset (the
+// default) keeps the existing log publisher, matching the fleet-wide
+// convention (see facility-layout's cmd/facility/main.go). Kafka is
+// selected independently of the order-repository backend, so the
+// Published Language reaches the broker whether the store is Postgres or
+// in-memory.
+func wireEventPublisher(logger *slog.Logger) (ports.EventPublisher, func()) {
+	if os.Getenv("EVENT_PUBLISHER") != "kafka" {
+		return outboundevents.NewLogPublisher(logger), func() {}
+	}
+
+	brokers := strings.Split(kafkaBrokers(), ",")
+	integration := outboundkafka.NewPublisher(brokers, uuidLike)
+	analytics := outboundkafka.NewAnalyticsPublisher(brokers, uuidLike)
+	logger.Info("event publisher configured", "publisher", "kafka",
+		"integration_topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic, "brokers", brokers)
+
+	pub := fanOutPublisher{integration, analytics}
+	closeFn := func() {
+		_ = integration.Close()
+		_ = analytics.Close()
+	}
+	return pub, closeFn
+}
+
+// uuidLike mints the event_id stamped on each published event.
+func uuidLike() string { return uuid.NewString() }
+
+func kafkaBrokers() string {
+	if v := os.Getenv("KAFKA_BROKERS"); v != "" {
+		return v
+	}
+	return "localhost:9092"
 }
 
 func main() {
@@ -102,18 +153,21 @@ func main() {
 	}
 	planner := ordermanagement.NewPlanner(omBase, nil)
 
+	eventPublisher, closeEventPublisher := wireEventPublisher(logger)
+	defer closeEventPublisher()
+
 	receive := &usecases.ReceiveNetworkDemand{
 		Orders:      orders,
 		Gateway:     gateway,
 		Planner:     planner,
 		Translation: translation,
-		Events:      logPublisher{logger: logger},
+		Events:      eventPublisher,
 		Clock:       systemClock{},
 	}
 	sweep := &usecases.SweepAcknowledgementDeadlines{
 		Orders:  orders,
 		Planner: planner,
-		Events:  logPublisher{logger: logger},
+		Events:  eventPublisher,
 		Clock:   systemClock{},
 	}
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
