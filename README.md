@@ -67,6 +67,16 @@ What exists today:
   credentials are provided (checked by `charts/network-fulfillment/tests/`).
   It is deployed to the kind cluster by `warehouse-infra`, and Kong serves it
   at `/api/network-fulfillment`.
+- **Kafka + transactional outbox (ADR 0003)** — `EVENT_PUBLISHER=kafka` fans
+  every domain event out to both the integration topic
+  (`warehouse.network-fulfillment.events`) and the analytics topic
+  (`warehouse.network-fulfillment.analytics`). With `DATABASE_URL` unset both
+  are published directly (no transaction to bind them to — the in-memory dev
+  mode); with `DATABASE_URL` set, saving the aggregate and enqueuing its
+  event(s) for both topics happen in one Postgres transaction (the
+  `outbox_events` table), and a background relay drains it to the broker.
+  The default (`EVENT_PUBLISHER` unset) still publishes to a log-only
+  publisher.
 
 Not built yet:
 
@@ -75,8 +85,6 @@ Not built yet:
 - **`CapabilityOffer`** / throughput-constrained advertised availability,
   and shipment confirmation. `NetworkOrder.ConfirmShipment` exists in the
   domain, but no use case calls it.
-- **Kafka**: integration events go to a log-only publisher (`cmd/netfulfil`).
-  Nothing is published to or consumed from Kafka.
 - **Customer PII**: no ship-to data is modelled or stored yet.
 - No `web/` remote, no MCP server, no BDD `features/`.
 
@@ -188,6 +196,9 @@ credential.
 | `POLL_INTERVAL` | `1m` | Go duration |
 | `SWEEP_INTERVAL` | `1m` | Go duration |
 | `PORT` | `8080` | HTTP listen port |
+| `EVENT_PUBLISHER` | `log` (default) | `kafka` publishes to both topics; with `DATABASE_URL` set this activates the transactional outbox (ADR 0003) instead of publishing directly |
+| `KAFKA_BROKERS` | `localhost:9092` | comma-separated broker list, only read when `EVENT_PUBLISHER=kafka` |
+| `OUTBOX_RELAY_INTERVAL` | `1s` | Go duration; sleep between empty outbox relay passes (outbox mode only) |
 
 ## Local quality gate
 

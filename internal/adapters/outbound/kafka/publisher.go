@@ -41,20 +41,48 @@ type Writer interface {
 	WriteMessages(ctx context.Context, msgs ...kafkago.Message) error
 }
 
+// Encoded is one wire-ready message, produced by Encode without touching
+// the broker. Topic is set explicitly (rather than pinned on the
+// Writer): the outbox relay's Sink has no fixed topic of its own, and a
+// single relay pass may forward rows destined for either the
+// integration topic or the analytics topic, so the topic must travel
+// per-message.
+type Encoded struct {
+	Topic     string
+	EventType string
+	Key       []byte
+	Value     []byte
+	Headers   []kafkago.Header
+}
+
+// Encoder turns one or more domain events into their Kafka wire form for
+// one topic, without sending them. Both the integration publisher (this
+// file) and the analytics publisher (analytics_publisher.go) implement
+// it, so postgres.OutboxPublisher can fan a single event out to several
+// topics inside one transaction.
+type Encoder interface {
+	Encode(ctx context.Context, events ...shared.DomainEvent) ([]Encoded, error)
+}
+
 // Publisher publishes network-fulfillment domain events onto Kafka. It
-// satisfies ports.EventPublisher.
+// satisfies ports.EventPublisher, and its Send method also serves as the
+// outbox relay's Sink (the underlying Writer carries no fixed topic — see
+// NewPublisher — so one Publisher instance can relay rows for both the
+// integration and the analytics topic).
 type Publisher struct {
 	Writer Writer
 	NewId  func() string
 }
 
-// NewPublisher constructs a Publisher writing to Topic on brokers. newId
-// mints the envelope event_id (e.g. a UUID).
+// NewPublisher constructs a Publisher writing to brokers. newId mints the
+// envelope event_id (e.g. a UUID). The underlying Writer carries NO fixed
+// topic: Encode always stamps Topic explicitly onto the Encoded message,
+// so the same Writer can carry both integration and analytics traffic
+// when this Publisher is reused as the relay's Sink.
 func NewPublisher(brokers []string, newId func() string) *Publisher {
 	return &Publisher{
 		Writer: &kafkago.Writer{
 			Addr:                   kafkago.TCP(brokers...),
-			Topic:                  Topic,
 			Balancer:               &kafkago.LeastBytes{},
 			AllowAutoTopicCreation: true,
 		},
@@ -62,38 +90,70 @@ func NewPublisher(brokers []string, newId func() string) *Publisher {
 	}
 }
 
-// Publish emits event onto Topic wrapped in an Envelope. event must be one
-// of this context's shared.DomainEvent types (a *usecases.recordingPublisher
-// in tests aside, that is the only thing the application layer ever hands
-// an EventPublisher); a value that is not is rejected rather than
-// published headerless.
+// Encode translates events into their integration-topic wire form,
+// without sending them. Each event must implement shared.DomainEvent (a
+// *usecases.recordingPublisher in tests aside, that is the only thing the
+// application layer ever hands an EventPublisher); a value that is not is
+// rejected rather than published headerless.
+func (p *Publisher) Encode(_ context.Context, events ...shared.DomainEvent) ([]Encoded, error) {
+	out := make([]Encoded, 0, len(events))
+	for _, event := range events {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return nil, fmt.Errorf("kafka: marshal event data: %w", err)
+		}
+		env := Envelope{
+			EventId:    p.NewId(),
+			EventType:  event.EventName(),
+			OccurredAt: event.OccurredAt(),
+			Source:     "network-fulfillment",
+			Data:       data,
+		}
+		payload, err := json.Marshal(env)
+		if err != nil {
+			return nil, fmt.Errorf("kafka: marshal envelope: %w", err)
+		}
+		out = append(out, Encoded{
+			Topic:     Topic,
+			EventType: event.EventName(),
+			Key:       []byte(aggregateKey(event)),
+			Value:     payload,
+		})
+	}
+	return out, nil
+}
+
+// Publish emits event onto Topic wrapped in an Envelope. event must
+// implement shared.DomainEvent; a value that does not is rejected rather
+// than published headerless.
 func (p *Publisher) Publish(ctx context.Context, event any) error {
 	de, ok := event.(shared.DomainEvent)
 	if !ok {
 		return fmt.Errorf("kafka: event %T does not implement shared.DomainEvent", event)
 	}
-
-	data, err := json.Marshal(event)
+	encoded, err := p.Encode(ctx, de)
 	if err != nil {
-		return fmt.Errorf("kafka: marshal event data: %w", err)
+		return err
 	}
-	env := Envelope{
-		EventId:    p.NewId(),
-		EventType:  de.EventName(),
-		OccurredAt: de.OccurredAt(),
-		Source:     "network-fulfillment",
-		Data:       data,
-	}
-	payload, err := json.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("kafka: marshal envelope: %w", err)
-	}
-
-	msg := kafkago.Message{Key: []byte(aggregateKey(de)), Value: payload}
-	if err := p.Writer.WriteMessages(ctx, msg); err != nil {
+	if err := p.Send(ctx, encoded...); err != nil {
 		return fmt.Errorf("kafka: publish %s: %w", de.EventName(), err)
 	}
 	return nil
+}
+
+// Send writes already-encoded messages to their respective enc.Topic in
+// one WriteMessages call. This is what the outbox relay calls (via the
+// Sink interface) to forward drained rows to the broker; it is also
+// reused by Publish for the direct (no-outbox) path.
+func (p *Publisher) Send(ctx context.Context, encoded ...Encoded) error {
+	if len(encoded) == 0 {
+		return nil
+	}
+	msgs := make([]kafkago.Message, len(encoded))
+	for i, enc := range encoded {
+		msgs[i] = kafkago.Message{Topic: enc.Topic, Key: enc.Key, Value: enc.Value, Headers: enc.Headers}
+	}
+	return p.Writer.WriteMessages(ctx, msgs...)
 }
 
 // aggregateKey returns the partition/ordering key for an event: the

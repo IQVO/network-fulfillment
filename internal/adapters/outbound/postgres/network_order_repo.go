@@ -34,12 +34,17 @@ func NewNetworkOrderRepo(pool *pgxpool.Pool) *NetworkOrderRepo {
 // the network set them and we may not move them. In particular
 // acknowledge_by must never be rewritten by a later save, or every
 // re-save would silently extend the SLA clock the sweep is measuring.
+//
+// Save opens its OWN transaction when called standalone, but JOINS an
+// outer one when ctx already carries one (beginOrJoin) — the latter is
+// what happens inside UnitOfWork.Execute, so the order row and its
+// outbox row(s) commit together (transactional outbox).
 func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrder) error {
-	tx, err := r.pool.Begin(ctx)
+	tx, commit, rollback, err := beginOrJoin(ctx, r.pool)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = rollback(ctx) }()
 
 	var localOrderId *string
 	if id := o.LocalOrderId(); id != nil {
@@ -84,7 +89,7 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 		}
 	}
 
-	return tx.Commit(ctx)
+	return commit(ctx)
 }
 
 // FindByRef returns (nil, nil) when no order has this ref — "not found"

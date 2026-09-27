@@ -135,6 +135,12 @@ func (p *selectiveFailPublisher) Publish(context.Context, any) error {
 	return p.err
 }
 
+// A publish failure on reject's own event now happens INSIDE the same
+// atomic Save+Publish scope as the state transition (the transactional
+// outbox, ADR NNNN): the network must never be told "no" for a rejection
+// that is not yet durably recorded, and inventory must not be
+// commitment-released for demand whose refusal never actually landed.
+// So neither the gateway submission nor anything after it may run.
 func TestReceive_RejectOwnPublishFailsAfterReceivedPublishSucceeds(t *testing.T) {
 	f := newFixture(false) // infeasible -> reject path
 	uc := f.receive()
@@ -147,15 +153,22 @@ func TestReceive_RejectOwnPublishFailsAfterReceivedPublishSucceeds(t *testing.T)
 	if pub.calls != 2 {
 		t.Fatalf("publish calls = %d, want 2 (Received succeeded, Rejected failed)", pub.calls)
 	}
-	// The rejection was already committed to the repo and the network
-	// before the publish failed — that ordering is the whole point of
-	// publish being the LAST step.
+	// The held order was already cancelled (that happens before the
+	// atomic scope), but the rejection itself was rolled back with its
+	// event, so the network was never told.
+	if got := f.planner.calls; !equal(got, []string{"raise", "cancel"}) {
+		t.Fatalf("planner calls = %v, want [raise cancel]", got)
+	}
 	accepted, submitted := f.gateway.Acknowledgement("po-1")
-	if !submitted || accepted {
-		t.Fatalf("acknowledgement submitted=%v accepted=%v, want true/false even though the rejection publish failed", submitted, accepted)
+	if submitted || accepted {
+		t.Fatalf("acknowledgement submitted=%v accepted=%v, want false/false: a publish failure must roll back before the network is ever told", submitted, accepted)
 	}
 }
 
+// Same atomicity guarantee as the reject case above, for acknowledge:
+// a publish failure on the acknowledgement event must prevent the
+// gateway submission AND the held-order release, not merely happen to
+// race past them.
 func TestReceive_AcknowledgeOwnPublishFailsAfterReceivedPublishSucceeds(t *testing.T) {
 	f := newFixture(true) // feasible -> acknowledge path
 	uc := f.receive()
@@ -168,11 +181,15 @@ func TestReceive_AcknowledgeOwnPublishFailsAfterReceivedPublishSucceeds(t *testi
 	if pub.calls != 2 {
 		t.Fatalf("publish calls = %d, want 2 (Received succeeded, Acknowledged failed)", pub.calls)
 	}
-	// Release already ran: it precedes the publish on purpose, and a
-	// publish failure must not be mistaken for grounds to have skipped
-	// it.
-	if got := f.planner.calls; !equal(got, []string{"raise", "release"}) {
-		t.Fatalf("planner calls = %v, want [raise release] even though the acknowledgement publish failed", got)
+	// Release must NOT have run: it comes after the atomic Save+Publish
+	// scope now, precisely so a publish failure cannot be mistaken for
+	// grounds to have released inventory the acknowledgement was never
+	// durably recorded for.
+	if got := f.planner.calls; !equal(got, []string{"raise"}) {
+		t.Fatalf("planner calls = %v, want [raise] (release must not run before the acknowledgement durably commits)", got)
+	}
+	if _, submitted := f.gateway.Acknowledgement("po-1"); submitted {
+		t.Fatal("no acknowledgement may reach the network before its event durably commits")
 	}
 }
 
