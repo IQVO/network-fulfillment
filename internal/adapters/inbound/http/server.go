@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
@@ -44,6 +46,16 @@ type Server struct {
 	Poller      StatsSource
 	Clock       ports.Clock
 	NetworkMode string
+	// Readiness backs GET /readyz (ADR 0004 §graceful shutdown). A nil
+	// Readiness (the zero value, and every pre-existing caller/test)
+	// means /readyz always reports ready — see Readiness's own doc
+	// comment.
+	Readiness *Readiness
+	// MetricsRegistry, when non-nil, backs GET /metrics (ADR 0004's
+	// circuit_breaker_state gauge). A nil registry means /metrics is
+	// simply not registered — every pre-existing caller/test that does
+	// not care about metrics is unaffected.
+	MetricsRegistry *prometheus.Registry
 }
 
 // Routes returns this adapter's handler.
@@ -53,9 +65,13 @@ type Server struct {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /network-orders/{networkRef}", s.handleGetNetworkOrder)
 	mux.HandleFunc("GET /network-orders", s.handleListUnanswered)
 	mux.HandleFunc("GET /inbound-status", s.handleInboundStatus)
+	if s.MetricsRegistry != nil {
+		mux.Handle("GET /metrics", promhttp.HandlerFor(s.MetricsRegistry, promhttp.HandlerOpts{}))
+	}
 	return corsMiddleware()(mux)
 }
 
