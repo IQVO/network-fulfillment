@@ -28,12 +28,21 @@ var ErrOrderNotFound = errors.New("network order not found")
 //     untranslatable product rejects the whole order — we cannot
 //     acknowledge in full what we cannot identify in full, and the
 //     network's protocol has no partial acknowledgement.
-//  2. RAISE A HELD ORDER in order-management and ask it whether the
+//  2. RECORD receipt: Save the aggregate and Publish NetworkOrderReceived
+//     in one atomic scope (ADR NNNN, transactional outbox — see
+//     saveAndPublishReceived). The store and the topic can never
+//     disagree about whether we received this demand.
+//  3. RAISE A HELD ORDER in order-management and ask it whether the
 //     deadline is feasible. Held, because we must know whether we CAN
 //     fulfil before answering, and must not have put work on the floor
 //     for demand we may still reject.
-//  3. ANSWER the network: acknowledge if feasible, reject if not.
-//  4. COMMIT: release the held order on acknowledgement, cancel it on
+//  4. RECORD the answer: the state transition, its Save and its Publish
+//     commit together in the SAME atomic scope, again via the outbox —
+//     so the answer given to the network in step 5 is always backed by
+//     a durably enqueued event, never a row with no corresponding event.
+//  5. ANSWER the network: acknowledge if feasible, reject if not — only
+//     once step 4 has durably committed.
+//  6. COMMIT: release the held order on acknowledgement, cancel it on
 //     rejection, so inventory reservations never outlive the decision.
 //
 // Feasibility is ASKED, never computed here (ADR 0001 §7). This use case
@@ -47,6 +56,11 @@ type ReceiveNetworkDemand struct {
 	Translation ports.ProductTranslation
 	Events      ports.EventPublisher
 	Clock       ports.Clock
+	// UnitOfWork brackets every Save+Publish pair this use case makes,
+	// atomically (transactional outbox). Optional: a nil value means "no
+	// transactional backing" and the two calls run back to back, which
+	// is exactly the in-memory / log-publisher dev configuration.
+	UnitOfWork ports.UnitOfWork
 }
 
 func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.InboundDemand) (*networkorder.NetworkOrder, error) {
@@ -80,7 +94,7 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.publishReceived(ctx, o, len(lines), now); err != nil {
+	if err := uc.saveAndPublishReceived(ctx, o, len(lines), now); err != nil {
 		return nil, err
 	}
 
@@ -99,19 +113,27 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 	return uc.acknowledge(ctx, o, result)
 }
 
-// publishReceived raises NetworkOrderReceived. lineCount is passed in
-// separately from o.Lines() rather than derived from it because
-// ReceiveUntranslatable's order is deliberately lineless (see its own doc
-// comment) — the event still needs to say "zero lines translated", not
-// "translation was never attempted".
-func (uc *ReceiveNetworkDemand) publishReceived(ctx context.Context, o *networkorder.NetworkOrder, lineCount int, now time.Time) error {
-	return uc.Events.Publish(ctx, shared.NetworkOrderReceived{
-		NetworkRef:     o.NetworkRef(),
-		SiteId:         o.SiteId(),
-		RequiredShipBy: o.RequiredShipBy(),
-		AcknowledgeBy:  o.AcknowledgeBy(),
-		LineCount:      lineCount,
-		At:             now,
+// saveAndPublishReceived persists o and publishes NetworkOrderReceived in
+// one atomic scope: the aggregate's very first row and the fact "the
+// network sent us this, and the acknowledgement clock is now running"
+// commit together or not at all. lineCount is passed in separately from
+// o.Lines() rather than derived from it because ReceiveUntranslatable's
+// order is deliberately lineless (see its own doc comment) — the event
+// still needs to say "zero lines translated", not "translation was never
+// attempted".
+func (uc *ReceiveNetworkDemand) saveAndPublishReceived(ctx context.Context, o *networkorder.NetworkOrder, lineCount int, now time.Time) error {
+	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.Orders.Save(ctx, o); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shared.NetworkOrderReceived{
+			NetworkRef:     o.NetworkRef(),
+			SiteId:         o.SiteId(),
+			RequiredShipBy: o.RequiredShipBy(),
+			AcknowledgeBy:  o.AcknowledgeBy(),
+			LineCount:      lineCount,
+			At:             now,
+		})
 	})
 }
 
@@ -142,7 +164,7 @@ func (uc *ReceiveNetworkDemand) rejectUntranslatable(ctx context.Context, demand
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.publishReceived(ctx, o, 0, now); err != nil {
+	if err := uc.saveAndPublishReceived(ctx, o, 0, now); err != nil {
 		return nil, err
 	}
 	return uc.reject(ctx, o, nil, shared.RejectionReasonUntranslatableSKU)
@@ -151,11 +173,15 @@ func (uc *ReceiveNetworkDemand) rejectUntranslatable(ctx context.Context, demand
 // reject answers the network in the negative and releases whatever we
 // were holding.
 //
-// The local order is cancelled BEFORE the network is told, deliberately:
+// CancelHeldOrder runs before the aggregate is even mutated, deliberately:
 // if the submission fails we will retry it and reach here again, whereas
 // a cancel skipped on an error path leaves inventory reserved for demand
 // we have already refused — the orphaned-hold failure both ADRs flagged
-// as their honest open gap.
+// as their honest open gap. The state transition, its Save and its
+// Publish then commit together in one atomic scope: the network is only
+// ever told "no" (SubmitAcknowledgement below) once that record is
+// durable, so a submission failure can safely be retried without risking
+// a duplicate or contradictory event.
 func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.NetworkOrder, local *shared.LocalOrderId, reason shared.RejectionReason) (*networkorder.NetworkOrder, error) {
 	if local != nil {
 		if err := uc.Planner.CancelHeldOrder(ctx, *local); err != nil {
@@ -165,32 +191,35 @@ func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.Netw
 	if err := o.Reject(); err != nil {
 		return nil, err
 	}
-	if err := uc.Orders.Save(ctx, o); err != nil {
+	if err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.Orders.Save(ctx, o); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shared.NetworkOrderRejected{
+			NetworkRef: o.NetworkRef(),
+			SiteId:     o.SiteId(),
+			Reason:     reason,
+			At:         uc.Clock.Now(),
+		})
+	}); err != nil {
 		return nil, err
 	}
 	if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), false); err != nil {
 		return nil, fmt.Errorf("submit rejection: %w", err)
-	}
-	if err := uc.Events.Publish(ctx, shared.NetworkOrderRejected{
-		NetworkRef: o.NetworkRef(),
-		SiteId:     o.SiteId(),
-		Reason:     reason,
-		At:         uc.Clock.Now(),
-	}); err != nil {
-		return nil, fmt.Errorf("publish rejection: %w", err)
 	}
 	return o, nil
 }
 
 // acknowledge commits us to the order and puts the work on the floor.
 //
-// Order of operations is the opposite of reject's, and for the same
-// reason — the safe side of a failure. The local order is linked and
-// SAVED before the network is told, so a crash between the two leaves a
-// recoverable record rather than an acknowledgement the network believes
-// and we have no trace of. Release comes last: it is the irreversible
-// step, and nothing should reach the floor until everything that can
-// fail has.
+// The state transition, its Save and its Publish commit together in one
+// atomic scope BEFORE the network is told or the hold released: a crash
+// before that scope commits leaves nothing behind for a re-poll to answer
+// twice, and the network is never told yes for a fact that is not yet
+// durably recorded. Release is still the LAST step of all: it is the
+// irreversible one, and nothing reaches the floor until every fallible
+// step before it — including the record and the network submission — has
+// already succeeded.
 func (uc *ReceiveNetworkDemand) acknowledge(ctx context.Context, o *networkorder.NetworkOrder, result contract.HeldOrderResult) (*networkorder.NetworkOrder, error) {
 	if err := o.Acknowledge(); err != nil {
 		return nil, err
@@ -198,7 +227,18 @@ func (uc *ReceiveNetworkDemand) acknowledge(ctx context.Context, o *networkorder
 	if err := o.LinkLocalOrder(result.LocalOrderId); err != nil {
 		return nil, err
 	}
-	if err := uc.Orders.Save(ctx, o); err != nil {
+	if err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.Orders.Save(ctx, o); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shared.NetworkOrderAcknowledged{
+			NetworkRef:   o.NetworkRef(),
+			SiteId:       o.SiteId(),
+			LocalOrderId: result.LocalOrderId,
+			ReceivedAt:   o.ReceivedAt(),
+			At:           uc.Clock.Now(),
+		})
+	}); err != nil {
 		return nil, err
 	}
 	if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), true); err != nil {
@@ -206,15 +246,6 @@ func (uc *ReceiveNetworkDemand) acknowledge(ctx context.Context, o *networkorder
 	}
 	if err := uc.Planner.ReleaseHeldOrder(ctx, result.LocalOrderId); err != nil {
 		return nil, fmt.Errorf("release held order: %w", err)
-	}
-	if err := uc.Events.Publish(ctx, shared.NetworkOrderAcknowledged{
-		NetworkRef:   o.NetworkRef(),
-		SiteId:       o.SiteId(),
-		LocalOrderId: result.LocalOrderId,
-		ReceivedAt:   o.ReceivedAt(),
-		At:           uc.Clock.Now(),
-	}); err != nil {
-		return nil, fmt.Errorf("publish acknowledgement: %w", err)
 	}
 	return o, nil
 }

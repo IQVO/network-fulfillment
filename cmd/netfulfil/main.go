@@ -20,6 +20,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	outboundevents "github.com/claudioed/network-fulfillment/internal/adapters/outbound/events"
@@ -52,31 +54,51 @@ func (f fanOutPublisher) Publish(ctx context.Context, event any) error {
 	return nil
 }
 
-// wireEventPublisher chooses the outbound EventPublisher: EVENT_PUBLISHER=kafka
-// fans out to both the integration topic (warehouse.network-fulfillment.events)
-// and the analytics topic (warehouse.network-fulfillment.analytics); unset (the
-// default) keeps the existing log publisher, matching the fleet-wide
-// convention (see facility-layout's cmd/facility/main.go). Kafka is
-// selected independently of the order-repository backend, so the
-// Published Language reaches the broker whether the store is Postgres or
-// in-memory.
-func wireEventPublisher(logger *slog.Logger) (ports.EventPublisher, func()) {
+// wireEventPublisher chooses the outbound EventPublisher.
+//
+// EVENT_PUBLISHER unset (the default) keeps the existing log publisher,
+// matching the fleet-wide convention (see facility-layout's
+// cmd/facility/main.go). EVENT_PUBLISHER=kafka fans out to both the
+// integration topic (warehouse.network-fulfillment.events) and the
+// analytics topic (warehouse.network-fulfillment.analytics):
+//
+//   - with pool == nil (DATABASE_URL unset) both topics are written
+//     DIRECTLY — there is no transaction to bind them to, matching this
+//     service's in-memory dev mode.
+//   - with pool != nil (DATABASE_URL set) both are instead enqueued into
+//     the transactional outbox (ADR 0003) in the SAME Postgres
+//     transaction as the aggregate write, and a non-nil *OutboxRelay is
+//     returned for the caller to run alongside the HTTP server. The
+//     store and the two topics can then never diverge.
+func wireEventPublisher(pool *pgxpool.Pool, logger *slog.Logger) (ports.EventPublisher, *postgres.OutboxRelay, func()) {
 	if os.Getenv("EVENT_PUBLISHER") != "kafka" {
-		return outboundevents.NewLogPublisher(logger), func() {}
+		return outboundevents.NewLogPublisher(logger), nil, func() {}
 	}
 
 	brokers := strings.Split(kafkaBrokers(), ",")
 	integration := outboundkafka.NewPublisher(brokers, uuidLike)
 	analytics := outboundkafka.NewAnalyticsPublisher(brokers, uuidLike)
-	logger.Info("event publisher configured", "publisher", "kafka",
-		"integration_topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic, "brokers", brokers)
-
-	pub := fanOutPublisher{integration, analytics}
 	closeFn := func() {
 		_ = integration.Close()
 		_ = analytics.Close()
 	}
-	return pub, closeFn
+
+	if pool == nil {
+		logger.Info("event publisher configured", "publisher", "kafka", "mode", "direct",
+			"integration_topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic, "brokers", brokers)
+		return fanOutPublisher{integration, analytics}, nil, closeFn
+	}
+
+	logger.Info("event publisher configured", "publisher", "kafka", "mode", "outbox",
+		"integration_topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic, "brokers", brokers)
+	outboxPublisher := postgres.NewOutboxPublisher(pool, integration, analytics)
+	// Any of the two Kafka publishers can serve as the relay's Sink: both
+	// share the same underlying Writer shape (no fixed topic; Send stamps
+	// enc.Topic per message), so one relay drains rows bound for either
+	// topic without needing its own third adapter.
+	relay := postgres.NewOutboxRelay(pool, integration, logger,
+		postgres.WithInterval(durationEnv("OUTBOX_RELAY_INTERVAL", time.Second)))
+	return outboxPublisher, relay, closeFn
 }
 
 // uuidLike mints the event_id stamped on each published event.
@@ -87,6 +109,21 @@ func kafkaBrokers() string {
 		return v
 	}
 	return "localhost:9092"
+}
+
+// durationEnv parses key as a time.Duration, falling back on absence or a
+// malformed value (logged only implicitly: the relay interval is a
+// tuning knob, not a contract worth failing boot over).
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 func main() {
@@ -136,7 +173,7 @@ func main() {
 	// path above this line may os.Exit freely, whereas one below it would
 	// skip `defer closeOrders()` and leak the pool. The dictionary needs
 	// no database, so there is no reason for it to sit after one.
-	orders, closeOrders, err := wireOrders(context.Background(), logger)
+	orders, pool, closeOrders, err := wireOrders(context.Background(), logger)
 	if err != nil {
 		// Same reasoning as the gateway above: a deployment that asked
 		// for a database and silently got an in-memory map would look
@@ -153,8 +190,16 @@ func main() {
 	}
 	planner := ordermanagement.NewPlanner(omBase, nil)
 
-	eventPublisher, closeEventPublisher := wireEventPublisher(logger)
+	eventPublisher, relay, closeEventPublisher := wireEventPublisher(pool, logger)
 	defer closeEventPublisher()
+
+	// The UnitOfWork is nil exactly when pool is (in-memory mode): the
+	// use cases treat that as "no transactional backing" and run
+	// Save+Publish back to back, unchanged from before this rollout.
+	var uow ports.UnitOfWork
+	if pool != nil {
+		uow = postgres.NewUnitOfWork(pool)
+	}
 
 	receive := &usecases.ReceiveNetworkDemand{
 		Orders:      orders,
@@ -163,12 +208,14 @@ func main() {
 		Translation: translation,
 		Events:      eventPublisher,
 		Clock:       systemClock{},
+		UnitOfWork:  uow,
 	}
 	sweep := &usecases.SweepAcknowledgementDeadlines{
-		Orders:  orders,
-		Planner: planner,
-		Events:  eventPublisher,
-		Clock:   systemClock{},
+		Orders:     orders,
+		Planner:    planner,
+		Events:     eventPublisher,
+		Clock:      systemClock{},
+		UnitOfWork: uow,
 	}
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
@@ -196,6 +243,24 @@ func main() {
 	go runSweep(ctx, sweep, logger)
 	go inbound.Run(ctx)
 
+	// The outbox relay (ADR 0003) runs alongside the HTTP server in the
+	// same process, draining outbox_events onto Kafka. It is only wired
+	// (non-nil) when both DATABASE_URL and EVENT_PUBLISHER=kafka are set.
+	relayDone := make(chan struct{})
+	relayCtx, stopRelay := context.WithCancel(ctx)
+	defer stopRelay()
+	if relay != nil {
+		go func() {
+			defer close(relayDone)
+			logger.Info("outbox relay running", "topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic)
+			if err := relay.Run(relayCtx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("outbox relay stopped", "err", err)
+			}
+		}()
+	} else {
+		close(relayDone)
+	}
+
 	go func() {
 		logger.Info("listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -208,6 +273,15 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+	// Let the relay finish its in-flight pass so an event committed by a
+	// request that completed just before shutdown is not stranded until
+	// the next pod boots.
+	stopRelay()
+	select {
+	case <-relayDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("outbox relay did not stop before the shutdown deadline")
+	}
 	logger.Info("stopped")
 }
 
@@ -247,11 +321,15 @@ func runSweep(ctx context.Context, sweep *usecases.SweepAcknowledgementDeadlines
 // fleet — the alternative is a separate job that can be forgotten, and a
 // schema that lags the binary is how a context starts answering wrongly
 // rather than not at all.
-func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRepo, func(), error) {
+//
+// The returned pool is nil exactly when the repo is the in-memory one;
+// main uses that alone to decide whether a UnitOfWork/outbox is wired,
+// so the two can never disagree about which mode is active.
+func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRepo, *pgxpool.Pool, func(), error) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		logger.Info("order repository wired", "backend", "memory")
-		return memory.NewNetworkOrderRepo(), func() {}, nil
+		return memory.NewNetworkOrderRepo(), nil, func() {}, nil
 	}
 
 	// Retried, because in this fleet EVERY injected pod's first outbound
@@ -268,12 +346,12 @@ func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRep
 	if err := retry(ctx, logger, "run migrations", func() error {
 		return postgres.RunMigrations(databaseURL, migrationsPath())
 	}); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	pool, err := postgres.NewPool(ctx, databaseURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open pool: %w", err)
+		return nil, nil, nil, fmt.Errorf("open pool: %w", err)
 	}
 	// ParseConfig/NewWithConfig do not themselves establish a connection,
 	// so without this the first real failure would surface inside a
@@ -283,11 +361,11 @@ func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRep
 		return pool.Ping(ctx)
 	}); err != nil {
 		pool.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	logger.Info("order repository wired", "backend", "postgres")
-	return postgres.NewNetworkOrderRepo(pool), pool.Close, nil
+	return postgres.NewNetworkOrderRepo(pool), pool, pool.Close, nil
 }
 
 // bootRetries and bootRetryDelay bound the startup retry budget.

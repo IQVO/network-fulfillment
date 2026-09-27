@@ -28,7 +28,7 @@ func TestWireOrders_RetriesTheDatabaseNotJustOnce(t *testing.T) {
 	t.Setenv("MIGRATIONS_PATH", migrationsDirForTest(t))
 
 	start := time.Now()
-	_, _, err := wireOrders(context.Background(), quietLogger())
+	_, _, _, err := wireOrders(context.Background(), quietLogger())
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -52,7 +52,7 @@ func TestWireOrders_NoDatabaseURLUsesMemoryImmediately(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 
 	start := time.Now()
-	repo, closeFn, err := wireOrders(context.Background(), quietLogger())
+	repo, _, closeFn, err := wireOrders(context.Background(), quietLogger())
 	if err != nil {
 		t.Fatalf("wireOrders: %v", err)
 	}
