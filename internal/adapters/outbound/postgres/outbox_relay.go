@@ -104,6 +104,16 @@ func (r *OutboxRelay) RelayOnce(ctx context.Context) (int, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	batch, err := r.claimOutboxRows(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	return r.publishBatch(ctx, tx, batch)
+}
+
+// claimOutboxRows selects up to batchSize unpublished rows under a row
+// lock, in id order, and decodes them for sending.
+func (r *OutboxRelay) claimOutboxRows(ctx context.Context, tx pgx.Tx) ([]pendingRow, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, topic, event_type, key, value, headers
 		FROM outbox_events
@@ -113,7 +123,7 @@ func (r *OutboxRelay) RelayOnce(ctx context.Context) (int, error) {
 		FOR UPDATE SKIP LOCKED
 	`, r.batchSize)
 	if err != nil {
-		return 0, fmt.Errorf("postgres: claim outbox rows: %w", err)
+		return nil, fmt.Errorf("postgres: claim outbox rows: %w", err)
 	}
 	var batch []pendingRow
 	for rows.Next() {
@@ -123,33 +133,33 @@ func (r *OutboxRelay) RelayOnce(ctx context.Context) (int, error) {
 		)
 		if err := rows.Scan(&p.id, &p.encoded.Topic, &p.encoded.EventType, &p.encoded.Key, &p.encoded.Value, &headersBytes); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("postgres: scan outbox row: %w", err)
+			return nil, fmt.Errorf("postgres: scan outbox row: %w", err)
 		}
 		headers, err := unmarshalHeaders(headersBytes)
 		if err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("postgres: unmarshal outbox row %d headers: %w", p.id, err)
+			return nil, fmt.Errorf("postgres: unmarshal outbox row %d headers: %w", p.id, err)
 		}
 		p.encoded.Headers = headers
 		batch = append(batch, p)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("postgres: read outbox rows: %w", err)
+		return nil, fmt.Errorf("postgres: read outbox rows: %w", err)
 	}
+	return batch, nil
+}
 
+// publishBatch sends each claimed row in order and marks it published. On
+// the first Send failure the pass stops (preserving per-aggregate
+// ordering — a later event must not overtake a failed earlier one),
+// records the error on that row, and returns it; rows already sent in
+// this pass stay marked published.
+func (r *OutboxRelay) publishBatch(ctx context.Context, tx pgx.Tx, batch []pendingRow) (int, error) {
 	published := 0
 	for _, p := range batch {
 		if err := r.sink.Send(ctx, p.encoded); err != nil {
-			if _, uerr := tx.Exec(ctx, `
-				UPDATE outbox_events SET attempts = attempts + 1, last_error = $2 WHERE id = $1
-			`, p.id, err.Error()); uerr != nil {
-				err = errors.Join(err, fmt.Errorf("postgres: record outbox failure: %w", uerr))
-			}
-			if cerr := tx.Commit(ctx); cerr != nil {
-				err = errors.Join(err, fmt.Errorf("postgres: commit relay pass: %w", cerr))
-			}
-			return published, fmt.Errorf("outbox relay: send %s (row %d, topic %s): %w", p.encoded.EventType, p.id, p.encoded.Topic, err)
+			return published, r.recordSendFailure(ctx, tx, p, err)
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE outbox_events SET published_at = now(), attempts = attempts + 1, last_error = NULL WHERE id = $1
@@ -165,6 +175,21 @@ func (r *OutboxRelay) RelayOnce(ctx context.Context) (int, error) {
 		r.logger.DebugContext(ctx, "outbox relay published events", "count", published)
 	}
 	return published, nil
+}
+
+// recordSendFailure logs the send error on the failed row and commits the
+// pass so earlier rows keep their published marks, wrapping every
+// bookkeeping failure around the original send error.
+func (r *OutboxRelay) recordSendFailure(ctx context.Context, tx pgx.Tx, p pendingRow, err error) error {
+	if _, uerr := tx.Exec(ctx, `
+		UPDATE outbox_events SET attempts = attempts + 1, last_error = $2 WHERE id = $1
+	`, p.id, err.Error()); uerr != nil {
+		err = errors.Join(err, fmt.Errorf("postgres: record outbox failure: %w", uerr))
+	}
+	if cerr := tx.Commit(ctx); cerr != nil {
+		err = errors.Join(err, fmt.Errorf("postgres: commit relay pass: %w", cerr))
+	}
+	return fmt.Errorf("outbox relay: send %s (row %d, topic %s): %w", p.encoded.EventType, p.id, p.encoded.Topic, err)
 }
 
 // unmarshalHeaders is the inverse of marshalHeaders.

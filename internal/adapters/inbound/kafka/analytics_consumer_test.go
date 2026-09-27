@@ -75,17 +75,58 @@ func envelope(t *testing.T, eventId, eventType string, at time.Time, data map[st
 	return b
 }
 
+// analyticsRoutingCase is one row of TestAnalyticsConsumer_RoutesEachEventType:
+// an envelope of a given event type must route to exactly one projection
+// method carrying the envelope's identity and timestamp plus the payload
+// fields that method parses out of the data block.
+type analyticsRoutingCase struct {
+	name       string
+	eventType  string
+	data       map[string]any
+	wantMethod string
+	wantReason string
+	wantLat    float64
+}
+
+// runAnalyticsRoutingCase drives one envelope through the consumer and
+// asserts the single projection call it was routed to.
+func runAnalyticsRoutingCase(t *testing.T, at time.Time, tt analyticsRoutingCase) {
+	t.Helper()
+
+	proj := &fakeProjection{}
+	processed := newFakeProcessed()
+	c := &inboundkafka.AnalyticsConsumer{Projection: proj, Processed: processed}
+
+	raw := envelope(t, "evt-1", tt.eventType, at, tt.data)
+	if err := c.HandleMessage(context.Background(), raw); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+
+	if len(proj.calls) != 1 {
+		t.Fatalf("calls = %d, want 1: %+v", len(proj.calls), proj.calls)
+	}
+	got := proj.calls[0]
+	if got.method != tt.wantMethod {
+		t.Errorf("method = %q, want %q", got.method, tt.wantMethod)
+	}
+	if got.eventId != "evt-1" {
+		t.Errorf("eventId = %q, want evt-1", got.eventId)
+	}
+	if !got.at.Equal(at) {
+		t.Errorf("at = %v, want %v", got.at, at)
+	}
+	if tt.wantReason != "" && got.reason != tt.wantReason {
+		t.Errorf("reason = %q, want %q", got.reason, tt.wantReason)
+	}
+	if tt.wantLat != 0 && got.latency != tt.wantLat {
+		t.Errorf("latency = %v, want %v", got.latency, tt.wantLat)
+	}
+}
+
 func TestAnalyticsConsumer_RoutesEachEventType(t *testing.T) {
 	at := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
 
-	tests := []struct {
-		name       string
-		eventType  string
-		data       map[string]any
-		wantMethod string
-		wantReason string
-		wantLat    float64
-	}{
+	tests := []analyticsRoutingCase{
 		{
 			name:       "NetworkOrderReceived",
 			eventType:  "NetworkOrderReceived",
@@ -110,34 +151,7 @@ func TestAnalyticsConsumer_RoutesEachEventType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proj := &fakeProjection{}
-			processed := newFakeProcessed()
-			c := &inboundkafka.AnalyticsConsumer{Projection: proj, Processed: processed}
-
-			raw := envelope(t, "evt-1", tt.eventType, at, tt.data)
-			if err := c.HandleMessage(context.Background(), raw); err != nil {
-				t.Fatalf("HandleMessage: %v", err)
-			}
-
-			if len(proj.calls) != 1 {
-				t.Fatalf("calls = %d, want 1: %+v", len(proj.calls), proj.calls)
-			}
-			got := proj.calls[0]
-			if got.method != tt.wantMethod {
-				t.Errorf("method = %q, want %q", got.method, tt.wantMethod)
-			}
-			if got.eventId != "evt-1" {
-				t.Errorf("eventId = %q, want evt-1", got.eventId)
-			}
-			if !got.at.Equal(at) {
-				t.Errorf("at = %v, want %v", got.at, at)
-			}
-			if tt.wantReason != "" && got.reason != tt.wantReason {
-				t.Errorf("reason = %q, want %q", got.reason, tt.wantReason)
-			}
-			if tt.wantLat != 0 && got.latency != tt.wantLat {
-				t.Errorf("latency = %v, want %v", got.latency, tt.wantLat)
-			}
+			runAnalyticsRoutingCase(t, at, tt)
 		})
 	}
 }

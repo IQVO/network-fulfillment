@@ -130,16 +130,11 @@ func durationEnv(key string, fallback time.Duration) time.Duration {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	mode := network.ParseMode(os.Getenv("NETWORK_MODE"))
-	gateway, err := network.NewGateway(mode, logger)
+	gateway, mode, err := wireGateway(logger)
 	if err != nil {
-		// Refusing to boot is deliberate. A deployment that asked for a
-		// real network and silently got a stub would look healthy while
-		// answering nobody.
 		logger.Error("cannot wire network gateway", "mode", mode, "err", err)
 		os.Exit(1)
 	}
-	logger.Info("network gateway wired", "mode", mode)
 
 	// Declarative stub seeding, the same shape as the fleet's
 	// PATH_CATALOGUE_FILE. This is how a stub deployment is given
@@ -151,23 +146,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	translation := memory.NewProductTranslation()
-	// The Anti-Corruption Layer's dictionary. Without it the map is empty
-	// and EVERY order rejects as untranslatable — the inbound leg looks
-	// alive while answering the network in the negative every time, and
-	// the cause is invisible because refusing unknown products is also
-	// correct behaviour.
-	if path := os.Getenv("PRODUCT_TRANSLATION_FILE"); path != "" {
-		n, err := memory.LoadProductTranslationFile(translation, path)
-		if err != nil {
-			logger.Error("cannot load product translation", "err", err)
-			os.Exit(1)
-		}
-		logger.Info("product translation loaded", "file", path, "products", n)
-	} else {
-		// WARN, not INFO: a deployment with no dictionary is running, and
-		// will reject everything the network sends.
-		logger.Warn("no PRODUCT_TRANSLATION_FILE set; every network order will be rejected as untranslatable")
+	translation, err := loadProductTranslation(logger)
+	if err != nil {
+		logger.Error("cannot load product translation", "err", err)
+		os.Exit(1)
 	}
 
 	// Loaded before the database is opened, deliberately: every failure
@@ -185,30 +167,7 @@ func main() {
 	}
 	defer closeOrders()
 
-	omBase := os.Getenv("ORDER_MANAGEMENT_URL")
-	if omBase == "" {
-		omBase = "http://localhost:8080"
-	}
-	rawPlanner := ordermanagement.NewPlanner(omBase, nil)
-
-	// circuitBreakerMetrics wires the order-management breaker's
-	// OnStateChange into the circuit_breaker_state gauge (ADR 0004),
-	// served at GET /metrics below. This never fails (see
-	// NewCircuitBreakerMetrics' own doc comment), so there is no
-	// degraded-but-non-fatal branch to log here, unlike
-	// order-management's OTel-instrument-name variant.
-	circuitBreakerMetrics := telemetry.NewCircuitBreakerMetrics()
-
-	// planner wraps rawPlanner with a circuit breaker (ADR 0004, ported
-	// from order-management's ADR 0025): RaiseHeldOrder/ReleaseHeldOrder/
-	// CancelHeldOrder all share ONE breaker instance guarding this one
-	// downstream dependency. There is no permissive/fail-open fallback
-	// to reuse here (unlike order-management's own outbound clients) —
-	// see ordermanagement/breaker.go's package doc comment for why the
-	// OPEN-state behaviour is simply to propagate a wrapped error,
-	// identical in shape to what rawPlanner already returns on a real
-	// failure.
-	planner := ordermanagement.NewBreakerClient(rawPlanner, circuitBreakerMetrics)
+	planner, circuitBreakerMetrics := wirePlanner()
 
 	// readiness gates GET /readyz (ADR 0004 §graceful shutdown). The
 	// zero value is ready; SetNotReady is called as the FIRST step of
@@ -221,30 +180,7 @@ func main() {
 	eventPublisher, relay, closeEventPublisher := wireEventPublisher(pool, logger)
 	defer closeEventPublisher()
 
-	// The UnitOfWork is nil exactly when pool is (in-memory mode): the
-	// use cases treat that as "no transactional backing" and run
-	// Save+Publish back to back, unchanged from before this rollout.
-	var uow ports.UnitOfWork
-	if pool != nil {
-		uow = postgres.NewUnitOfWork(pool)
-	}
-
-	receive := &usecases.ReceiveNetworkDemand{
-		Orders:      orders,
-		Gateway:     gateway,
-		Planner:     planner,
-		Translation: translation,
-		Events:      eventPublisher,
-		Clock:       systemClock{},
-		UnitOfWork:  uow,
-	}
-	sweep := &usecases.SweepAcknowledgementDeadlines{
-		Orders:     orders,
-		Planner:    planner,
-		Events:     eventPublisher,
-		Clock:      systemClock{},
-		UnitOfWork: uow,
-	}
+	receive, sweep := wireUseCases(orders, gateway, planner, translation, eventPublisher, pool)
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
 	// could create a NetworkOrder at all.
@@ -261,13 +197,132 @@ func main() {
 		MetricsRegistry: circuitBreakerMetrics.Registry,
 	}
 
-	srv := &http.Server{
+	serve(context.Background(), logger, newHTTPServer(api), sweep, inbound, relay, readiness)
+}
+
+// wireGateway wires the outbound network gateway for the NETWORK_MODE env
+// var, returning the parsed mode alongside it so the composition root can
+// both log it at startup and expose it on the status surface — the
+// running value must be verifiable, not assumed.
+func wireGateway(logger *slog.Logger) (ports.NetworkGateway, network.Mode, error) {
+	mode := network.ParseMode(os.Getenv("NETWORK_MODE"))
+	gateway, err := network.NewGateway(mode, logger)
+	if err != nil {
+		// Refusing to boot is deliberate. A deployment that asked for a
+		// real network and silently got a stub would look healthy while
+		// answering nobody.
+		return nil, mode, err
+	}
+	logger.Info("network gateway wired", "mode", mode)
+	return gateway, mode, nil
+}
+
+// loadProductTranslation builds the Anti-Corruption Layer's dictionary
+// from PRODUCT_TRANSLATION_FILE.
+//
+// Without it the map is empty and EVERY order rejects as untranslatable
+// — the inbound leg looks alive while answering the network in the
+// negative every time, and the cause is invisible because refusing
+// unknown products is also correct behaviour.
+func loadProductTranslation(logger *slog.Logger) (ports.ProductTranslation, error) {
+	translation := memory.NewProductTranslation()
+	path := os.Getenv("PRODUCT_TRANSLATION_FILE")
+	if path == "" {
+		// WARN, not INFO: a deployment with no dictionary is running, and
+		// will reject everything the network sends.
+		logger.Warn("no PRODUCT_TRANSLATION_FILE set; every network order will be rejected as untranslatable")
+		return translation, nil
+	}
+	n, err := memory.LoadProductTranslationFile(translation, path)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("product translation loaded", "file", path, "products", n)
+	return translation, nil
+}
+
+// wirePlanner wires the order-management planner client wrapped in the
+// shared circuit breaker (ADR 0004, ported from order-management's ADR
+// 0025): RaiseHeldOrder/ReleaseHeldOrder/CancelHeldOrder all share ONE
+// breaker instance guarding this one downstream dependency, with no
+// permissive/fail-open fallback (see ordermanagement/breaker.go's
+// package doc comment for why the OPEN-state behaviour is simply to
+// propagate a wrapped error). Deadline feasibility is always ASKED of
+// order-management, never recomputed here (ADR 0001 §7). The returned
+// metrics wire the breaker's OnStateChange into the
+// circuit_breaker_state gauge (ADR 0004), served at GET /metrics; they
+// never fail (see NewCircuitBreakerMetrics' own doc comment), so there
+// is no degraded-but-non-fatal branch to log, unlike order-management's
+// OTel-instrument-name variant.
+func wirePlanner() (ports.FulfillmentPlanner, *telemetry.CircuitBreakerMetrics) {
+	omBase := os.Getenv("ORDER_MANAGEMENT_URL")
+	if omBase == "" {
+		omBase = "http://localhost:8080"
+	}
+	rawPlanner := ordermanagement.NewPlanner(omBase, nil)
+	metrics := telemetry.NewCircuitBreakerMetrics()
+	return ordermanagement.NewBreakerClient(rawPlanner, metrics), metrics
+}
+
+// wireUseCases builds the two use cases this composition root serves,
+// sharing one repository, planner, publisher and clock between them.
+// The UnitOfWork is nil exactly when pool is (in-memory mode): the use
+// cases treat that as "no transactional backing" and run Save+Publish
+// back to back, unchanged from before this rollout.
+func wireUseCases(
+	orders ports.NetworkOrderRepo,
+	gateway ports.NetworkGateway,
+	planner ports.FulfillmentPlanner,
+	translation ports.ProductTranslation,
+	events ports.EventPublisher,
+	pool *pgxpool.Pool,
+) (*usecases.ReceiveNetworkDemand, *usecases.SweepAcknowledgementDeadlines) {
+	var uow ports.UnitOfWork
+	if pool != nil {
+		uow = postgres.NewUnitOfWork(pool)
+	}
+	receive := &usecases.ReceiveNetworkDemand{
+		Orders:      orders,
+		Gateway:     gateway,
+		Planner:     planner,
+		Translation: translation,
+		Events:      events,
+		Clock:       systemClock{},
+		UnitOfWork:  uow,
+	}
+	sweep := &usecases.SweepAcknowledgementDeadlines{
+		Orders:     orders,
+		Planner:    planner,
+		Events:     events,
+		Clock:      systemClock{},
+		UnitOfWork: uow,
+	}
+	return receive, sweep
+}
+
+// newHTTPServer builds the REST server around the inbound adapter's
+// routes, on the address from PORT, with a bounded header-read timeout.
+func newHTTPServer(api *inboundhttp.Server) *http.Server {
+	return &http.Server{
 		Addr:              addr(),
 		Handler:           api.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+// serve runs the inbound poller, the acknowledgement sweep and the HTTP
+// server until SIGINT/SIGTERM arrives, then gives in-flight requests a
+// bounded grace period before the process winds down.
+func serve(
+	ctx context.Context,
+	logger *slog.Logger,
+	srv *http.Server,
+	sweep *usecases.SweepAcknowledgementDeadlines,
+	inbound *poller.Poller,
+	relay *postgres.OutboxRelay,
+	readiness *inboundhttp.Readiness,
+) {
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go runSweep(ctx, sweep, logger)
