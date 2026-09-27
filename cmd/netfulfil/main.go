@@ -30,6 +30,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 )
@@ -188,7 +189,34 @@ func main() {
 	if omBase == "" {
 		omBase = "http://localhost:8080"
 	}
-	planner := ordermanagement.NewPlanner(omBase, nil)
+	rawPlanner := ordermanagement.NewPlanner(omBase, nil)
+
+	// circuitBreakerMetrics wires the order-management breaker's
+	// OnStateChange into the circuit_breaker_state gauge (ADR 0004),
+	// served at GET /metrics below. This never fails (see
+	// NewCircuitBreakerMetrics' own doc comment), so there is no
+	// degraded-but-non-fatal branch to log here, unlike
+	// order-management's OTel-instrument-name variant.
+	circuitBreakerMetrics := telemetry.NewCircuitBreakerMetrics()
+
+	// planner wraps rawPlanner with a circuit breaker (ADR 0004, ported
+	// from order-management's ADR 0025): RaiseHeldOrder/ReleaseHeldOrder/
+	// CancelHeldOrder all share ONE breaker instance guarding this one
+	// downstream dependency. There is no permissive/fail-open fallback
+	// to reuse here (unlike order-management's own outbound clients) —
+	// see ordermanagement/breaker.go's package doc comment for why the
+	// OPEN-state behaviour is simply to propagate a wrapped error,
+	// identical in shape to what rawPlanner already returns on a real
+	// failure.
+	planner := ordermanagement.NewBreakerClient(rawPlanner, circuitBreakerMetrics)
+
+	// readiness gates GET /readyz (ADR 0004 §graceful shutdown). The
+	// zero value is ready; SetNotReady is called as the FIRST step of
+	// the shutdown sequence below, before the HTTP server itself stops
+	// accepting connections, so a Kubernetes readinessProbe has a
+	// chance to observe the flip and stop routing new traffic during
+	// the drain window that follows.
+	readiness := &inboundhttp.Readiness{}
 
 	eventPublisher, relay, closeEventPublisher := wireEventPublisher(pool, logger)
 	defer closeEventPublisher()
@@ -225,10 +253,12 @@ func main() {
 	}, logger)
 
 	api := &inboundhttp.Server{
-		Orders:      orders,
-		Poller:      inbound,
-		Clock:       systemClock{},
-		NetworkMode: string(mode),
+		Orders:          orders,
+		Poller:          inbound,
+		Clock:           systemClock{},
+		NetworkMode:     string(mode),
+		Readiness:       readiness,
+		MetricsRegistry: circuitBreakerMetrics.Registry,
 	}
 
 	srv := &http.Server{
@@ -241,7 +271,21 @@ func main() {
 	defer stop()
 
 	go runSweep(ctx, sweep, logger)
-	go inbound.Run(ctx)
+
+	// pollerDone closes once inbound.Run's goroutine has returned —
+	// mirroring the outbox relay's own relayDone below — so graceful
+	// shutdown can wait for a REAL stop rather than merely firing the
+	// cancel and moving on. The poller itself has no in-flight "commit"
+	// step to finish (unlike a Kafka consumer's offset commit): its own
+	// watermark only advances after a fully successful pass (see
+	// poller.go's own doc comment), so an in-flight pass interrupted by
+	// shutdown simply is not counted as successful and is safely
+	// re-polled on the next boot.
+	pollerDone := make(chan struct{})
+	go func() {
+		defer close(pollerDone)
+		inbound.Run(ctx)
+	}()
 
 	// The outbox relay (ADR 0003) runs alongside the HTTP server in the
 	// same process, draining outbox_events onto Kafka. It is only wired
@@ -270,9 +314,32 @@ func main() {
 	}()
 
 	<-ctx.Done()
+
+	// Graceful shutdown (ADR 0004, ported from order-management's ADR
+	// 0025), in order:
+	//
+	//  1. Flip readiness to not-ready FIRST, before anything else
+	//     stops — a Kubernetes readinessProbe polling /readyz needs a
+	//     window to observe this and stop routing NEW traffic to this
+	//     pod before step 2 below ever closes the listener.
+	//  2. Stop accepting new HTTP connections and drain in-flight
+	//     requests, bounded by shutdownCtx.
+	//  3. Stop the outbox relay and the poller cleanly: cancel their
+	//     contexts (no new poll/relay pass starts after this) and wait,
+	//     bounded by the SAME shutdownCtx, for their goroutines to
+	//     actually finish in-flight work, rather than merely asking
+	//     them to stop and moving on.
+	//  4. Only THEN do the deferred closeOrders/closeEventPublisher
+	//     calls (registered earlier in this function, so by defer's
+	//     LIFO order they run AFTER this point, once every
+	//     consumer/relay/poller goroutine has already stopped touching
+	//     the pool).
+	readiness.SetNotReady()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+
 	// Let the relay finish its in-flight pass so an event committed by a
 	// request that completed just before shutdown is not stranded until
 	// the next pod boots.
@@ -282,6 +349,18 @@ func main() {
 	case <-shutdownCtx.Done():
 		logger.Warn("outbox relay did not stop before the shutdown deadline")
 	}
+
+	// The poller's own context is ctx (signal.NotifyContext's), already
+	// cancelled by the SIGTERM/SIGINT that got us here — stop() above
+	// is deferred, not yet run, but ctx.Done() is already closed, so
+	// inbound.Run's own select has already seen it. This wait is purely
+	// for the in-flight pass (if any) to finish before main returns.
+	select {
+	case <-pollerDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("poller did not stop before the shutdown deadline")
+	}
+
 	logger.Info("stopped")
 }
 

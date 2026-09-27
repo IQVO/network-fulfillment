@@ -95,6 +95,65 @@ paths:
                     type: string
                     example: ok
 
+  /readyz:
+    get:
+      operationId: readyz
+      tags: [operations]
+      summary: Readiness probe
+      description: >
+        Readiness, separate from liveness (`/healthz`, above): reports
+        `ready` until graceful shutdown begins, at which point it flips to
+        `not_ready` as the FIRST step of the shutdown sequence (ADR 0004)
+        -- before the HTTP server stops accepting connections -- so a
+        Kubernetes `readinessProbe` pointed here gets a window to stop
+        routing new traffic before the drain that follows. `/healthz`
+        stays a pure liveness signal and is never flipped by this.
+      responses:
+        "200":
+          description: Ready to receive traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ready
+        "503":
+          description: >
+            Not ready -- graceful shutdown is in progress. A
+            `readinessProbe` observing this should stop routing new
+            requests to this pod; already-established connections are
+            unaffected.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+
+  /metrics:
+    get:
+      operationId: metrics
+      tags: [operations]
+      summary: Prometheus metrics
+      description: >
+        Prometheus text-format exposition, including `circuit_breaker_state`
+        (ADR 0004) -- one time series per outbound dependency guarded by a
+        circuit breaker, labelled `dependency`, with gobreaker's own state
+        numbering verbatim (0=closed, 1=half-open, 2=open).
+      responses:
+        "200":
+          description: Metrics in Prometheus text exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /inbound-status:
     get:
       operationId: getInboundStatus
