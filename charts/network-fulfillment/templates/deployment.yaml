@@ -82,6 +82,22 @@ spec:
                 secretKeyRef:
                   name: {{ include "network-fulfillment.databaseSecretName" . }}
                   key: {{ .Values.database.existingSecretKey }}
+            {{- if .Values.database.migrationsExistingSecretKey }}
+            # See values.yaml's database.migrationsExistingSecretKey comment
+            # and docs/adr/0007-migrations-direct-postgres-connection.md: a
+            # direct (non-pooled) connection used only for the migration
+            # step in cmd/netfulfil/main.go's wireOrders, never for the
+            # runtime pgxpool. `optional: true` so a secret without this
+            # key yet (predates this chart version) still starts the pod
+            # -- the binary falls back to DATABASE_URL itself when this
+            # env var is unset.
+            - name: MIGRATIONS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "network-fulfillment.databaseSecretName" . }}
+                  key: {{ .Values.database.migrationsExistingSecretKey }}
+                  optional: true
+            {{- end }}
             {{- end }}
             {{- if ne .Values.config.networkMode "stub" }}
             {{- if not (or .Values.credentials.existingSecret .Values.credentials.clientId) }}
