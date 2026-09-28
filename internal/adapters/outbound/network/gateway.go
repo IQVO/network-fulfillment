@@ -109,22 +109,53 @@ func (g *StubGateway) Seed(demand ...contract.InboundDemand) {
 	g.pending = append(g.pending, demand...)
 }
 
-// PollDemand returns and CLEARS the seeded demand, mimicking a real
-// poll's advancing cursor rather than replaying the same batch forever.
+// PollDemand returns every unit still pending. It deliberately does NOT
+// clear pending on return: that would advance the network's own cursor
+// for demand we have not yet finished with, and the poller's contract
+// (poller.go's own doc comment on `since`: "a pass where any demand
+// failed leaves it where it was, so the next poll re-fetches that
+// demand and tries again") requires a unit whose Execute fails to come
+// back on the NEXT poll, not vanish. A real network's cursor only
+// advances past an order once WE have acknowledged it; SubmitAcknowledgement
+// is this stub's equivalent of that, so pending is trimmed there instead
+// — see its own comment.
 func (g *StubGateway) PollDemand(_ context.Context, _ time.Time) ([]contract.InboundDemand, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	out := g.pending
-	g.pending = nil
+	out := make([]contract.InboundDemand, len(g.pending))
+	copy(out, g.pending)
 	return out, nil
 }
 
+// SubmitAcknowledgement records the network's answer AND retires the
+// demand from pending. This is the point ReceiveNetworkDemand has fully
+// answered the order (see its reject/acknowledge, both of which call
+// this before anything else that could still fail) — so it is the right
+// place to stop re-delivering it, mirroring a real network's own cursor
+// only advancing once we have told it something. A unit whose use case
+// failed BEFORE reaching here (e.g. the order-management call errored)
+// is deliberately left in pending, so the next PollDemand hands it back
+// for a retry rather than losing it.
 func (g *StubGateway) SubmitAcknowledgement(_ context.Context, ref shared.NetworkRef, accepted bool) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.acknowledged[ref] = accepted
+	g.pending = removeByRef(g.pending, ref)
 	g.logger.Info("stub network acknowledgement", "networkRef", ref, "accepted", accepted)
 	return nil
+}
+
+// removeByRef returns pending with every demand matching ref dropped,
+// preserving order and without mutating the input slice's backing array
+// (PollDemand may be holding a copy taken from it concurrently).
+func removeByRef(pending []contract.InboundDemand, ref shared.NetworkRef) []contract.InboundDemand {
+	out := make([]contract.InboundDemand, 0, len(pending))
+	for _, d := range pending {
+		if d.NetworkRef != ref {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func (g *StubGateway) SubmitShipmentConfirmation(_ context.Context, ref shared.NetworkRef) error {
