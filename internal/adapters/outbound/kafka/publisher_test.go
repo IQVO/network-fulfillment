@@ -28,17 +28,70 @@ func (w *fakeWriter) WriteMessages(_ context.Context, msgs ...kafkago.Message) e
 	return nil
 }
 
+// publisherCase is one row of TestPublisher_PublishesEachEventType: a
+// domain event must serialize into the wire envelope with the expected
+// event_type and partition key, its payload carrying the one field that
+// distinguishes that event type's data block.
+type publisherCase struct {
+	name      string
+	event     shared.DomainEvent
+	wantType  string
+	wantKey   string
+	wantField string
+	wantValue any
+}
+
+// runPublisherCase publishes one event through the publisher against a
+// capturing fake writer and asserts the single message's key and
+// envelope.
+func runPublisherCase(t *testing.T, at time.Time, tt publisherCase) {
+	t.Helper()
+
+	w := &fakeWriter{}
+	p := outboundkafka.NewPublisher(nil, func() string { return "evt-fixed" })
+	p.Writer = w
+
+	if err := p.Publish(context.Background(), tt.event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(w.msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(w.msgs))
+	}
+	msg := w.msgs[0]
+	if string(msg.Key) != tt.wantKey {
+		t.Errorf("key = %q, want %q", string(msg.Key), tt.wantKey)
+	}
+
+	var env outboundkafka.Envelope
+	if err := json.Unmarshal(msg.Value, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.EventType != tt.wantType {
+		t.Errorf("event_type = %q, want %q", env.EventType, tt.wantType)
+	}
+	if env.EventId != "evt-fixed" {
+		t.Errorf("event_id = %q, want evt-fixed", env.EventId)
+	}
+	if env.Source != "network-fulfillment" {
+		t.Errorf("source = %q, want network-fulfillment", env.Source)
+	}
+	if !env.OccurredAt.Equal(at) {
+		t.Errorf("occurred_at = %v, want %v", env.OccurredAt, at)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("unmarshal data: %v", err)
+	}
+	if got := data[tt.wantField]; got != tt.wantValue {
+		t.Errorf("data[%q] = %v (%T), want %v (%T)", tt.wantField, got, got, tt.wantValue, tt.wantValue)
+	}
+}
+
 func TestPublisher_PublishesEachEventType(t *testing.T) {
 	at := time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC)
 
-	tests := []struct {
-		name      string
-		event     shared.DomainEvent
-		wantType  string
-		wantKey   string
-		wantField string
-		wantValue any
-	}{
+	tests := []publisherCase{
 		{
 			name:      "NetworkOrderReceived",
 			event:     shared.NetworkOrderReceived{NetworkRef: "po-1", SiteId: "site-1", LineCount: 2, At: at},
@@ -75,45 +128,7 @@ func TestPublisher_PublishesEachEventType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := &fakeWriter{}
-			p := outboundkafka.NewPublisher(nil, func() string { return "evt-fixed" })
-			p.Writer = w
-
-			if err := p.Publish(context.Background(), tt.event); err != nil {
-				t.Fatalf("Publish: %v", err)
-			}
-			if len(w.msgs) != 1 {
-				t.Fatalf("expected 1 message, got %d", len(w.msgs))
-			}
-			msg := w.msgs[0]
-			if string(msg.Key) != tt.wantKey {
-				t.Errorf("key = %q, want %q", string(msg.Key), tt.wantKey)
-			}
-
-			var env outboundkafka.Envelope
-			if err := json.Unmarshal(msg.Value, &env); err != nil {
-				t.Fatalf("unmarshal envelope: %v", err)
-			}
-			if env.EventType != tt.wantType {
-				t.Errorf("event_type = %q, want %q", env.EventType, tt.wantType)
-			}
-			if env.EventId != "evt-fixed" {
-				t.Errorf("event_id = %q, want evt-fixed", env.EventId)
-			}
-			if env.Source != "network-fulfillment" {
-				t.Errorf("source = %q, want network-fulfillment", env.Source)
-			}
-			if !env.OccurredAt.Equal(at) {
-				t.Errorf("occurred_at = %v, want %v", env.OccurredAt, at)
-			}
-
-			var data map[string]any
-			if err := json.Unmarshal(env.Data, &data); err != nil {
-				t.Fatalf("unmarshal data: %v", err)
-			}
-			if got := data[tt.wantField]; got != tt.wantValue {
-				t.Errorf("data[%q] = %v (%T), want %v (%T)", tt.wantField, got, got, tt.wantValue, tt.wantValue)
-			}
+			runPublisherCase(t, at, tt)
 		})
 	}
 }
