@@ -79,11 +79,24 @@ type Publisher struct {
 // topic: Encode always stamps Topic explicitly onto the Encoded message,
 // so the same Writer can carry both integration and analytics traffic
 // when this Publisher is reused as the relay's Sink.
+//
+// Balancer is kafkago.Hash (FNV-1a over Message.Key), not LeastBytes:
+// kafka-go's Writer does not hash Message.Key into a partition decision
+// automatically just because Encode/aggregateKey sets a non-nil,
+// per-NetworkRef key — the Balancer field is a fully separate knob, and
+// LeastBytes routes purely by cumulative byte volume, ignoring Key
+// entirely. Hash is what actually turns aggregateKey's per-NetworkRef key
+// into a same-aggregate-same-partition guarantee. This matters now that
+// warehouse-infra PR #42 scaled every business topic (including this
+// one) from 1 to 8 partitions: at 1 partition the missing key-aware
+// balancer was invisible (total order was preserved by accident), but at
+// 8 partitions a consumer could observe this NetworkRef's events out of
+// order. See ADR 0005.
 func NewPublisher(brokers []string, newId func() string) *Publisher {
 	return &Publisher{
 		Writer: &kafkago.Writer{
 			Addr:                   kafkago.TCP(brokers...),
-			Balancer:               &kafkago.LeastBytes{},
+			Balancer:               &kafkago.Hash{},
 			AllowAutoTopicCreation: true,
 		},
 		NewId: newId,
