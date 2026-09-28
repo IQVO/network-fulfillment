@@ -466,6 +466,36 @@ func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRep
 		return memory.NewNetworkOrderRepo(), nil, func() {}, nil
 	}
 
+	// MIGRATIONS_DATABASE_URL, when set, is a DIRECT (non-pooled,
+	// session-mode) Postgres connection string used ONLY for the
+	// golang-migrate step immediately below — the pgxpool opened right
+	// after it (postgres.NewPool(ctx, databaseURL), used for every
+	// request this process serves) always uses databaseURL/DATABASE_URL,
+	// unchanged. golang-migrate's postgres driver takes a session-scoped
+	// `SELECT pg_advisory_lock($1)` to serialize concurrent migration
+	// runs across replicas starting at the same time, which is
+	// incompatible with PgBouncer's transaction-pooling mode (this
+	// fleet's pool_mode for every OLTP DATABASE_URL, warehouse-infra PR
+	// #43): each statement in one logical client session can land on a
+	// different physical backend connection under transaction pooling,
+	// so the advisory lock never behaves as a real mutex. Two or more
+	// replicas starting concurrently (an HPA scale-out, or an ordinary
+	// rolling deploy with replicas>1) then crash-loop with `pq: unnamed
+	// prepared statement does not exist` / `pq: canceling statement due
+	// to statement timeout` for ~1-2 minutes until one wins the race.
+	// See docs/adr/0007-migrations-direct-postgres-connection.md (mirrors
+	// order-management's ADR-0029) for the full incident and fix.
+	//
+	// Falls back to databaseURL when MIGRATIONS_DATABASE_URL is unset,
+	// which is every environment that doesn't provision the split (local
+	// dev, CI integration tests, a cluster whose Terraform predates this
+	// fix) — byte-identical to this function's behavior before this
+	// change in that case.
+	migrationsDatabaseURL := databaseURL
+	if v := os.Getenv("MIGRATIONS_DATABASE_URL"); v != "" {
+		migrationsDatabaseURL = v
+	}
+
 	// Retried, because in this fleet EVERY injected pod's first outbound
 	// TCP dial is reset ~10s after the app starts (Istio native sidecars;
 	// `holdApplicationUntilProxyStarts` is a no-op for them). A single
@@ -478,7 +508,7 @@ func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRep
 	// budget is exhausted this still refuses to boot; it just stops
 	// treating a sidecar warm-up as a permanent failure.
 	if err := retry(ctx, logger, "run migrations", func() error {
-		return postgres.RunMigrations(databaseURL, migrationsPath())
+		return postgres.RunMigrations(migrationsDatabaseURL, migrationsPath())
 	}); err != nil {
 		return nil, nil, nil, err
 	}

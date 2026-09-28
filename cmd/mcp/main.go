@@ -53,9 +53,17 @@ func run() error {
 
 	mcpAddr := getenv("MCP_ADDR", ":8090")
 	databaseURL := os.Getenv("DATABASE_URL")
+	// See cmd/netfulfil/main.go's wireOrders doc comment for the full
+	// "why" (session-scoped pg_advisory_lock vs PgBouncer
+	// transaction-pooling incompatibility; docs/adr/0007-migrations-
+	// direct-postgres-connection.md, mirroring order-management's
+	// ADR-0029). This binary also runs migrations on start
+	// (buildOrders below), so it needs the same direct-connection
+	// split.
+	migrationsDatabaseURL := getenv("MIGRATIONS_DATABASE_URL", databaseURL)
 	migrationsPath := getenv("MIGRATIONS_PATH", "/app/migrations")
 
-	orders, closeOrders, err := buildOrders(context.Background(), databaseURL, migrationsPath, logger)
+	orders, closeOrders, err := buildOrders(context.Background(), databaseURL, migrationsDatabaseURL, migrationsPath, logger)
 	if err != nil {
 		return err
 	}
@@ -123,13 +131,13 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 // cmd/netfulfil/main.go's wireOrders does: in-memory with no DATABASE_URL,
 // Postgres (with migrations run) when one is set. Kept independent of
 // cmd/netfulfil so the MCP process can be deployed and scaled separately.
-func buildOrders(ctx context.Context, databaseURL, migrationsPath string, logger *slog.Logger) (ports.NetworkOrderRepo, func(), error) {
+func buildOrders(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath string, logger *slog.Logger) (ports.NetworkOrderRepo, func(), error) {
 	if databaseURL == "" {
 		logger.Info("order repository wired", "backend", "memory")
 		return memory.NewNetworkOrderRepo(), func() {}, nil
 	}
 
-	if err := postgres.RunMigrations(databaseURL, migrationsPath); err != nil {
+	if err := postgres.RunMigrations(migrationsDatabaseURL, migrationsPath); err != nil {
 		return nil, nil, err
 	}
 	pool, err := postgres.NewPool(ctx, databaseURL)
