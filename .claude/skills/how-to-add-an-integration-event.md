@@ -1,6 +1,15 @@
-<!-- TEMPLATE NOTE (warehouse-harness-template v1): adapt every repo-specific example in this file (file paths, type names, field names) to THIS repo real code. Do not copy-paste verbatim. -->
 
 # How to add an integration event (publish and consume)
+
+> **In network-fulfillment:** this service does **not** use Kafka yet —
+> no publisher, consumer, topic or `apis/asyncapi.yaml` exist (see
+> `.claude/rules/integration-events.md`). The file paths cited below
+> (`internal/adapters/outbound/kafka/publisher.go`,
+> `internal/adapters/outbound/facilitycache/`, the Postgres outbox,
+> `docs/` AsyncAPI regeneration) are from sibling repos and are examples
+> of the pattern, not files in this tree. The consumer-group rules and the
+> testcontainers rule apply as written, and the fitness tests that enforce
+> them already exist in `internal/architecture/fitness_test.go`.
 
 Use when asked to publish a new cross-context integration event, or
 consume one from a sibling bounded context. This fleet's Kafka is ONE

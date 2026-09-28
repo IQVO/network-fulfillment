@@ -1,6 +1,15 @@
-<!-- TEMPLATE NOTE (warehouse-harness-template v1): adapt every repo-specific example in this file (file paths, type names, field names) to THIS repo real code. Do not copy-paste verbatim. -->
 
 # How to test
+
+> **In network-fulfillment:** the layers that exist here are unit tests
+> (`make test`), coverage (`make coverage`, 90% on domain+application),
+> mutation (`make mutation`, gremlins on `./internal/domain/networkorder`,
+> thresholds in `.gremlins.yaml`), Postgres integration tests via
+> testcontainers (`make integration`, `internal/adapters/outbound/postgres/*_integration_test.go`),
+> the chart wiring tests (`charts/network-fulfillment/tests/*.py`, run by
+> the `helm-lint` CI job) and `make arch-test`. There is **no** `features/`
+> directory, so `make bdd` has nothing to run, and there is no `MUTATION.md`
+> yet. The `facilitycache` Kafka example below is from a sibling repo.
 
 Use when writing or reviewing tests in this repo, or diagnosing a failing
 `coverage`/`mutation-fast`/`bdd`/`integration` CI job. This fleet's quality

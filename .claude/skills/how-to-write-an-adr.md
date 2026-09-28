@@ -1,6 +1,14 @@
-<!-- TEMPLATE NOTE (warehouse-harness-template v1): adapt every repo-specific example in this file (file paths, type names, field names) to THIS repo real code. Do not copy-paste verbatim. -->
 
 # How to write an ADR
+
+> **In network-fulfillment:** ADRs live in **`docs/adr/`** (not
+> `docs/docs/adr/`) — currently only
+> `docs/adr/0001-network-fulfillment-bounded-context.md`, whose companion is
+> `order-management` ADR 0020. There is no Docusaurus site here, so the
+> `about.md` index, `sidebar_position` and the `npm run build` verification
+> below do not apply; keep the existing frontmatter shape (`id`, `slug`,
+> `title`, `sidebar_label`, `description`) so the ADR can be aggregated
+> later. ADR-0013/0015 cited below are other repos' records.
 
 Use when a change is architecturally significant — a new bounded-context
 integration, a reversal of a prior decision, a cross-repo contract change,

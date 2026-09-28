@@ -14,15 +14,23 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
+	outboundevents "github.com/claudioed/network-fulfillment/internal/adapters/outbound/events"
+	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 )
@@ -31,26 +39,102 @@ type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
-type logPublisher struct{ logger *slog.Logger }
+// fanOutPublisher forwards every domain event to each wrapped
+// EventPublisher in order, so a single EVENT_PUBLISHER=kafka run publishes
+// to BOTH the integration topic and the analytics topic. A publish
+// failure on any target aborts and is returned, rather than silently
+// dropping a stream.
+type fanOutPublisher []ports.EventPublisher
 
-func (p logPublisher) Publish(_ context.Context, event any) error {
-	p.logger.Info("integration event", "event", event)
+func (f fanOutPublisher) Publish(ctx context.Context, event any) error {
+	for _, p := range f {
+		if err := p.Publish(ctx, event); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// wireEventPublisher chooses the outbound EventPublisher.
+//
+// EVENT_PUBLISHER unset (the default) keeps the existing log publisher,
+// matching the fleet-wide convention (see facility-layout's
+// cmd/facility/main.go). EVENT_PUBLISHER=kafka fans out to both the
+// integration topic (warehouse.network-fulfillment.events) and the
+// analytics topic (warehouse.network-fulfillment.analytics):
+//
+//   - with pool == nil (DATABASE_URL unset) both topics are written
+//     DIRECTLY — there is no transaction to bind them to, matching this
+//     service's in-memory dev mode.
+//   - with pool != nil (DATABASE_URL set) both are instead enqueued into
+//     the transactional outbox (ADR 0003) in the SAME Postgres
+//     transaction as the aggregate write, and a non-nil *OutboxRelay is
+//     returned for the caller to run alongside the HTTP server. The
+//     store and the two topics can then never diverge.
+func wireEventPublisher(pool *pgxpool.Pool, logger *slog.Logger) (ports.EventPublisher, *postgres.OutboxRelay, func()) {
+	if os.Getenv("EVENT_PUBLISHER") != "kafka" {
+		return outboundevents.NewLogPublisher(logger), nil, func() {}
+	}
+
+	brokers := strings.Split(kafkaBrokers(), ",")
+	integration := outboundkafka.NewPublisher(brokers, uuidLike)
+	analytics := outboundkafka.NewAnalyticsPublisher(brokers, uuidLike)
+	closeFn := func() {
+		_ = integration.Close()
+		_ = analytics.Close()
+	}
+
+	if pool == nil {
+		logger.Info("event publisher configured", "publisher", "kafka", "mode", "direct",
+			"integration_topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic, "brokers", brokers)
+		return fanOutPublisher{integration, analytics}, nil, closeFn
+	}
+
+	logger.Info("event publisher configured", "publisher", "kafka", "mode", "outbox",
+		"integration_topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic, "brokers", brokers)
+	outboxPublisher := postgres.NewOutboxPublisher(pool, integration, analytics)
+	// Any of the two Kafka publishers can serve as the relay's Sink: both
+	// share the same underlying Writer shape (no fixed topic; Send stamps
+	// enc.Topic per message), so one relay drains rows bound for either
+	// topic without needing its own third adapter.
+	relay := postgres.NewOutboxRelay(pool, integration, logger,
+		postgres.WithInterval(durationEnv("OUTBOX_RELAY_INTERVAL", time.Second)))
+	return outboxPublisher, relay, closeFn
+}
+
+// uuidLike mints the event_id stamped on each published event.
+func uuidLike() string { return uuid.NewString() }
+
+func kafkaBrokers() string {
+	if v := os.Getenv("KAFKA_BROKERS"); v != "" {
+		return v
+	}
+	return "localhost:9092"
+}
+
+// durationEnv parses key as a time.Duration, falling back on absence or a
+// malformed value (logged only implicitly: the relay interval is a
+// tuning knob, not a contract worth failing boot over).
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	mode := network.ParseMode(os.Getenv("NETWORK_MODE"))
-	gateway, err := network.NewGateway(mode, logger)
+	gateway, mode, err := wireGateway(logger)
 	if err != nil {
-		// Refusing to boot is deliberate. A deployment that asked for a
-		// real network and silently got a stub would look healthy while
-		// answering nobody.
 		logger.Error("cannot wire network gateway", "mode", mode, "err", err)
 		os.Exit(1)
 	}
-	logger.Info("network gateway wired", "mode", mode)
 
 	// Declarative stub seeding, the same shape as the fleet's
 	// PATH_CATALOGUE_FILE. This is how a stub deployment is given
@@ -62,30 +146,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	translation := memory.NewProductTranslation()
-	// The Anti-Corruption Layer's dictionary. Without it the map is empty
-	// and EVERY order rejects as untranslatable — the inbound leg looks
-	// alive while answering the network in the negative every time, and
-	// the cause is invisible because refusing unknown products is also
-	// correct behaviour.
-	if path := os.Getenv("PRODUCT_TRANSLATION_FILE"); path != "" {
-		n, err := memory.LoadProductTranslationFile(translation, path)
-		if err != nil {
-			logger.Error("cannot load product translation", "err", err)
-			os.Exit(1)
-		}
-		logger.Info("product translation loaded", "file", path, "products", n)
-	} else {
-		// WARN, not INFO: a deployment with no dictionary is running, and
-		// will reject everything the network sends.
-		logger.Warn("no PRODUCT_TRANSLATION_FILE set; every network order will be rejected as untranslatable")
+	translation, err := loadProductTranslation(logger)
+	if err != nil {
+		logger.Error("cannot load product translation", "err", err)
+		os.Exit(1)
 	}
 
 	// Loaded before the database is opened, deliberately: every failure
 	// path above this line may os.Exit freely, whereas one below it would
 	// skip `defer closeOrders()` and leak the pool. The dictionary needs
 	// no database, so there is no reason for it to sit after one.
-	orders, closeOrders, err := wireOrders(context.Background(), logger)
+	orders, pool, closeOrders, err := wireOrders(context.Background(), logger)
 	if err != nil {
 		// Same reasoning as the gateway above: a deployment that asked
 		// for a database and silently got an in-memory map would look
@@ -96,26 +167,20 @@ func main() {
 	}
 	defer closeOrders()
 
-	omBase := os.Getenv("ORDER_MANAGEMENT_URL")
-	if omBase == "" {
-		omBase = "http://localhost:8080"
-	}
-	planner := ordermanagement.NewPlanner(omBase, nil)
+	planner, circuitBreakerMetrics := wirePlanner()
 
-	receive := &usecases.ReceiveNetworkDemand{
-		Orders:      orders,
-		Gateway:     gateway,
-		Planner:     planner,
-		Translation: translation,
-		Events:      logPublisher{logger: logger},
-		Clock:       systemClock{},
-	}
-	sweep := &usecases.SweepAcknowledgementDeadlines{
-		Orders:  orders,
-		Planner: planner,
-		Events:  logPublisher{logger: logger},
-		Clock:   systemClock{},
-	}
+	// readiness gates GET /readyz (ADR 0004 §graceful shutdown). The
+	// zero value is ready; SetNotReady is called as the FIRST step of
+	// the shutdown sequence below, before the HTTP server itself stops
+	// accepting connections, so a Kubernetes readinessProbe has a
+	// chance to observe the flip and stop routing new traffic during
+	// the drain window that follows.
+	readiness := &inboundhttp.Readiness{}
+
+	eventPublisher, relay, closeEventPublisher := wireEventPublisher(pool, logger)
+	defer closeEventPublisher()
+
+	receive, sweep := wireUseCases(orders, gateway, planner, translation, eventPublisher, pool)
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
 	// could create a NetworkOrder at all.
@@ -124,23 +189,176 @@ func main() {
 	}, logger)
 
 	api := &inboundhttp.Server{
-		Orders:      orders,
-		Poller:      inbound,
-		Clock:       systemClock{},
-		NetworkMode: string(mode),
+		Orders:          orders,
+		Poller:          inbound,
+		Clock:           systemClock{},
+		NetworkMode:     string(mode),
+		Readiness:       readiness,
+		MetricsRegistry: circuitBreakerMetrics.Registry,
 	}
 
-	srv := &http.Server{
+	serve(context.Background(), logger, newHTTPServer(api), sweep, inbound, relay, readiness)
+}
+
+// wireGateway wires the outbound network gateway for the NETWORK_MODE env
+// var, returning the parsed mode alongside it so the composition root can
+// both log it at startup and expose it on the status surface — the
+// running value must be verifiable, not assumed.
+func wireGateway(logger *slog.Logger) (ports.NetworkGateway, network.Mode, error) {
+	mode := network.ParseMode(os.Getenv("NETWORK_MODE"))
+	gateway, err := network.NewGateway(mode, logger)
+	if err != nil {
+		// Refusing to boot is deliberate. A deployment that asked for a
+		// real network and silently got a stub would look healthy while
+		// answering nobody.
+		return nil, mode, err
+	}
+	logger.Info("network gateway wired", "mode", mode)
+	return gateway, mode, nil
+}
+
+// loadProductTranslation builds the Anti-Corruption Layer's dictionary
+// from PRODUCT_TRANSLATION_FILE.
+//
+// Without it the map is empty and EVERY order rejects as untranslatable
+// — the inbound leg looks alive while answering the network in the
+// negative every time, and the cause is invisible because refusing
+// unknown products is also correct behaviour.
+func loadProductTranslation(logger *slog.Logger) (ports.ProductTranslation, error) {
+	translation := memory.NewProductTranslation()
+	path := os.Getenv("PRODUCT_TRANSLATION_FILE")
+	if path == "" {
+		// WARN, not INFO: a deployment with no dictionary is running, and
+		// will reject everything the network sends.
+		logger.Warn("no PRODUCT_TRANSLATION_FILE set; every network order will be rejected as untranslatable")
+		return translation, nil
+	}
+	n, err := memory.LoadProductTranslationFile(translation, path)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("product translation loaded", "file", path, "products", n)
+	return translation, nil
+}
+
+// wirePlanner wires the order-management planner client wrapped in the
+// shared circuit breaker (ADR 0004, ported from order-management's ADR
+// 0025): RaiseHeldOrder/ReleaseHeldOrder/CancelHeldOrder all share ONE
+// breaker instance guarding this one downstream dependency, with no
+// permissive/fail-open fallback (see ordermanagement/breaker.go's
+// package doc comment for why the OPEN-state behaviour is simply to
+// propagate a wrapped error). Deadline feasibility is always ASKED of
+// order-management, never recomputed here (ADR 0001 §7). The returned
+// metrics wire the breaker's OnStateChange into the
+// circuit_breaker_state gauge (ADR 0004), served at GET /metrics; they
+// never fail (see NewCircuitBreakerMetrics' own doc comment), so there
+// is no degraded-but-non-fatal branch to log, unlike order-management's
+// OTel-instrument-name variant.
+func wirePlanner() (ports.FulfillmentPlanner, *telemetry.CircuitBreakerMetrics) {
+	omBase := os.Getenv("ORDER_MANAGEMENT_URL")
+	if omBase == "" {
+		omBase = "http://localhost:8080"
+	}
+	rawPlanner := ordermanagement.NewPlanner(omBase, nil)
+	metrics := telemetry.NewCircuitBreakerMetrics()
+	return ordermanagement.NewBreakerClient(rawPlanner, metrics), metrics
+}
+
+// wireUseCases builds the two use cases this composition root serves,
+// sharing one repository, planner, publisher and clock between them.
+// The UnitOfWork is nil exactly when pool is (in-memory mode): the use
+// cases treat that as "no transactional backing" and run Save+Publish
+// back to back, unchanged from before this rollout.
+func wireUseCases(
+	orders ports.NetworkOrderRepo,
+	gateway ports.NetworkGateway,
+	planner ports.FulfillmentPlanner,
+	translation ports.ProductTranslation,
+	events ports.EventPublisher,
+	pool *pgxpool.Pool,
+) (*usecases.ReceiveNetworkDemand, *usecases.SweepAcknowledgementDeadlines) {
+	var uow ports.UnitOfWork
+	if pool != nil {
+		uow = postgres.NewUnitOfWork(pool)
+	}
+	receive := &usecases.ReceiveNetworkDemand{
+		Orders:      orders,
+		Gateway:     gateway,
+		Planner:     planner,
+		Translation: translation,
+		Events:      events,
+		Clock:       systemClock{},
+		UnitOfWork:  uow,
+	}
+	sweep := &usecases.SweepAcknowledgementDeadlines{
+		Orders:     orders,
+		Planner:    planner,
+		Events:     events,
+		Clock:      systemClock{},
+		UnitOfWork: uow,
+	}
+	return receive, sweep
+}
+
+// newHTTPServer builds the REST server around the inbound adapter's
+// routes, on the address from PORT, with a bounded header-read timeout.
+func newHTTPServer(api *inboundhttp.Server) *http.Server {
+	return &http.Server{
 		Addr:              addr(),
 		Handler:           api.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+// serve runs the inbound poller, the acknowledgement sweep and the HTTP
+// server until SIGINT/SIGTERM arrives, then gives in-flight requests a
+// bounded grace period before the process winds down.
+func serve(
+	ctx context.Context,
+	logger *slog.Logger,
+	srv *http.Server,
+	sweep *usecases.SweepAcknowledgementDeadlines,
+	inbound *poller.Poller,
+	relay *postgres.OutboxRelay,
+	readiness *inboundhttp.Readiness,
+) {
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go runSweep(ctx, sweep, logger)
-	go inbound.Run(ctx)
+
+	// pollerDone closes once inbound.Run's goroutine has returned —
+	// mirroring the outbox relay's own relayDone below — so graceful
+	// shutdown can wait for a REAL stop rather than merely firing the
+	// cancel and moving on. The poller itself has no in-flight "commit"
+	// step to finish (unlike a Kafka consumer's offset commit): its own
+	// watermark only advances after a fully successful pass (see
+	// poller.go's own doc comment), so an in-flight pass interrupted by
+	// shutdown simply is not counted as successful and is safely
+	// re-polled on the next boot.
+	pollerDone := make(chan struct{})
+	go func() {
+		defer close(pollerDone)
+		inbound.Run(ctx)
+	}()
+
+	// The outbox relay (ADR 0003) runs alongside the HTTP server in the
+	// same process, draining outbox_events onto Kafka. It is only wired
+	// (non-nil) when both DATABASE_URL and EVENT_PUBLISHER=kafka are set.
+	relayDone := make(chan struct{})
+	relayCtx, stopRelay := context.WithCancel(ctx)
+	defer stopRelay()
+	if relay != nil {
+		go func() {
+			defer close(relayDone)
+			logger.Info("outbox relay running", "topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic)
+			if err := relay.Run(relayCtx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("outbox relay stopped", "err", err)
+			}
+		}()
+	} else {
+		close(relayDone)
+	}
 
 	go func() {
 		logger.Info("listening", "addr", srv.Addr)
@@ -151,9 +369,53 @@ func main() {
 	}()
 
 	<-ctx.Done()
+
+	// Graceful shutdown (ADR 0004, ported from order-management's ADR
+	// 0025), in order:
+	//
+	//  1. Flip readiness to not-ready FIRST, before anything else
+	//     stops — a Kubernetes readinessProbe polling /readyz needs a
+	//     window to observe this and stop routing NEW traffic to this
+	//     pod before step 2 below ever closes the listener.
+	//  2. Stop accepting new HTTP connections and drain in-flight
+	//     requests, bounded by shutdownCtx.
+	//  3. Stop the outbox relay and the poller cleanly: cancel their
+	//     contexts (no new poll/relay pass starts after this) and wait,
+	//     bounded by the SAME shutdownCtx, for their goroutines to
+	//     actually finish in-flight work, rather than merely asking
+	//     them to stop and moving on.
+	//  4. Only THEN do the deferred closeOrders/closeEventPublisher
+	//     calls (registered earlier in this function, so by defer's
+	//     LIFO order they run AFTER this point, once every
+	//     consumer/relay/poller goroutine has already stopped touching
+	//     the pool).
+	readiness.SetNotReady()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+
+	// Let the relay finish its in-flight pass so an event committed by a
+	// request that completed just before shutdown is not stranded until
+	// the next pod boots.
+	stopRelay()
+	select {
+	case <-relayDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("outbox relay did not stop before the shutdown deadline")
+	}
+
+	// The poller's own context is ctx (signal.NotifyContext's), already
+	// cancelled by the SIGTERM/SIGINT that got us here — stop() above
+	// is deferred, not yet run, but ctx.Done() is already closed, so
+	// inbound.Run's own select has already seen it. This wait is purely
+	// for the in-flight pass (if any) to finish before main returns.
+	select {
+	case <-pollerDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("poller did not stop before the shutdown deadline")
+	}
+
 	logger.Info("stopped")
 }
 
@@ -193,11 +455,15 @@ func runSweep(ctx context.Context, sweep *usecases.SweepAcknowledgementDeadlines
 // fleet — the alternative is a separate job that can be forgotten, and a
 // schema that lags the binary is how a context starts answering wrongly
 // rather than not at all.
-func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRepo, func(), error) {
+//
+// The returned pool is nil exactly when the repo is the in-memory one;
+// main uses that alone to decide whether a UnitOfWork/outbox is wired,
+// so the two can never disagree about which mode is active.
+func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRepo, *pgxpool.Pool, func(), error) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		logger.Info("order repository wired", "backend", "memory")
-		return memory.NewNetworkOrderRepo(), func() {}, nil
+		return memory.NewNetworkOrderRepo(), nil, func() {}, nil
 	}
 
 	// Retried, because in this fleet EVERY injected pod's first outbound
@@ -214,12 +480,12 @@ func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRep
 	if err := retry(ctx, logger, "run migrations", func() error {
 		return postgres.RunMigrations(databaseURL, migrationsPath())
 	}); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	pool, err := postgres.NewPool(ctx, databaseURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open pool: %w", err)
+		return nil, nil, nil, fmt.Errorf("open pool: %w", err)
 	}
 	// ParseConfig/NewWithConfig do not themselves establish a connection,
 	// so without this the first real failure would surface inside a
@@ -229,11 +495,11 @@ func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRep
 		return pool.Ping(ctx)
 	}); err != nil {
 		pool.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	logger.Info("order repository wired", "backend", "postgres")
-	return postgres.NewNetworkOrderRepo(pool), pool.Close, nil
+	return postgres.NewNetworkOrderRepo(pool), pool, pool.Close, nil
 }
 
 // bootRetries and bootRetryDelay bound the startup retry budget.

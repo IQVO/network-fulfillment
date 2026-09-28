@@ -21,6 +21,14 @@ type NetworkOrderRepo interface {
 	Save(ctx context.Context, o *networkorder.NetworkOrder) error
 	FindByRef(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error)
 	ListUnanswered(ctx context.Context) ([]*networkorder.NetworkOrder, error)
+	// ListAll returns every order regardless of state, for the read-only
+	// MCP list_network_orders tool (internal/adapters/inbound/mcp) and
+	// operator tooling. ListUnanswered above remains the one the sweep
+	// and the OLTP HTTP surface use; this is a separate, explicitly wider
+	// query rather than a state filter bolted onto it, so a caller that
+	// wants "just the working set" cannot be silently widened by a
+	// future change here.
+	ListAll(ctx context.Context) ([]*networkorder.NetworkOrder, error)
 }
 
 // NetworkGateway is the ONLY route to the external network. Every call
@@ -86,6 +94,25 @@ type ProductTranslation interface {
 // EventPublisher publishes this context's integration events.
 type EventPublisher interface {
 	Publish(ctx context.Context, event any) error
+}
+
+// UnitOfWork brackets a use case's state change and the domain event(s)
+// it raises so both commit or neither does (ADR 0003, transactional
+// outbox — mirrors process-path-management's ADR 0003 port of the same
+// name).
+//
+// Execute runs fn inside one atomic scope. Every Repo.Save and
+// EventPublisher.Publish made with the ctx handed to fn is bound to that
+// same scope: if fn returns an error the scope is rolled back and
+// nothing — neither the aggregate row nor the outbox row(s) — is visible
+// afterwards.
+//
+// Adapters that have no transactional backing (the in-memory repo, the
+// log publisher, or the direct Kafka publisher used when DATABASE_URL is
+// unset) satisfy this with a pass-through that simply calls fn; the use
+// cases stay adapter-agnostic either way.
+type UnitOfWork interface {
+	Execute(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
 // Clock is the only source of time in the application layer, so the

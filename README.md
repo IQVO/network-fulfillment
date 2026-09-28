@@ -5,8 +5,8 @@
 > follows real industry-standard patterns and terminology (WMS/WES/WCS,
 > CloudEvents-like envelopes, RFC 7807, hexagonal architecture) but is
 > **not a production system** and is **not affiliated with, endorsed by, or
-> representative of Amazon, Manhattan Associates, Blue Yonder, or any other
-> company**. References to the Amazon Selling Partner API describe a public
+> representative of any real-world
+> company**. References to a major e-commerce retailer's Selling Partner API describe a public
 > API this exercise integrates against as a learning target.
 
 The anti-corruption layer between the `warehouse-systems` fleet and an
@@ -16,12 +16,77 @@ context that is **Conformist** to the network upstream and an
 
 ## Status
 
-**Design stage.** This repository currently contains one Architecture
-Decision Record and no implementation. ADR 0001 is `Proposed` and is a
-companion to `order-management` ADR 0020 — neither is meaningful without
-the other, and both are accepted or rejected as one decision.
+**Implemented on `develop`, stub-only, not yet released.** ADR 0001 is
+`Accepted` (2026-09-23), together with its companion `order-management`
+ADR 0020 — neither is meaningful without the other. There is no `main`
+branch yet.
 
 📄 [ADR 0001 — Network Fulfillment as a bounded context](docs/adr/0001-network-fulfillment-bounded-context.md)
+
+What exists today:
+
+- **`NetworkOrder` aggregate** (`internal/domain/networkorder`) —
+  `NEW -> ACKNOWLEDGED | REJECTED`, `ACKNOWLEDGED -> CONFIRMED`; one answer
+  per order, acknowledged in full or rejected in full, a 24h
+  `acknowledgeBy` deadline fixed at receipt, and a persisted one-to-one
+  `localOrderId` link that is only allowed once acknowledged.
+- **Inbound leg** — a poller (`internal/adapters/inbound/poller`) calls the
+  network gateway every `POLL_INTERVAL` (default `1m`) and feeds each unit of
+  demand to `ReceiveNetworkDemand`. Its watermark advances only on a fully
+  successful pass, and receipt is idempotent on `networkRef`.
+- **`ReceiveNetworkDemand`** — translates network product ids to SKUs (one
+  unknown product rejects the whole order), raises a **held** order in
+  `order-management` (`POST /orders` with `releaseOnAllocation: false`,
+  `allowPartialShipment: false`, `requiredShipBy`), treats a returned
+  `promiseDate` as "feasible" and a null one as "not feasible", then
+  acknowledges and releases (`POST /orders/{id}/release`) or rejects and
+  cancels (`DELETE /orders/{id}`). No promise math is done here.
+- **`SweepAcknowledgementDeadlines`** — every `SWEEP_INTERVAL` (default `1m`
+  in the binary, `5m` in the chart) rejects any order still `NEW` past its
+  deadline and cancels its held local order.
+- **Read-only REST** (`apis/openapi.yaml`): `GET /healthz`,
+  `GET /inbound-status` (poller counters, unanswered/overdue counts),
+  `GET /network-orders` (unanswered orders), `GET /network-orders/{networkRef}`.
+  There is deliberately no write endpoint: demand arrives only by polling.
+- **Persistence** — Postgres (`migrations/0001_init.*.sql`, one
+  `network_orders` table plus its lines) when `DATABASE_URL` is set, and an
+  in-memory repository when it is not. If `DATABASE_URL` is set but Postgres
+  cannot be reached, the service refuses to boot instead of falling back.
+  Migrations run at startup.
+- **Curated ACL files** — `PRODUCT_TRANSLATION_FILE` (network product id ->
+  SKU; without it every order is rejected as untranslatable, and a warning is
+  logged at startup) and `NETWORK_SEED_FILE` (stub demand; refuses to boot
+  against a non-stub gateway). The Helm chart renders both from
+  `productTranslation.mappings` and `stubDemand.demands`.
+- **Boot resilience** — the migration run and the database ping are retried
+  with backoff (~31s budget) to survive this cluster's first-dial connection
+  reset, and the chart has a `startupProbe`. After the budget the service
+  still refuses to boot.
+- **Packaging** — `Dockerfile` and `charts/network-fulfillment/`. The chart
+  fails to render if `config.networkMode` is `sandbox`/`live` and no
+  credentials are provided (checked by `charts/network-fulfillment/tests/`).
+  It is deployed to the kind cluster by `warehouse-infra`, and Kong serves it
+  at `/api/network-fulfillment`.
+- **Kafka + transactional outbox (ADR 0003)** — `EVENT_PUBLISHER=kafka` fans
+  every domain event out to both the integration topic
+  (`warehouse.network-fulfillment.events`) and the analytics topic
+  (`warehouse.network-fulfillment.analytics`). With `DATABASE_URL` unset both
+  are published directly (no transaction to bind them to — the in-memory dev
+  mode); with `DATABASE_URL` set, saving the aggregate and enqueuing its
+  event(s) for both topics happen in one Postgres transaction (the
+  `outbox_events` table), and a background relay drains it to the broker.
+  The default (`EVENT_PUBLISHER` unset) still publishes to a log-only
+  publisher.
+
+Not built yet:
+
+- **`NETWORK_MODE=sandbox|live`**: both refuse to boot with "not implemented
+  yet". Only the stub gateway exists, so no call to a real network is made.
+- **`CapabilityOffer`** / throughput-constrained advertised availability,
+  and shipment confirmation. `NetworkOrder.ConfirmShipment` exists in the
+  domain, but no use case calls it.
+- **Customer PII**: no ship-to data is modelled or stored yet.
+- No `web/` remote, no MCP server, no BDD `features/`.
 
 ## Why this context exists
 
@@ -78,21 +143,76 @@ Advertising 120 sells capability honestly.
 - **Promise math is not duplicated here.** Deadline feasibility is asked of
   `order-management`'s existing `PromisePolicy`, per the companion ADR.
 
-## Planned shape
+## Shape
 
 ```
-NetworkOrder      networkRef, requiredShipBy, lines, localOrderId,
-                  NEW -> ACKNOWLEDGED | REJECTED -> CONFIRMED
+NetworkOrder      networkRef, siteId, requiredShipBy, acknowledgeBy, lines,
+                  localOrderId                                  (implemented)
+                  NEW -> ACKNOWLEDGED -> CONFIRMED
+                      -> REJECTED
                   invariant: acknowledged in full or rejected in full
 
-CapabilityOffer   (sku, siteId) -> advertisedQuantity + basis
+CapabilityOffer   (sku, siteId) -> advertisedQuantity + basis     (planned)
                   Physical | ThroughputConstrained
                   invariant: advertisedQuantity <= physicalAvailable
 ```
 
-`NETWORK_MODE=live|sandbox|stub` gates every outbound call, defaulting to
-`stub`. The kind cluster, `e2e-tests` and CI run in `stub` and never need a
+```
+cmd/netfulfil/                 composition root (the only binary)
+internal/
+  domain/networkorder/         NetworkOrder aggregate
+  domain/shared/               NetworkRef, NetworkLineRef, NetworkProductId, SKU, ...
+  application/contract/        InboundDemand, HeldOrderRequest/Result
+  application/ports/           NetworkOrderRepo, NetworkGateway, FulfillmentPlanner,
+                               ProductTranslation, EventPublisher, Clock
+  application/usecases/        ReceiveNetworkDemand, SweepAcknowledgementDeadlines
+  adapters/inbound/http/       read-only REST
+  adapters/inbound/poller/     the inbound leg
+  adapters/outbound/network/   NETWORK_MODE switch + stub gateway + seed file
+  adapters/outbound/ordermanagement/  held-order planner (order-management REST)
+  adapters/outbound/postgres/  repository + migrations runner
+  adapters/outbound/memory/    in-memory repository + product translation file
+  architecture/                arch-go hexagonal + fleet fitness tests
+migrations/                    Postgres schema
+apis/openapi.yaml              REST contract (Spectral-linted in CI)
+charts/network-fulfillment/    Helm chart (+ Python wiring tests)
+```
+
+`NETWORK_MODE=live|sandbox|stub` gates every outbound call to the network.
+It defaults to `stub`, and any unrecognised value is also treated as `stub`.
+The kind cluster, `e2e-tests` and CI run in `stub` and never need a
 credential.
+
+## Configuration
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `NETWORK_MODE` | `stub` | `sandbox`/`live` currently refuse to boot (not implemented) |
+| `ORDER_MANAGEMENT_URL` | `http://localhost:8080` | base URL for the held-order calls |
+| `DATABASE_URL` | unset (in-memory) | set = Postgres or refuse to boot |
+| `MIGRATIONS_PATH` | `/app/migrations` | override for a local run from the repo root |
+| `PRODUCT_TRANSLATION_FILE` | unset | `{"products":[{"networkProductId","sku"}]}` |
+| `NETWORK_SEED_FILE` | unset | stub demand, `{"demands":[...]}`; stub mode only |
+| `POLL_INTERVAL` | `1m` | Go duration |
+| `SWEEP_INTERVAL` | `1m` | Go duration |
+| `PORT` | `8080` | HTTP listen port |
+| `EVENT_PUBLISHER` | `log` (default) | `kafka` publishes to both topics; with `DATABASE_URL` set this activates the transactional outbox (ADR 0003) instead of publishing directly |
+| `KAFKA_BROKERS` | `localhost:9092` | comma-separated broker list, only read when `EVENT_PUBLISHER=kafka` |
+| `OUTBOX_RELAY_INTERVAL` | `1s` | Go duration; sleep between empty outbox relay passes (outbox mode only) |
+
+## Local quality gate
+
+```bash
+make check        # fmt-check vet build lint test  (what lefthook pre-push runs)
+make check-all    # check + coverage (90% gate) + arch-test + bdd
+make integration  # testcontainers Postgres
+make mutation     # gremlins on ./internal/domain/networkorder
+make vuln         # govulncheck
+```
+
+CI (`.github/workflows/ci.yml`) runs `lint`, `test`, `integration`,
+`api-lint`, `mutation-fast`, `vuln`, `helm-lint` and `arch-test` on every
+PR into `develop`/`main`.
 
 ## Related decisions elsewhere in the fleet
 
@@ -109,3 +229,4 @@ credential.
 
 GitFlow: `feature/*` branches off `develop`, PR into `develop`
 (`gh pr create --base develop`); `develop` promotes to `main` for release.
+This repo has not been released yet, so there is no `main` branch.

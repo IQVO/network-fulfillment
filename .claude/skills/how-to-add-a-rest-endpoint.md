@@ -1,6 +1,20 @@
-<!-- TEMPLATE NOTE (warehouse-harness-template v1): adapt every repo-specific example in this file (file paths, type names, field names) to THIS repo real code. Do not copy-paste verbatim. -->
 
 # How to add a REST endpoint
+
+> **In network-fulfillment, read this first.** The REST surface is
+> **read-only by design** (see `.claude/rules/rest-api.md` and ADR 0001
+> section 5): demand arrives only by polling, so do not add a write/intake
+> endpoint without a new ADR. For a new *read* route the real files are
+> `internal/adapters/inbound/http/server.go` (`Routes()` on a stdlib
+> `http.ServeMux`, e.g. `mux.HandleFunc("GET /inbound-status", ...)`),
+> `dto.go`, and `errors.go` (keep `statusFor` and `problemFor` one-for-one).
+> Read handlers use `ports.NetworkOrderRepo` directly, not a use case.
+> The worked example below (`POST /bins/{binId}/cycle-count`,
+> `RunCycleCount`, `r.Post`, `shared.NewBinId`, `features/`,
+> `docs/` regeneration) comes from the fleet template and does **not**
+> exist here: this repo has no docs site, no `docs-api-drift` job and no
+> `features/`/`bdd` job — update `apis/openapi.yaml` and let `api-lint`
+> (Spectral) check it.
 
 Use when asked to add a new REST use case/endpoint to this service. Follow
 this order — domain first, adapter last — never the reverse; writing the

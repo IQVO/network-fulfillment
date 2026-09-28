@@ -3,7 +3,7 @@ id: 0001-network-fulfillment-bounded-context
 slug: /adr/0001-network-fulfillment-bounded-context
 title: 1. Network Fulfillment as a bounded context — conformist to the network, anti-corruption layer for the fleet
 sidebar_label: 1. Network Fulfillment bounded context
-description: "ADR 0001 — why the integration with an external retail fulfillment network (Amazon's Selling Partner API, Vendor Direct Fulfillment) is its own bounded context rather than an adapter inside order-management: it is Conformist upstream, holds the only customer PII and the only external SLA in the fleet, and owns the one genuinely new domain concept — advertised availability constrained by throughput, not just by stock."
+description: "ADR 0001 — why the integration with an external retail fulfillment network (a major e-commerce retailer's Selling Partner API, Vendor Direct Fulfillment) is its own bounded context rather than an adapter inside order-management: it is Conformist upstream, holds the only customer PII and the only external SLA in the fleet, and owns the one genuinely new domain concept — advertised availability constrained by throughput, not just by stock."
 ---
 
 # 1. Network Fulfillment as a bounded context — conformist to the network, anti-corruption layer for the fleet
@@ -36,7 +36,7 @@ The obvious next question — "can we offer that capability to an external
 retail network?" — has a non-obvious answer, and it shaped this whole
 record. **There is no API that accepts a declaration of capability.**
 
-Amazon's Selling Partner API, across Vendor Direct Fulfillment
+A major e-commerce retailer's Selling Partner API, across Vendor Direct Fulfillment
 (Orders / Shipping / Inventory / Payments / Transactions) and the
 Fulfillment Outbound family, exposes no operation to which a
 fulfilling party can say "my cutoffs are 11:00 and 18:00 local, and my

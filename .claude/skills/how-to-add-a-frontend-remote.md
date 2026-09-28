@@ -1,6 +1,11 @@
-<!-- TEMPLATE NOTE (warehouse-harness-template v1): adapt every repo-specific example in this file (file paths, type names, field names) to THIS repo real code. Do not copy-paste verbatim. -->
 
 # How to add a frontend remote
+
+> **In network-fulfillment:** this repo has **no `web/` remote** and no
+> console screen, and none is planned in ADR 0001. The guidance below is
+> the fleet's generic recipe, kept for the day one is added (it would also
+> need a `web` CI job and an entry in `warehouse-infra`'s
+> `frontend_remotes`).
 
 Use when adding a new screen/feature to this repo's `web/` Module
 Federation remote, or when standing up a NEW remote for a bounded context

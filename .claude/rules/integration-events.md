@@ -1,27 +1,33 @@
-<!-- TEMPLATE (warehouse-harness-template v1): fill in for THIS repo, or
-     delete this file if the repo publishes/consumes no Kafka events. -->
 # Cross-service integration events (Kafka)
 
-State whether this service PUBLISHES, CONSUMES, or both, and to/from which
-topic(s) (`warehouse.<context>.events` is this fleet's naming convention).
+**Current state: this service neither publishes to nor consumes from Kafka.**
+There is no Kafka client, topic or consumer group in the code.
 
-## CloudEvents envelope
+- `ports.EventPublisher` exists; `cmd/netfulfil` wires it to a
+  `logPublisher` that only writes a structured log line. No use case calls
+  `Publish` yet.
+- Cross-context interaction today is synchronous REST to order-management
+  (`internal/adapters/outbound/ordermanagement`: `POST /orders` for a held
+  order carrying `requiredShipBy`, `POST /orders/{id}/release`,
+  `DELETE /orders/{id}`), plus polling the external network through
+  `ports.NetworkGateway`.
 
-State the envelope shape this repo uses and the type-naming convention,
-e.g. `com.warehouse.wms.<context>.<aggregate>.<PastTenseEvent>`.
+## When Kafka arrives
 
-## Consumer group id
+ADR 0001's `CapabilityOffer` is planned to consume fleet facts (inventory
+availability, the process-path CPT schedule, wes-work-planning path
+capacity), and publishing comes later. When that lands:
 
-If this service consumes Kafka: state where the consumer group id comes
-from. It MUST be env-configurable, never a hardcoded string literal --
-`internal/architecture/fitness_test.go`'s
-TestKafkaConsumerGroupNeverHardcodedInline enforces this (a real incident:
-wes-work-planning's hardcoded group id let a locally-run e2e-tests process
-silently collide with the live in-cluster Deployment's consumer group on
-the shared fleet Kafka broker).
-
-If this consumer replays from FirstOffset on every start to build an
-in-memory read model (rather than resuming from a committed offset), the
-group id must additionally be UNIQUE PER PROCESS INSTANCE (hostname+PID+
-timestamp), not just configurable -- see HARNESS.md's Kafka section for
-why a shared group breaks that pattern specifically.
+- One broker for the whole fleet; topic naming `warehouse.<context>.events`;
+  CloudEvents-style envelopes with
+  `com.warehouse.<subdomain>.network-fulfillment.<entity>.<EventName>` types.
+- Nothing network-shaped crosses into a published event — no purchase-order
+  numbers as fleet identities, no ASINs, no network status codes, and no
+  customer PII.
+- Consumer group ids must be env-configurable, never inline literals
+  (`TestKafkaConsumerGroupNeverHardcodedInline`). A consumer that replays
+  from FirstOffset to build an in-memory cache must use a group id unique
+  per process instance (hostname+PID+timestamp).
+- Kafka integration tests must start their own broker via testcontainers
+  (`TestKafkaIntegrationTestsUseTestcontainers`) — CI provides no broker.
+- Add `apis/asyncapi.yaml` in the same PR.
