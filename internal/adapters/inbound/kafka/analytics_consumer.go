@@ -144,6 +144,18 @@ func NewAnalyticsConsumer(brokers []string, topic, groupID string, projection re
 		dlqWriter: &kafkago.Writer{
 			Addr:  kafkago.TCP(brokers...),
 			Topic: topic + dlqTopicSuffix,
+			// Hash (not the zero-value default, RoundRobin — see
+			// kafka-go's Writer.Config, which defaults Balancer to
+			// RoundRobin when nil): dlqPublish forwards the SAME
+			// aggregate key the source message carried (msg.Key,
+			// below), specifically so a manual replay tool can process
+			// one partition's dead letters without interleaving
+			// unrelated aggregates and, if it replays in offset order,
+			// preserve each aggregate's original relative event order.
+			// RoundRobin would scatter one aggregate's dead-lettered
+			// events across the DLQ topic's partitions despite the key
+			// being set, defeating that. See ADR 0005.
+			Balancer: &kafkago.Hash{},
 		},
 	}
 }
