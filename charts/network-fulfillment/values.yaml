@@ -69,11 +69,58 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+# HorizontalPodAutoscaler (autoscaling/v2) per independently-scalable
+# workload type, ported from order-management's Phase 3 reference PR
+# (ADR 0026) -- see docs/adr/0006-horizontal-autoscaling-and-pgxpool-
+# tuning.md for the full per-workload reasoning. Every block below
+# defaults `enabled: false` so this PR cannot silently change production
+# replica behaviour on merge. When a component's autoscaling.<x>.enabled
+# is true, that Deployment's own replicaCount value is OMITTED from the
+# rendered manifest (see each deployment template's `{{- if not
+# .Values.autoscaling.<x>.enabled }}` guard) so the HPA controller is the
+# SOLE owner of .spec.replicas -- a hardcoded `replicas:` field competing
+# with the HPA would otherwise fight it on every reconcile.
+#
+# analytics-projector and mcp deliberately have NO block here (skipped,
+# not just disabled) -- see their own values below (analytics.projector,
+# mcp) for why each is not safely horizontally scalable as built today.
 autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 80
+  # cmd/netfulfil (this Deployment): stateless OLTP HTTP service plus an
+  # inbound poller (internal/adapters/inbound/poller) and acknowledgement
+  # sweep, both driven by this same process's own ticker -- neither
+  # consumes Kafka, so there is no consumer-group collision risk here at
+  # all (this binary's only Kafka use is as an OUTBOUND publisher/outbox
+  # relay, which every replica may do independently). Its in-memory mode
+  # (no DATABASE_URL) forgets state on restart by design, but that is a
+  # deployment-mode property, not a per-replica-divergence risk: every
+  # api replica in a real deployment shares the SAME Postgres-backed
+  # NetworkOrderRepo, so N replicas read/write one consistent store, not N
+  # disagreeing in-memory maps. max 4 / target 70% CPU, matching
+  # order-management's identically-shaped api Deployment.
+  api:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  # cmd/netfulfil-reports: stateless read-only REST reader over its own
+  # read-only pgxpool (analyticsstore.NewReadOnlyPool) -- no in-memory
+  # state, no Kafka consumption, same treatment as order-management's
+  # analytics-reports Deployment. max 3 / target 70% CPU.
+  reports:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  # frontend (netfulfil_mfe Module Federation remote, nginx-unprivileged
+  # serving the built SPA bundle): pure static-asset serving, no
+  # server-side session or per-request state whatsoever -- the most
+  # trivially horizontally scalable workload in this chart. max 3 /
+  # target 70% CPU.
+  frontend:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
 
 # This context's OLTP configuration surface (cmd/netfulfil/main.go), plus
 # corsAllowedOrigins for the inbound HTTP adapter's CORS middleware. It
@@ -318,6 +365,21 @@ analytics:
     # to a Service -- it is a pure consumer -- but the admin server still
     # needs an address for its /healthz probe).
     adminAddr: ":8091"
+    # Deliberately NOT HPA-scalable (no autoscaling.projector block
+    # exists in this chart, unlike order-management's identically-named
+    # component). Its Kafka consumer group id is minted FRESH per
+    # process instance (internal/adapters/inbound/kafka's
+    # NewUniqueConsumerGroup(AnalyticsConsumerGroupPrefix)) rather than a
+    # single stable shared group -- the opposite convention from
+    # order-management's AnalyticsConsumerGroup. Running N>1 replicas
+    # would each join with their OWN unique group and each independently
+    # replay the ENTIRE analytics topic from kafkago.FirstOffset,
+    # double/triple-projecting every historical event rather than
+    # sharing partitions the way a stable shared group would. Fixing
+    # this to be safely scalable would mean switching to a stable shared
+    # group name (a real behavior change to the replay-on-restart
+    # semantics), out of scope for this chart-and-pgxpool-tuning PR.
+    # replicaCount therefore stays a plain, manually-set value.
     resources:
       limits:
         cpu: 500m
@@ -343,12 +405,30 @@ analytics:
         cpu: 100m
         memory: 128Mi
 
-# --- MCP server (ADR 0003) ---
+# --- MCP server (ADR 0002) ---
 # The Model Context Protocol server (cmd/mcp): a second deployable over the
 # same read use cases and OLTP database as the HTTP service, served over
 # Streamable HTTP at "/" and "/mcp" with a GET /healthz for the probes.
 # Disabled by default so existing releases are unaffected; set
 # mcp.enabled=true to deploy it.
+#
+# Deliberately NOT HPA-scalable (no autoscaling.mcp block exists in this
+# chart, mirroring order-management's identical exclusion): the
+# github.com/modelcontextprotocol/go-sdk StreamableHTTPHandler this
+# adapter wraps (internal/adapters/inbound/mcp/server.go's Handler)
+# keeps per-process, in-memory session state keyed by the MCP protocol's
+# own Mcp-Session-Id header -- a real multi-request session, not just a
+# TCP/HTTP connection. charts/network-fulfillment/templates/
+# mcp-service.yaml is a plain ClusterIP Service with no sessionAffinity
+# configured, so under >1 replica a second request carrying the same
+# Mcp-Session-Id (e.g. a tools/call following an earlier initialize)
+# could land on a different pod than the one that created the session,
+# which has never heard of it and would reject or silently start a new
+# one. Fixing it for real needs either sessionAffinity: ClientIP (a
+# partial mitigation only) or wiring the SDK's own external/shared
+# session store -- a real code change, out of scope for this
+# chart-and-pool-tuning PR. mcp.replicaCount stays a plain, manually-set
+# value.
 mcp:
   enabled: false
   replicaCount: 1
