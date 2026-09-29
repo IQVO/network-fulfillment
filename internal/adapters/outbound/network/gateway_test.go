@@ -52,7 +52,7 @@ func TestNewGateway_RefusesUnimplementedModesRatherThanDegrading(t *testing.T) {
 	}
 }
 
-func TestStubGateway_PollClearsSeededDemand(t *testing.T) {
+func TestStubGateway_PollDemandRePresentsUnacknowledgedUnits(t *testing.T) {
 	g := NewStubGateway(nil)
 	g.Seed(contract.InboundDemand{NetworkRef: "po-1"})
 
@@ -64,14 +64,30 @@ func TestStubGateway_PollClearsSeededDemand(t *testing.T) {
 		t.Fatalf("first poll = %d demands, want 1", len(first))
 	}
 
-	// A real poll advances its cursor; replaying the same batch forever
-	// would make the stub behave in a way no real network does.
+	// A real network's cursor only advances once WE have acknowledged
+	// an order (poller.go's own contract: a failed Execute must be
+	// re-fetched on the next pass, not lost). Nothing has been
+	// acknowledged yet, so the same unit must still be there.
 	second, err := g.PollDemand(context.Background(), time.Time{})
 	if err != nil {
 		t.Fatalf("PollDemand: %v", err)
 	}
-	if len(second) != 0 {
-		t.Fatalf("second poll = %d demands, want 0", len(second))
+	if len(second) != 1 {
+		t.Fatalf("second poll (before ack) = %d demands, want 1", len(second))
+	}
+
+	if err := g.SubmitAcknowledgement(context.Background(), "po-1", true); err != nil {
+		t.Fatalf("SubmitAcknowledgement: %v", err)
+	}
+
+	// Acknowledging the order is what retires it: the next poll must
+	// not hand it back again.
+	third, err := g.PollDemand(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("PollDemand: %v", err)
+	}
+	if len(third) != 0 {
+		t.Fatalf("third poll (after ack) = %d demands, want 0", len(third))
 	}
 }
 

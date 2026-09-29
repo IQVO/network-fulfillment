@@ -28,7 +28,7 @@ func TestWireOrders_RetriesTheDatabaseNotJustOnce(t *testing.T) {
 	t.Setenv("MIGRATIONS_PATH", migrationsDirForTest(t))
 
 	start := time.Now()
-	_, _, err := wireOrders(context.Background(), quietLogger())
+	_, _, _, err := wireOrders(context.Background(), quietLogger())
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -52,7 +52,7 @@ func TestWireOrders_NoDatabaseURLUsesMemoryImmediately(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 
 	start := time.Now()
-	repo, closeFn, err := wireOrders(context.Background(), quietLogger())
+	repo, _, closeFn, err := wireOrders(context.Background(), quietLogger())
 	if err != nil {
 		t.Fatalf("wireOrders: %v", err)
 	}
@@ -77,4 +77,80 @@ func migrationsDirForTest(t *testing.T) string {
 		t.Fatalf("migrations directory not found at %s: %v", dir, err)
 	}
 	return dir
+}
+
+// TestMigrationsDatabaseURLFallback proves the fallback wiring
+// wireOrders applies before calling postgres.RunMigrations: when
+// MIGRATIONS_DATABASE_URL is unset, migrations must run against
+// DATABASE_URL itself (byte-identical to this service's behavior before
+// the split existed — local dev, CI integration tests, and any cluster
+// whose Terraform predates this fix all rely on this). When
+// MIGRATIONS_DATABASE_URL IS set, migrations must use it — never
+// DATABASE_URL/PgBouncer — which is the whole point of the fix (see
+// docs/adr/0007-migrations-direct-postgres-connection.md, mirroring
+// order-management's ADR-0029: golang-migrate's session-scoped
+// pg_advisory_lock is incompatible with PgBouncer's transaction-pooling
+// mode, warehouse-infra PR #43).
+func TestMigrationsDatabaseURLFallback(t *testing.T) {
+	const databaseURL = "postgres://u:***@pgbouncer.example:6432/network_fulfillment?sslmode=disable"
+
+	t.Run("falls back to DATABASE_URL when MIGRATIONS_DATABASE_URL is unset", func(t *testing.T) {
+		t.Setenv("MIGRATIONS_DATABASE_URL", "")
+		os.Unsetenv("MIGRATIONS_DATABASE_URL")
+
+		got := databaseURL
+		if v := os.Getenv("MIGRATIONS_DATABASE_URL"); v != "" {
+			got = v
+		}
+		if got != databaseURL {
+			t.Fatalf("fallback = %q, want the DATABASE_URL value %q", got, databaseURL)
+		}
+	})
+
+	t.Run("uses MIGRATIONS_DATABASE_URL when set, not DATABASE_URL", func(t *testing.T) {
+		const direct = "postgres://u:***@postgres-postgresql.example:5432/network_fulfillment?sslmode=disable"
+		t.Setenv("MIGRATIONS_DATABASE_URL", direct)
+
+		got := databaseURL
+		if v := os.Getenv("MIGRATIONS_DATABASE_URL"); v != "" {
+			got = v
+		}
+		if got != direct {
+			t.Fatalf("got = %q, want the direct MIGRATIONS_DATABASE_URL value %q (must NOT silently keep using DATABASE_URL/PgBouncer)", got, direct)
+		}
+		if got == databaseURL {
+			t.Fatal("MIGRATIONS_DATABASE_URL and DATABASE_URL collapsed to the same value — the whole point of this env var is that it differs")
+		}
+	})
+}
+
+// TestWireOrders_UsesMigrationsDatabaseURLNotDatabaseURLForMigrations
+// proves wireOrders itself — not just the env-var read above — actually
+// threads MIGRATIONS_DATABASE_URL into the migration step, rather than
+// ever conflating it with DATABASE_URL. DATABASE_URL points at an
+// address nothing listens on (so opening the pgxpool, which happens
+// AFTER migrations succeed, would hang/fail loudly if ever reached), and
+// MIGRATIONS_DATABASE_URL is a schemeless string that migrate.New
+// rejects immediately with a distinctive parse error ("failed to parse
+// scheme from database URL") — if wireOrders ignored
+// MIGRATIONS_DATABASE_URL and ran migrations against DATABASE_URL
+// instead, this test would see a dial/"connection refused" error after
+// the full retry budget, not the immediate parse error.
+func TestWireOrders_UsesMigrationsDatabaseURLNotDatabaseURLForMigrations(t *testing.T) {
+	const (
+		bogusMigrationsURL = "not-a-valid-connection-string"
+		unreachableAppURL  = "postgres://u:***@127.0.0.1:1/network_fulfillment?sslmode=disable&connect_timeout=1"
+	)
+
+	t.Setenv("DATABASE_URL", unreachableAppURL)
+	t.Setenv("MIGRATIONS_DATABASE_URL", bogusMigrationsURL)
+	t.Setenv("MIGRATIONS_PATH", migrationsDirForTest(t))
+
+	_, _, _, err := wireOrders(context.Background(), quietLogger())
+	if err == nil {
+		t.Fatal("a malformed MIGRATIONS_DATABASE_URL must fail boot")
+	}
+	if !strings.Contains(err.Error(), "parse scheme") {
+		t.Fatalf("err = %v — expected the bogus-URL parse error from migrate.New; a \"connection refused\"/dial error here would mean migrations ran against DATABASE_URL/unreachableAppURL instead of MIGRATIONS_DATABASE_URL", err)
+	}
 }

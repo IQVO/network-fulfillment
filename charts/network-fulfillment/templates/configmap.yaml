@@ -37,6 +37,11 @@ data:
   # down or slow spends someone else's deadline, and an outage here is an
   # SLA breach rather than a delayed batch.
   POLL_INTERVAL: {{ .Values.config.pollInterval | quote }}
+
+  # Browser origins allowed to call this read-only API directly (this
+  # context's own netfulfil_mfe remote dev port plus warehouse-console's).
+  # See internal/adapters/inbound/http/server.go's corsMiddleware.
+  CORS_ALLOWED_ORIGINS: {{ .Values.config.corsAllowedOrigins | quote }}
 {{- if .Values.productTranslation.mappings }}
 
   # The Anti-Corruption Layer's dictionary: the network's product

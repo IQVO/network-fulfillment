@@ -52,6 +52,18 @@ func (r *NetworkOrderRepo) ListUnanswered(_ context.Context) ([]*networkorder.Ne
 	return out, nil
 }
 
+// ListAll returns every order regardless of state. Iteration order is
+// deliberately not specified, for the same reason as ListUnanswered.
+func (r *NetworkOrderRepo) ListAll(_ context.Context) ([]*networkorder.NetworkOrder, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*networkorder.NetworkOrder, 0, len(r.orders))
+	for _, o := range r.orders {
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 // ProductTranslation is an in-memory ports.ProductTranslation: the
 // Anti-Corruption Layer's dictionary, seeded explicitly.
 //

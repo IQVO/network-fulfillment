@@ -34,12 +34,17 @@ func NewNetworkOrderRepo(pool *pgxpool.Pool) *NetworkOrderRepo {
 // the network set them and we may not move them. In particular
 // acknowledge_by must never be rewritten by a later save, or every
 // re-save would silently extend the SLA clock the sweep is measuring.
+//
+// Save opens its OWN transaction when called standalone, but JOINS an
+// outer one when ctx already carries one (beginOrJoin) — the latter is
+// what happens inside UnitOfWork.Execute, so the order row and its
+// outbox row(s) commit together (transactional outbox).
 func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrder) error {
-	tx, err := r.pool.Begin(ctx)
+	tx, commit, rollback, err := beginOrJoin(ctx, r.pool)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = rollback(ctx) }()
 
 	var localOrderId *string
 	if id := o.LocalOrderId(); id != nil {
@@ -84,7 +89,7 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 		}
 	}
 
-	return tx.Commit(ctx)
+	return commit(ctx)
 }
 
 // FindByRef returns (nil, nil) when no order has this ref — "not found"
@@ -149,6 +154,47 @@ func (r *NetworkOrderRepo) ListUnanswered(ctx context.Context) ([]*networkorder.
 		// A concurrent answer between the two queries is not an error:
 		// the order is simply no longer unanswered, and the sweep would
 		// have skipped it anyway.
+		if o == nil {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+// ListAll returns every order regardless of state, for the read-only MCP
+// list_network_orders tool. Ordered by received_at so pagination (were
+// it ever added) would be stable; today the whole set is returned.
+func (r *NetworkOrderRepo) ListAll(ctx context.Context) ([]*networkorder.NetworkOrder, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT network_ref
+		FROM network_orders
+		ORDER BY received_at
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []shared.NetworkRef
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		refs = append(refs, shared.NetworkRef(ref))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]*networkorder.NetworkOrder, 0, len(refs))
+	for _, ref := range refs {
+		o, err := r.FindByRef(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
 		if o == nil {
 			continue
 		}

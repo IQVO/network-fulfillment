@@ -78,6 +78,20 @@ func TestReceive_DerivesAcknowledgementDeadlineFromArrival(t *testing.T) {
 	}
 }
 
+// TestAcknowledgementWindow_IsExactlyTwentyFourHours pins the SLA's
+// literal value against a hardcoded duration rather than the constant
+// itself. TestReceive_DerivesAcknowledgementDeadlineFromArrival above
+// computes its expectation FROM AcknowledgementWindow, so a mutant that
+// changes the constant's arithmetic (e.g. 24*time.Hour -> 24/time.Hour)
+// mutates both sides of that assertion identically and can never be
+// caught by it — this test is the one that actually pins the number
+// ADR 0001 §6 names.
+func TestAcknowledgementWindow_IsExactlyTwentyFourHours(t *testing.T) {
+	if AcknowledgementWindow != 24*time.Hour {
+		t.Fatalf("AcknowledgementWindow = %v, want exactly 24h (ADR 0001 §6, Amazon Vendor Direct Fulfillment's published SLA)", AcknowledgementWindow)
+	}
+}
+
 func TestAcknowledge_ThenSecondAnswerIsRejected(t *testing.T) {
 	o := mustReceive(t)
 	if err := o.Acknowledge(); err != nil {

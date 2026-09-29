@@ -16,6 +16,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
+
+	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
@@ -40,6 +46,16 @@ type Server struct {
 	Poller      StatsSource
 	Clock       ports.Clock
 	NetworkMode string
+	// Readiness backs GET /readyz (ADR 0004 §graceful shutdown). A nil
+	// Readiness (the zero value, and every pre-existing caller/test)
+	// means /readyz always reports ready — see Readiness's own doc
+	// comment.
+	Readiness *Readiness
+	// MetricsRegistry, when non-nil, backs GET /metrics (ADR 0004's
+	// circuit_breaker_state gauge). A nil registry means /metrics is
+	// simply not registered — every pre-existing caller/test that does
+	// not care about metrics is unaffected.
+	MetricsRegistry *prometheus.Registry
 }
 
 // Routes returns this adapter's handler.
@@ -49,10 +65,35 @@ type Server struct {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /network-orders/{networkRef}", s.handleGetNetworkOrder)
 	mux.HandleFunc("GET /network-orders", s.handleListUnanswered)
 	mux.HandleFunc("GET /inbound-status", s.handleInboundStatus)
-	return mux
+	if s.MetricsRegistry != nil {
+		mux.Handle("GET /metrics", promhttp.HandlerFor(s.MetricsRegistry, promhttp.HandlerOpts{}))
+	}
+	return corsMiddleware()(mux)
+}
+
+// corsMiddleware allows the warehouse-console browser SPA (and this
+// service's own netfulfil_mfe remote dev origin, :5188) to call this
+// read-only API directly from the browser. CORS_ALLOWED_ORIGINS overrides
+// the local-dev default (comma-separated) for staging/prod deployments.
+// Same shape as every sibling context's inbound HTTP adapter (see e.g.
+// facility-layout's corsMiddleware) -- only GET/OPTIONS are allowed here,
+// matching this context's read-only REST surface.
+func corsMiddleware() func(http.Handler) http.Handler {
+	origins := []string{"http://localhost:5173", "http://localhost:5188"}
+	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
+		origins = strings.Split(v, ",")
+	}
+	return cors.Handler(cors.Options{
+		AllowedOrigins:   origins,
+		AllowedMethods:   []string{http.MethodGet, http.MethodOptions},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	})
 }
 
 // handleHealthz stays liveness-only: it must not consult Postgres or the
