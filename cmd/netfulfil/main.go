@@ -102,7 +102,7 @@ func wireEventPublisher(pool *pgxpool.Pool, logger *slog.Logger) (ports.EventPub
 	return outboxPublisher, relay, closeFn
 }
 
-// uuidLike mints the event_id stamped on each published event.
+// uuidLike mints the CloudEvents id stamped on each published event.
 func uuidLike() string { return uuid.NewString() }
 
 func kafkaBrokers() string {

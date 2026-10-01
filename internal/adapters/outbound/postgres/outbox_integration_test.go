@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/claudioed/network-fulfillment/internal/adapters/kafka/cloudevents"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
@@ -42,6 +43,10 @@ func (s *recordingSink) Send(_ context.Context, encoded ...outboundkafka.Encoded
 	}
 	return nil
 }
+
+// receivedType is the full CloudEvents type the outbox persists as
+// event_type for a NetworkOrderReceived row.
+const receivedType = "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived"
 
 func countOutbox(t *testing.T, pool *pgxpool.Pool, where string) int {
 	t.Helper()
@@ -146,7 +151,7 @@ func TestOutbox_PublishFailure_RollsBackAggregate(t *testing.T) {
 	if found != nil {
 		t.Fatal("aggregate row survived a failed publish: the unit of work did not roll back")
 	}
-	if got := countOutbox(t, pool, "event_type = 'NetworkOrderReceived'"); got != 0 {
+	if got := countOutbox(t, pool, "event_type = '"+receivedType+"'"); got != 0 {
 		t.Fatalf("expected no outbox rows for the failed publish, got %d", got)
 	}
 }
@@ -191,6 +196,20 @@ func TestOutboxRelay_PublishesInOrderAndMarksRows(t *testing.T) {
 	if got := countOutbox(t, pool, "published_at IS NULL"); got != 0 {
 		t.Fatalf("expected every row marked published, %d still pending", got)
 	}
+	// The relay forwards the CloudEvent exactly as persisted: the id
+	// minted at enqueue time, the full type, and the content-type header.
+	for _, enc := range sink.sent {
+		ev, err := cloudevents.Decode(enc.Value)
+		if err != nil {
+			t.Fatalf("relayed value is not a CloudEvent: %v", err)
+		}
+		if ev.ID() != "evt" || ev.Type() != receivedType || ev.Subject() == "" {
+			t.Fatalf("relayed event attributes = id %q type %q subject %q", ev.ID(), ev.Type(), ev.Subject())
+		}
+		if len(enc.Headers) != 1 || enc.Headers[0].Key != "content-type" || string(enc.Headers[0].Value) != cloudevents.MediaType {
+			t.Fatalf("relayed headers = %+v, want the CloudEvents content-type header", enc.Headers)
+		}
+	}
 	// A second pass finds nothing and republishes nothing.
 	n, err = relay.RelayOnce(ctx)
 	if err != nil || n != 0 || len(sink.sent) != 3 {
@@ -228,7 +247,7 @@ func TestOutboxRelay_SinkFailure_StopsAtFailedRowAndRetriesLater(t *testing.T) {
 		}
 	}
 
-	sink := &recordingSink{failOn: "NetworkOrderReceived", err: errors.New("broker down")}
+	sink := &recordingSink{failOn: receivedType, err: errors.New("broker down")}
 	relay := postgres.NewOutboxRelay(pool, sink, slog.Default(), postgres.WithBatchSize(1))
 	// With batch size 1, one row is claimed per pass; the first pass's
 	// row IS the failing one (oldest first), so it fails immediately.
@@ -246,8 +265,8 @@ func TestOutboxRelay_SinkFailure_StopsAtFailedRowAndRetriesLater(t *testing.T) {
 	var lastErr string
 	if err := pool.QueryRow(ctx, `
 		SELECT attempts, coalesce(last_error,'') FROM outbox_events
-		WHERE event_type = 'NetworkOrderReceived' ORDER BY id LIMIT 1
-	`).Scan(&attempts, &lastErr); err != nil {
+		WHERE event_type = $1 ORDER BY id LIMIT 1
+	`, receivedType).Scan(&attempts, &lastErr); err != nil {
 		t.Fatalf("read first row: %v", err)
 	}
 	if attempts != 1 || lastErr == "" {

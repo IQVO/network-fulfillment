@@ -2,12 +2,11 @@ package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
 
+	"github.com/claudioed/network-fulfillment/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -17,26 +16,9 @@ import (
 // independently.
 const AnalyticsTopic = "warehouse.network-fulfillment.analytics"
 
-// analyticsSchemaVersion is the schema version stamped onto every
-// analytics envelope this publisher emits.
-const analyticsSchemaVersion = 1
-
-// AnalyticsEnvelope is the Envelope v1 wrapper for the analytics stream.
-// Like the integration Envelope it carries the domain event's own JSON as
-// its data field. The only additions over the integration Envelope are
-// schema_version and the snake_case field naming the estate's analytics
-// contract fixes.
-type AnalyticsEnvelope struct {
-	EventId       string          `json:"event_id"`
-	EventType     string          `json:"event_type"`
-	OccurredAt    time.Time       `json:"occurred_at"`
-	Source        string          `json:"source"`
-	SchemaVersion int             `json:"schema_version"`
-	Data          json.RawMessage `json:"data"`
-}
-
 // AnalyticsPublisher publishes network-fulfillment domain events onto
-// AnalyticsTopic as an AnalyticsEnvelope. It satisfies ports.EventPublisher
+// AnalyticsTopic as CloudEvents (same `type` as the integration stream,
+// dataschema urn:warehouse:network-fulfillment:analytics:<Event>:v1). It satisfies ports.EventPublisher
 // and is a SEPARATE adapter from Publisher: the integration publisher
 // (publisher.go) publishes the same events to
 // warehouse.network-fulfillment.events and is left untouched. The
@@ -79,35 +61,10 @@ func NewAnalyticsPublisher(brokers []string, newId func() string) *AnalyticsPubl
 // Encode translates events into their analytics-topic wire form, without
 // sending them.
 func (p *AnalyticsPublisher) Encode(_ context.Context, events ...shared.DomainEvent) ([]Encoded, error) {
-	out := make([]Encoded, 0, len(events))
-	for _, event := range events {
-		data, err := json.Marshal(event)
-		if err != nil {
-			return nil, fmt.Errorf("kafka: marshal analytics event data: %w", err)
-		}
-		env := AnalyticsEnvelope{
-			EventId:       p.NewId(),
-			EventType:     event.EventName(),
-			OccurredAt:    event.OccurredAt(),
-			Source:        "network-fulfillment",
-			SchemaVersion: analyticsSchemaVersion,
-			Data:          data,
-		}
-		payload, err := json.Marshal(env)
-		if err != nil {
-			return nil, fmt.Errorf("kafka: marshal analytics envelope: %w", err)
-		}
-		out = append(out, Encoded{
-			Topic:     AnalyticsTopic,
-			EventType: event.EventName(),
-			Key:       []byte(aggregateKey(event)),
-			Value:     payload,
-		})
-	}
-	return out, nil
+	return encodeAll(AnalyticsTopic, cloudevents.StreamAnalytics, p.NewId, events)
 }
 
-// Publish emits event onto AnalyticsTopic wrapped in an AnalyticsEnvelope.
+// Publish emits event onto AnalyticsTopic as a CloudEvent.
 func (p *AnalyticsPublisher) Publish(ctx context.Context, event any) error {
 	de, ok := event.(shared.DomainEvent)
 	if !ok {

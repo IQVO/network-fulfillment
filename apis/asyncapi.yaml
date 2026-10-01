@@ -1,0 +1,762 @@
+asyncapi: 2.6.0
+
+info:
+  title: Network Fulfillment Events
+  version: "2.0.0"
+  description: |
+    Domain-event catalog for **Network Fulfillment**, a Supporting bounded
+    context in the WES (Warehouse Execution Systems) subdomain: the
+    anti-corruption layer between the warehouse-systems fleet and an
+    external retail fulfillment network. One aggregate raises every event
+    documented here:
+
+    - `NetworkOrder` (package `internal/domain/networkorder`) — one network
+      purchase order and its acknowledgement lifecycle. Raises
+      `NetworkOrderReceived`, `NetworkOrderAcknowledged`,
+      `NetworkOrderRejected` and `NetworkOrderShipmentConfirmed`.
+
+    **Envelope (mandatory, ADR 0008).** Every message on every channel of
+    this service is a CloudEvents 1.0 event in *structured content mode*
+    (Kafka protocol binding): the Kafka message value is the JSON event
+    format, content type `application/cloudevents+json`, and every message
+    carries the Kafka header
+    `content-type: application/cloudevents+json; charset=UTF-8`. There is no
+    other envelope. All of `specversion`, `id`, `source`, `type`, `subject`,
+    `time`, `datacontenttype` and `dataschema` are REQUIRED. W3C trace
+    context, when present, travels in Kafka headers, never as extension
+    attributes. The Kafka message key is the network order reference
+    (`networkRef`, identical to `subject`), so every event for one order
+    lands on the same partition.
+
+    **Type naming.** `type` is
+    `com.warehouse.<subdomain>.<bounded-context>.<entity>.<EventName>`. For
+    this context the subdomain is `wes`, the bounded context is
+    `network-fulfillment` and the entity is `networkorder`, e.g.
+    `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived`.
+    The SAME `type` is used for the occurrence on the integration and on
+    the analytics channel; `dataschema`
+    (`urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v1`)
+    names the payload shape. A breaking payload change gets a new `.v2`
+    type and a new dataschema version, never a mutation of these.
+
+    **Consumers** must dispatch on the full `type`, ignore unknown types,
+    dedupe on `id` (stable across outbox redelivery), and dead-letter or
+    skip — never parse as a legacy shape — anything that fails CloudEvents
+    validation.
+  contact:
+    name: Network Fulfillment — claudioed
+    url: https://github.com/claudioed/network-fulfillment
+    email: claudioed.oliveira@gmail.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+tags:
+  - name: network-fulfillment
+    description: |
+      The Network Fulfillment bounded context (WES subdomain) — the ACL
+      between the fleet and the external retail fulfillment network.
+  - name: networkorder
+    description: Events raised by the `NetworkOrder` aggregate.
+  - name: analytics
+    description: |
+      The internal analytics stream consumed by this service's own
+      acknowledgement-report projector.
+
+servers:
+  production:
+    url: kafka.warehouse-systems.internal:9092
+    protocol: kafka
+    description: Shared warehouse-systems Kafka cluster.
+
+defaultContentType: application/cloudevents+json
+
+channels:
+  warehouse.network-fulfillment.events:
+    description: |
+      The integration topic (the `Topic` constant in
+      `internal/adapters/outbound/kafka/publisher.go`). Every domain event
+      the `NetworkOrder` aggregate raises is published here, via the
+      transactional outbox when `DATABASE_URL` is configured (ADR 0003).
+      dataschema: `urn:warehouse:network-fulfillment:events:<EventName>:v1`.
+    subscribe:
+      operationId: consumeNetworkFulfillmentEvents
+      summary: Consume Network Fulfillment integration events.
+      description: |
+        Every message is a CloudEvents 1.0 structured-mode event; route on
+        the full `type` attribute.
+      tags:
+        - name: network-fulfillment
+      message:
+        oneOf:
+          - $ref: "#/components/messages/NetworkOrderReceived"
+          - $ref: "#/components/messages/NetworkOrderAcknowledged"
+          - $ref: "#/components/messages/NetworkOrderRejected"
+          - $ref: "#/components/messages/NetworkOrderShipmentConfirmed"
+
+  warehouse.network-fulfillment.analytics:
+    description: |
+      The internal analytics topic (the `AnalyticsTopic` constant in
+      `internal/adapters/outbound/kafka/analytics_publisher.go`). Carries the
+      same occurrences with the same `type` and payload, but a distinct
+      `id` per occurrence and dataschema
+      `urn:warehouse:network-fulfillment:analytics:<EventName>:v1`. There is
+      no `schema_version` field. Consumed by this service's own analytics
+      projector (`internal/adapters/inbound/kafka/analytics_consumer.go`),
+      which handles `NetworkOrderReceived`, `NetworkOrderAcknowledged` and
+      `NetworkOrderRejected`, ignores other types, and dead-letters to
+      `warehouse.network-fulfillment.analytics.dlq` anything that is not a
+      valid CloudEvent.
+    subscribe:
+      operationId: consumeNetworkFulfillmentAnalytics
+      summary: Consume Network Fulfillment analytics events.
+      description: |
+        Every message is a CloudEvents 1.0 structured-mode event; route on
+        the full `type` attribute.
+      tags:
+        - name: analytics
+      message:
+        oneOf:
+          - $ref: "#/components/messages/NetworkOrderReceivedAnalytics"
+          - $ref: "#/components/messages/NetworkOrderAcknowledgedAnalytics"
+          - $ref: "#/components/messages/NetworkOrderRejectedAnalytics"
+          - $ref: "#/components/messages/NetworkOrderShipmentConfirmedAnalytics"
+
+components:
+  messages:
+    NetworkOrderReceived:
+      name: NetworkOrderReceived
+      title: Network order received
+      summary: "Demand from the external retail network was turned into a NetworkOrder; the 24h acknowledgement clock is running."
+      description: |
+        Raised by the `NetworkOrder` aggregate the moment network demand is received — whether or not every line could be translated into our SKU vocabulary. `lineCount` is the number of successfully translated lines (0 for demand rejected as untranslatable).
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderReceived:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: network-fulfillment
+      payload:
+        $ref: "#/components/schemas/NetworkOrderReceivedEvent"
+      examples:
+        - name: networkOrderReceived
+          summary: "Network order received for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "9f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:events:NetworkOrderReceived:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              requiredShipBy: "2026-09-25T08:00:00Z"
+              acknowledgeBy: "2026-09-24T08:00:00Z"
+              lineCount: 2
+              at: "2026-09-23T08:00:00Z"
+
+    NetworkOrderAcknowledged:
+      name: NetworkOrderAcknowledged
+      title: Network order acknowledged
+      summary: "We committed to fulfilling the network order in full and raised a local order in order-management."
+      description: |
+        Raised by the `NetworkOrder` aggregate once the network has been told yes and a held order exists in order-management (`localOrderId`). `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: network-fulfillment
+      payload:
+        $ref: "#/components/schemas/NetworkOrderAcknowledgedEvent"
+      examples:
+        - name: networkOrderAcknowledged
+          summary: "Network order acknowledged for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "9f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              localOrderId: "ord-1"
+              receivedAt: "2026-09-23T07:59:00Z"
+              at: "2026-09-23T08:00:00Z"
+
+    NetworkOrderRejected:
+      name: NetworkOrderRejected
+      title: Network order rejected
+      summary: "We told the network no \u2014 or the acknowledgement window closed unanswered."
+      description: |
+        Raised by the `NetworkOrder` aggregate whenever the order is refused. `reason` distinguishes a catalogue gap, a capacity signal and an operational failure.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderRejected:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: network-fulfillment
+      payload:
+        $ref: "#/components/schemas/NetworkOrderRejectedEvent"
+      examples:
+        - name: networkOrderRejected
+          summary: "Network order rejected for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "9f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:events:NetworkOrderRejected:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              reason: "UNTRANSLATABLE_SKU"
+              at: "2026-09-23T08:00:00Z"
+
+    NetworkOrderShipmentConfirmed:
+      name: NetworkOrderShipmentConfirmed
+      title: Network order shipment confirmed
+      summary: "A shipment was confirmed back to the network, closing the order."
+      description: |
+        Raised by the `NetworkOrder` aggregate when its shipment is confirmed to the network. The publisher is wired for it; no use case calls `ConfirmShipment()` yet (the inbound leg observing a real shipment is not built), so this message does not appear on the wire today.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderShipmentConfirmed:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: network-fulfillment
+      payload:
+        $ref: "#/components/schemas/NetworkOrderShipmentConfirmedEvent"
+      examples:
+        - name: networkOrderShipmentConfirmed
+          summary: "Network order shipment confirmed for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "9f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:events:NetworkOrderShipmentConfirmed:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              localOrderId: "ord-1"
+              at: "2026-09-23T08:00:00Z"
+
+    NetworkOrderReceivedAnalytics:
+      name: NetworkOrderReceivedAnalytics
+      title: Network order received (analytics)
+      summary: "Demand from the external retail network was turned into a NetworkOrder; the 24h acknowledgement clock is running."
+      description: |
+        Raised by the `NetworkOrder` aggregate the moment network demand is received — whether or not every line could be translated into our SKU vocabulary. `lineCount` is the number of successfully translated lines (0 for demand rejected as untranslatable). Consumed by the analytics projector.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderReceived:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/NetworkOrderReceivedAnalyticsEvent"
+      examples:
+        - name: networkOrderReceivedAnalytics
+          summary: "Network order received for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "3d4a1f60-2b8e-4c17-8a55-0c6f9d2b41aa"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:analytics:NetworkOrderReceived:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              requiredShipBy: "2026-09-25T08:00:00Z"
+              acknowledgeBy: "2026-09-24T08:00:00Z"
+              lineCount: 2
+              at: "2026-09-23T08:00:00Z"
+
+    NetworkOrderAcknowledgedAnalytics:
+      name: NetworkOrderAcknowledgedAnalytics
+      title: Network order acknowledged (analytics)
+      summary: "We committed to fulfilling the network order in full and raised a local order in order-management."
+      description: |
+        Raised by the `NetworkOrder` aggregate once the network has been told yes and a held order exists in order-management (`localOrderId`). `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that. Consumed by the analytics projector.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/NetworkOrderAcknowledgedAnalyticsEvent"
+      examples:
+        - name: networkOrderAcknowledgedAnalytics
+          summary: "Network order acknowledged for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "3d4a1f60-2b8e-4c17-8a55-0c6f9d2b41aa"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              localOrderId: "ord-1"
+              receivedAt: "2026-09-23T07:59:00Z"
+              at: "2026-09-23T08:00:00Z"
+
+    NetworkOrderRejectedAnalytics:
+      name: NetworkOrderRejectedAnalytics
+      title: Network order rejected (analytics)
+      summary: "We told the network no \u2014 or the acknowledgement window closed unanswered."
+      description: |
+        Raised by the `NetworkOrder` aggregate whenever the order is refused. `reason` distinguishes a catalogue gap, a capacity signal and an operational failure. Consumed by the analytics projector.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderRejected:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/NetworkOrderRejectedAnalyticsEvent"
+      examples:
+        - name: networkOrderRejectedAnalytics
+          summary: "Network order rejected for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "3d4a1f60-2b8e-4c17-8a55-0c6f9d2b41aa"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:analytics:NetworkOrderRejected:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              reason: "UNTRANSLATABLE_SKU"
+              at: "2026-09-23T08:00:00Z"
+
+    NetworkOrderShipmentConfirmedAnalytics:
+      name: NetworkOrderShipmentConfirmedAnalytics
+      title: Network order shipment confirmed (analytics)
+      summary: "A shipment was confirmed back to the network, closing the order."
+      description: |
+        Raised by the `NetworkOrder` aggregate when its shipment is confirmed to the network. The publisher is wired for it; no use case calls `ConfirmShipment()` yet (the inbound leg observing a real shipment is not built), so this message does not appear on the wire today. Not used by the analytics projector today (ignored as an unknown type).
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderShipmentConfirmed:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/NetworkOrderShipmentConfirmedAnalyticsEvent"
+      examples:
+        - name: networkOrderShipmentConfirmedAnalytics
+          summary: "Network order shipment confirmed for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "3d4a1f60-2b8e-4c17-8a55-0c6f9d2b41aa"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:analytics:NetworkOrderShipmentConfirmed:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              localOrderId: "ord-1"
+              at: "2026-09-23T08:00:00Z"
+
+  schemas:
+    KafkaHeaders:
+      type: object
+      required:
+        - content-type
+      properties:
+        content-type:
+          type: string
+          description: Structured content mode media type.
+          enum: ["application/cloudevents+json; charset=UTF-8"]
+        traceparent:
+          type: string
+          description: W3C trace context, when the producer propagates one.
+        tracestate:
+          type: string
+          description: W3C trace state, when present.
+
+    CloudEvent:
+      type: object
+      title: CloudEvents 1.0 envelope (structured mode)
+      description: |
+        The single envelope every message of this service uses. Each event
+        schema below composes it with `allOf` and pins `type`,
+        `dataschema` and the `data` shape. No other envelope exists.
+      required:
+        - specversion
+        - id
+        - source
+        - type
+        - subject
+        - time
+        - datacontenttype
+        - dataschema
+        - data
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+          description: CloudEvents specification version.
+        id:
+          type: string
+          format: uuid
+          description: |
+            UUID v4 minted once per occurrence and persisted with the outbox
+            row, so a redelivery carries the same id. `(source, id)` is the
+            consumer idempotency key.
+        source:
+          type: string
+          format: uri-reference
+          enum: ["/warehouse/network-fulfillment"]
+          description: The producing service.
+        type:
+          type: string
+          pattern: "^com\\.warehouse\\.wes\\.network-fulfillment\\.networkorder\\.[A-Z][A-Za-z]+$"
+          description: "`com.warehouse.wes.network-fulfillment.networkorder.<EventName>`."
+        subject:
+          type: string
+          minLength: 1
+          description: The network order reference (networkRef) the event is about.
+        time:
+          type: string
+          format: date-time
+          description: The domain event's occurred-at instant, UTC, RFC 3339.
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          format: uri
+          pattern: "^urn:warehouse:network-fulfillment:(events|analytics):[A-Z][A-Za-z]+:v[0-9]+$"
+          description: Names the payload shape and stream.
+        data:
+          type: object
+          description: The domain event payload.
+
+    NetworkOrderReceivedData:
+      type: object
+      title: NetworkOrderReceived payload
+      required:
+        - networkRef
+        - siteId
+        - requiredShipBy
+        - acknowledgeBy
+        - lineCount
+        - at
+      properties:
+        networkRef:
+          type: string
+          description: "Network order reference (this context's NetworkRef). Also the CloudEvents `subject` and the Kafka key."
+        siteId:
+          type: string
+          description: "Fulfilling site."
+        requiredShipBy:
+          type: string
+          format: date-time
+          description: "Ship-by deadline the network demands."
+        acknowledgeBy:
+          type: string
+          format: date-time
+          description: "End of the acknowledgement window."
+        lineCount:
+          type: integer
+          description: "Number of lines translated into our vocabulary."
+        at:
+          type: string
+          format: date-time
+          description: "Domain occurred-at (same instant as the CloudEvents `time`)."
+
+    NetworkOrderAcknowledgedData:
+      type: object
+      title: NetworkOrderAcknowledged payload
+      required:
+        - networkRef
+        - siteId
+        - localOrderId
+        - receivedAt
+        - at
+      properties:
+        networkRef:
+          type: string
+          description: "Network order reference; also the `subject`."
+        siteId:
+          type: string
+          description: "Fulfilling site."
+        localOrderId:
+          type: string
+          description: "order-management order id correlated to this network order."
+        receivedAt:
+          type: string
+          format: date-time
+          description: "When the order was received."
+        at:
+          type: string
+          format: date-time
+          description: "Domain occurred-at (same instant as `time`)."
+
+    NetworkOrderRejectedData:
+      type: object
+      title: NetworkOrderRejected payload
+      required:
+        - networkRef
+        - siteId
+        - reason
+        - at
+      properties:
+        networkRef:
+          type: string
+          description: "Network order reference; also the `subject`."
+        siteId:
+          type: string
+          description: "Fulfilling site."
+        reason:
+          type: string
+          enum: ["UNTRANSLATABLE_SKU", "INFEASIBLE_DEADLINE", "ACKNOWLEDGEMENT_DEADLINE_MISSED"]
+          description: "Why the order was rejected."
+        at:
+          type: string
+          format: date-time
+          description: "Domain occurred-at (same instant as `time`)."
+
+    NetworkOrderShipmentConfirmedData:
+      type: object
+      title: NetworkOrderShipmentConfirmed payload
+      required:
+        - networkRef
+        - siteId
+        - localOrderId
+        - at
+      properties:
+        networkRef:
+          type: string
+          description: "Network order reference; also the `subject`."
+        siteId:
+          type: string
+          description: "Fulfilling site."
+        localOrderId:
+          type: string
+          description: "order-management order id."
+        at:
+          type: string
+          format: date-time
+          description: "Domain occurred-at (same instant as `time`)."
+
+    NetworkOrderReceivedEvent:
+      title: NetworkOrderReceived CloudEvent (events)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:events:NetworkOrderReceived:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderReceivedData"
+
+    NetworkOrderAcknowledgedEvent:
+      title: NetworkOrderAcknowledged CloudEvent (events)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderAcknowledgedData"
+
+    NetworkOrderRejectedEvent:
+      title: NetworkOrderRejected CloudEvent (events)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:events:NetworkOrderRejected:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderRejectedData"
+
+    NetworkOrderShipmentConfirmedEvent:
+      title: NetworkOrderShipmentConfirmed CloudEvent (events)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:events:NetworkOrderShipmentConfirmed:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderShipmentConfirmedData"
+
+    NetworkOrderReceivedAnalyticsEvent:
+      title: NetworkOrderReceived CloudEvent (analytics)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:analytics:NetworkOrderReceived:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderReceivedData"
+
+    NetworkOrderAcknowledgedAnalyticsEvent:
+      title: NetworkOrderAcknowledged CloudEvent (analytics)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderAcknowledgedData"
+
+    NetworkOrderRejectedAnalyticsEvent:
+      title: NetworkOrderRejected CloudEvent (analytics)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:analytics:NetworkOrderRejected:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderRejectedData"
+
+    NetworkOrderShipmentConfirmedAnalyticsEvent:
+      title: NetworkOrderShipmentConfirmed CloudEvent (analytics)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:analytics:NetworkOrderShipmentConfirmed:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderShipmentConfirmedData"
