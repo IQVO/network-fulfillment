@@ -1,3 +1,10 @@
+---
+paths:
+  - "internal/adapters/**/kafka/**"
+  - "internal/adapters/outbound/events/**"
+  - "apis/asyncapi*"
+---
+
 # Cross-service integration events (Kafka)
 
 **Envelope: CloudEvents 1.0 is MANDATORY (ADR 0008).** Every Kafka message

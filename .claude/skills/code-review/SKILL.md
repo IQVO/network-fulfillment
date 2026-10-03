@@ -1,4 +1,9 @@
-<!-- TEMPLATE NOTE (warehouse-harness-template v1): adapt every repo-specific example in this file (file paths, type names, field names) to THIS repo real code. Do not copy-paste verbatim. -->
+---
+name: code-review
+description: Fast pre-commit semantic review of the uncommitted changes or a given git range: domain logic in the wrong layer, missing failure-path tests, adapter concerns in domain types, impure ports. Advisory counterpart to make check. Invoke explicitly: /code-review [range].
+disable-model-invocation: true
+argument-hint: "[git range]"
+---
 
 Perform a pre-commit semantic code review of the current uncommitted
 changes (or, if `$ARGUMENTS` names a branch/commit range, review that
