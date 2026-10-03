@@ -3,7 +3,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/claudioed/network-fulfillment
+  repository: ghcr.io/iqvo/network-fulfillment
   pullPolicy: IfNotPresent
   tag: ""
 
