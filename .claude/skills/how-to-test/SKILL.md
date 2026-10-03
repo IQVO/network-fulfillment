@@ -9,12 +9,15 @@ description: Write or review tests and diagnose a failing coverage, mutation, bd
 > **In network-fulfillment:** the layers that exist here are unit tests
 > (`make test`), coverage (`make coverage`, 90% on domain+application),
 > mutation (`make mutation`, gremlins on `./internal/domain/networkorder`,
-> thresholds in `.gremlins.yaml`), Postgres integration tests via
-> testcontainers (`make integration`, `internal/adapters/outbound/postgres/*_integration_test.go`),
+> thresholds in `.gremlins.yaml`; the CI job is `mutation-fast`), Postgres
+> and Kafka integration tests via testcontainers (`make integration`,
+> e.g. `internal/adapters/outbound/postgres/network_order_repo_integration_test.go`
+> and `internal/adapters/outbound/kafka/publisher_integration_test.go`),
 > the chart wiring tests (`charts/network-fulfillment/tests/*.py`, run by
 > the `helm-lint` CI job) and `make arch-test`. There is **no** `features/`
-> directory, so `make bdd` has nothing to run, and there is no `MUTATION.md`
-> yet. The `facilitycache` Kafka example below is from a sibling repo.
+> directory, so `make bdd` has nothing to run, and no `MUTATION.md` yet
+> (the `MUTATION.md` triage advice below applies once one exists). The
+> CI job name `mutation-fast` maps to the local target `make mutation`.
 
 Use when writing or reviewing tests in this repo, or diagnosing a failing
 `coverage`/`mutation-fast`/`bdd`/`integration` CI job. This fleet's quality
@@ -31,7 +34,7 @@ assert nothing.
    `./internal/domain/...,./internal/application/...`) — proves lines
    executed. Proves nothing about whether the test asserted the right
    thing.
-3. **Mutation testing** (`make mutation-fast`, gremlins) — proves the
+3. **Mutation testing** (`make mutation`, gremlins; CI job `mutation-fast`) — proves the
    tests actually ASSERT, not merely execute. A mutant is a deliberately
    broken version of the code (`<` -> `<=`, `+` -> `-`, etc.); if the test
    suite still passes against the mutant, it "survived" (LIVED) — meaning
@@ -107,10 +110,12 @@ container via `testcontainers-go`. Never gate on `os.Getenv("KAFKA_BROKERS")`
 `integration` job provisions Postgres ONLY (no Kafka) — a skip-gated
 Kafka test silently skips in CI and proves nothing there, while
 testcontainers actually exercises the assertions on the runner. See
-`internal/adapters/outbound/facilitycache/consumer_integration_test.go`
-for the working recipe (unique topic per test, one shared container per
+`internal/adapters/outbound/kafka/publisher_integration_test.go` and
+`internal/adapters/inbound/kafka/analytics_dlq_integration_test.go` for
+the working recipe (unique topic per test, one shared container per
 package, explicit `CreateTopics` + poll for the partition leader before
-the first read/write).
+the first read/write). `TestKafkaIntegrationTestsUseTestcontainers` in
+`internal/architecture/fitness_test.go` enforces the rule.
 
 ## Verify before opening the PR
 
@@ -118,6 +123,6 @@ the first read/write).
 make check-all   # check + coverage + arch-test + bdd (the full local gate)
 ```
 
-If `check-all` doesn't include `mutation-fast`/`vuln` locally, run them
-explicitly too — CI runs them even when the local gate doesn't, so a PR
+`check-all` does not include `make mutation`/`make vuln` locally; run
+them explicitly too — CI runs them even when the local gate doesn't, so a PR
 can pass your local check and still go red in CI otherwise.

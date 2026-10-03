@@ -6,17 +6,20 @@ description: Add or change a micro-frontend remote under web/ (vite federation c
 
 # How to add a frontend remote
 
-> **In network-fulfillment:** this repo has **no `web/` remote** and no
-> console screen, and none is planned in ADR 0001. The guidance below is
-> the fleet's generic recipe, kept for the day one is added (it would also
-> need a `web` CI job and an entry in `warehouse-infra`'s
-> `frontend_remotes`).
+> **In network-fulfillment:** `web/` exists: one Module Federation remote
+> (`netfulfil_mfe`, `web/vite.config.ts`) exposing `./App`, with a single
+> screen (`web/src/screens/NetworkFulfillmentScreen.tsx`), its own
+> `web/Dockerfile`/`web/nginx.conf`, and the Helm `frontend.enabled` toggle
+> in `charts/network-fulfillment/values.yaml`. There is **no `web` job in
+> `.github/workflows/ci.yml` yet** (see AGENTS.md: dropped until needed),
+> so run the commands under "Key commands" locally before pushing.
 
 Use when adding a new screen/feature to this repo's `web/` Module
 Federation remote, or when standing up a NEW remote for a bounded context
 that doesn't have one yet. This is the Vite/React micro-frontend layer
 that `warehouse-console` (the shell) lazy-loads — see that repo's
-`.claude/rules/mfe-remotes.md` for the shell-side half of this contract.
+mfe-remotes rule (the `.claude/rules/` file in the `warehouse-console` repo,
+not this one) for the shell-side half of this contract.
 
 ## `vite.config.ts` must stay in OBJECT form, always
 
@@ -66,9 +69,9 @@ fails).
 this fleet historically shipped `package.json` with only
 build/dev/lint/preview — `npm test` failed with `Missing script: "test"`,
 and any `.test.ts` file added there silently never executed, invisible
-unless someone ran `npm run` and actually read the script list. Confirm
-this repo's `web/` CI job (`web:` in `.github/workflows/ci.yml`) actually
-invokes `npm test`, not just `npm run build`.
+unless someone ran `npm run` and actually read the script list. This
+repo has no `web` CI job yet: when one is added, confirm it invokes
+`npm test`, not just `npm run build`.
 
 ## The Docker build recipe (packaging as a deployable nginx workload)
 
@@ -118,7 +121,7 @@ npm test             # vitest run — confirm this actually runs your new test
 npm run build         # tsc -b && vite build -> dist/
 ```
 
-CI's `web:` job runs this exact sequence against a dual checkout (this
-repo + `claudioed/warehouse-ui-kit@develop`) — reproduce that locally by
-symlinking or checking out `warehouse-ui-kit` as a real sibling if `npm
-ci` behaves differently than CI.
+Other fleet repos run this sequence in a `web:` CI job against a dual
+checkout (the repo + `claudioed/warehouse-ui-kit@develop`); here it is
+local-only until that job is added. `npm ci` needs `warehouse-ui-kit`
+checked out as a real sibling (`../../warehouse-ui-kit`).
