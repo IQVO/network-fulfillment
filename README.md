@@ -3,7 +3,7 @@
 > **⚠️ Study project.** This repository is an educational exercise in
 > Domain-Driven Design applied to warehouse management/execution systems. It
 > follows real industry-standard patterns and terminology (WMS/WES/WCS,
-> CloudEvents-like envelopes, RFC 7807, hexagonal architecture) but is
+> CloudEvents 1.0 event envelopes, RFC 7807, hexagonal architecture) but is
 > **not a production system** and is **not affiliated with, endorsed by, or
 > representative of any real-world
 > company**. References to a major e-commerce retailer's Selling Partner API describe a public
@@ -77,6 +77,14 @@ What exists today:
   `outbox_events` table), and a background relay drains it to the broker.
   The default (`EVENT_PUBLISHER` unset) still publishes to a log-only
   publisher.
+- **CloudEvents 1.0, mandatory (ADR 0008)** — every Kafka message on both
+  topics is a CloudEvents 1.0 structured-mode event (header
+  `content-type: application/cloudevents+json; charset=UTF-8`,
+  `source=/warehouse/network-fulfillment`,
+  `type=com.warehouse.wes.network-fulfillment.networkorder.<EventName>`,
+  `subject=<networkRef>`, `dataschema=urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v1`).
+  The analytics projector accepts only CloudEvents and dead-letters anything
+  else. Catalogue: `apis/asyncapi.yaml`.
 
 Not built yet:
 

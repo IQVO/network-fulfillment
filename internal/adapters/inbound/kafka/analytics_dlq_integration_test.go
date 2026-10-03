@@ -189,8 +189,8 @@ func TestAnalyticsConsumer_PoisonMessage_GoesToDeadLetterTopicWithoutBlockingPar
 	if err := json.Unmarshal(dlqMsg.Value, &dlqPayload); err != nil {
 		t.Fatalf("DLQ message value is not the raw original JSON payload: %v", err)
 	}
-	if dlqPayload["event_id"] != poisonEventID {
-		t.Errorf("DLQ payload event_id = %v, want %q -- payload must be byte-identical to the original for manual replay", dlqPayload["event_id"], poisonEventID)
+	if dlqPayload["id"] != poisonEventID {
+		t.Errorf("DLQ payload id = %v, want %q -- payload must be byte-identical to the original for manual replay", dlqPayload["id"], poisonEventID)
 	}
 	assertHeader(t, dlqMsg.Headers, "x-dlq-source-topic", topic)
 	if h := headerValue(dlqMsg.Headers, "x-dlq-error"); h == "" {
@@ -240,25 +240,11 @@ func TestAnalyticsConsumer_PoisonMessage_GoesToDeadLetterTopicWithoutBlockingPar
 	}
 }
 
-func envelopeBytes(t *testing.T, eventId, eventType string, at time.Time, data map[string]any) []byte {
+// envelopeBytes builds a CloudEvents 1.0 analytics message via the unit
+// tests' envelope helper.
+func envelopeBytes(t *testing.T, id, eventName string, at time.Time, data map[string]any) []byte {
 	t.Helper()
-	raw, err := json.Marshal(data)
-	if err != nil {
-		t.Fatalf("marshal data: %v", err)
-	}
-	env := map[string]any{
-		"event_id":       eventId,
-		"event_type":     eventType,
-		"occurred_at":    at.Format(time.RFC3339Nano),
-		"source":         "network-fulfillment",
-		"schema_version": 1,
-		"data":           json.RawMessage(raw),
-	}
-	b, err := json.Marshal(env)
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
-	return b
+	return envelope(t, id, ceType(eventName), at, data)
 }
 
 // createTopic creates topic on brokers via a raw kafka-go admin
@@ -308,4 +294,86 @@ func headerValue(headers []kafkago.Header, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestAnalyticsConsumer_LegacyFlatMessage_DeadLetteredWithoutBlockingPartition
+// proves a retired flat-envelope message on the real topic is NOT parsed:
+// it is dead-lettered immediately (byte-identical) and never reaches the
+// dedupe gate or the projection, and a CloudEvent behind it on the same
+// partition is still processed.
+func TestAnalyticsConsumer_LegacyFlatMessage_DeadLetteredWithoutBlockingPartition(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1",
+		tckafka.WithClusterID(fmt.Sprintf("nf-analytics-legacy-itest-%d", time.Now().UnixNano())))
+	if err != nil {
+		t.Fatalf("start Kafka container: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := testcontainers.TerminateContainer(container); err != nil {
+			t.Errorf("terminate Kafka container: %v", err)
+		}
+	})
+	brokers, err := container.Brokers(ctx)
+	if err != nil {
+		t.Fatalf("resolve Kafka brokers: %v", err)
+	}
+	topic := fmt.Sprintf("warehouse.network-fulfillment.analytics.legacy-itest-%d", time.Now().UnixNano())
+	createTopic(t, ctx, brokers, topic)
+	createTopic(t, ctx, brokers, topic+".dlq")
+
+	processed := newSyncFakeProcessed()
+	projection := &syncFakeProjection{}
+	consumer := inboundkafka.NewAnalyticsConsumer(brokers, topic,
+		fmt.Sprintf("network-fulfillment-analytics-legacy-itest-%d", time.Now().UnixNano()),
+		projection, processed, nil)
+	defer func() { _ = consumer.Close() }()
+
+	consumeCtx, consumeCancel := context.WithCancel(ctx)
+	defer consumeCancel()
+	go func() { _ = consumer.Run(consumeCtx) }()
+
+	dlqReader := kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers: brokers, Topic: topic + ".dlq",
+		GroupID:     fmt.Sprintf("dlq-legacy-reader-%d", time.Now().UnixNano()),
+		StartOffset: kafkago.FirstOffset,
+	})
+	defer func() { _ = dlqReader.Close() }()
+
+	legacy := []byte(`{"event_id":"evt-legacy","event_type":"NetworkOrderReceived","occurred_at":"2026-09-11T08:00:00Z","source":"network-fulfillment","schema_version":1,"data":{}}`)
+	goodID := fmt.Sprintf("evt-legacy-good-%d", time.Now().UnixNano())
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic}
+	defer func() { _ = writer.Close() }()
+	if err := writer.WriteMessages(ctx,
+		kafkago.Message{Key: []byte("po-1"), Value: legacy},
+		kafkago.Message{Key: []byte("po-1"), Value: envelopeBytes(t, goodID, "NetworkOrderReceived", time.Now().UTC(), map[string]any{})},
+	); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	dlqCtx, dlqCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer dlqCancel()
+	dlqMsg, err := dlqReader.ReadMessage(dlqCtx)
+	if err != nil {
+		t.Fatalf("read DLQ message: %v", err)
+	}
+	if string(dlqMsg.Value) != string(legacy) {
+		t.Errorf("DLQ value = %s, want the raw legacy message", dlqMsg.Value)
+	}
+	assertHeader(t, dlqMsg.Headers, "x-dlq-source-topic", topic)
+
+	deadline := time.Now().Add(30 * time.Second)
+	for !processed.has(goodID) {
+		if time.Now().After(deadline) {
+			t.Fatal("CloudEvent behind the legacy message was not processed -- partition blocked")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if processed.has("evt-legacy") {
+		t.Fatal("legacy message reached the dedupe gate: it was parsed")
+	}
+	if ids := projection.eventIDs(); len(ids) != 1 || ids[0] != goodID {
+		t.Fatalf("applied = %v, want [%q]", ids, goodID)
+	}
 }

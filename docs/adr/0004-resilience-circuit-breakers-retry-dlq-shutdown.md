@@ -216,8 +216,10 @@ fixed constant — an isolated test topic gets an isolated DLQ topic for
 free, exactly like the reference), and the offset is committed anyway:
 one poison message must never permanently block every other event
 behind it on the same partition. This is logged at WARN level with
-full context (topic, dlq_topic, phase, event_id, event_type, attempts,
-error).
+full context (topic, dlq_topic, phase, event id, event type, attempts,
+error) — since ADR-0008 the id/type are the CloudEvents `id`/`type`
+(`ce_id`/`ce_type` log keys), and a message that is not a valid
+CloudEvent is dead-lettered immediately without retry.
 
 Proven end to end with a REAL testcontainers Kafka
 (`analytics_dlq_integration_test.go`,

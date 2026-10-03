@@ -120,8 +120,8 @@ re-set them when the domain grows; never copy a sibling's numbers.
 
 `.claude/rules/*.md` describe the code as it is: `domain-model.md`
 (NetworkOrder, use cases, ports), `rest-api.md` (the four read-only
-routes, RFC 7807), and `integration-events.md` (no Kafka yet; the rules
-for when it arrives). Keep them in sync with the code. Do not write planned
+routes, RFC 7807), and `integration-events.md` (the CloudEvents-only Kafka
+publishers/consumer that exist, and their rules). Keep them in sync with the code. Do not write planned
 concepts into them as if they exist.
 
 ## Why this context exists
@@ -192,7 +192,7 @@ charts/network-fulfillment/   Helm chart + Python wiring tests
 ```
 
 Still planned (ADR 0001 + ADR 0002), not in the tree: `CapabilityOffer`
-and its Kafka-fed caches, `outbound/kafka`, the live `retailnetwork`
+and its Kafka-fed caches, the live `retailnetwork`
 gateway calling `retail-network`'s real Vendor API, shipment
 confirmation, transaction-status reconciliation, and an MCP adapter.
 
@@ -253,6 +253,33 @@ confirmation, transaction-status reconciliation, and an MCP adapter.
    own state. Per ADR 0002 D5, `network-fulfillment`/`order-management`
    release work only once the acknowledgement submission has *reconciled*
    to `SUCCESS`, never on the 202 alone.
+
+## Events: CloudEvents 1.0 is MANDATORY
+
+Every Kafka message this service produces or consumes (integration
+`warehouse.<ctx>.events` AND analytics `warehouse.<ctx>.analytics`) is a
+CloudEvents 1.0 event in structured content mode. This is a hard fleet rule,
+not a preference:
+
+- No flat envelope (`event_id`/`event_type`/`occurred_at`), no dual-write,
+  no dual-read, no envelope toggle env var (`EVENT_ENVELOPE_MODE` is gone).
+- Build/validate/(un)marshal with `github.com/cloudevents/sdk-go/v2/event`
+  via `internal/adapters/kafka/cloudevents/`; transport stays kafka-go.
+- Kafka header `content-type: application/cloudevents+json; charset=UTF-8`.
+- Required attributes: `specversion=1.0`, `id` (UUID, stable across outbox
+  redelivery), `source=/warehouse/network-fulfillment`, `type`, `subject` (aggregate id), `time`
+  (occurred-at, UTC), `datacontenttype=application/json`,
+  `dataschema=urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v<N>`.
+- `type` = `com.warehouse.<subdomain>.<bounded-context>.<entity>.<EventName>`;
+  for this service: `com.warehouse.wes.network-fulfillment.<entity>.<EventName>`
+  (entity `networkorder`, subject = the network order ref). Breaking payload
+  change => new `.v2` type + new dataschema version, never mutate.
+- Consumers dispatch on the FULL `type`, ignore unknown types, dedupe on
+  `id`, and DLQ/skip (never crash, never parse a legacy shape) anything that
+  fails CloudEvents validation.
+
+Full standard and the fleet's cross-service type catalogue: ADR-0008
+(`docs/adr/0008-cloudevents-mandatory-event-envelope.md`).
 
 ## Key commands (harness v1 — see HARNESS.md for what each sensor costs)
 

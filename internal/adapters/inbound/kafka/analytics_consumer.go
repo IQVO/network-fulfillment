@@ -7,6 +7,14 @@
 // Consistent with the rest of the analytics pipeline, this consumer is
 // trace-free: it opens no spans and reads no trace headers.
 //
+// Every message must be a CloudEvents 1.0 event (ADR 0008): it is decoded
+// with internal/adapters/kafka/cloudevents.Decode, dispatched on the FULL
+// `type` string, deduped on the CloudEvents `id`, and reads its occurred-at
+// from the `time` attribute. Anything that fails CloudEvents validation
+// (including the retired flat envelope) is a deterministic poison message:
+// it is dead-lettered immediately, never retried and never parsed as a
+// legacy shape.
+//
 // ADR 0004 (ported from order-management's ADR 0025) adds in-process
 // retry and a dead-letter topic here — see handleMessage's doc comment
 // for the two-phase retry split this consumer needs that
@@ -18,7 +26,6 @@ package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,8 +33,10 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	ce "github.com/cloudevents/sdk-go/v2/event"
 	kafkago "github.com/segmentio/kafka-go"
 
+	"github.com/claudioed/network-fulfillment/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/network-fulfillment/internal/analytics/report"
 )
 
@@ -78,18 +87,15 @@ type ProcessedEvents interface {
 	MarkProcessed(ctx context.Context, eventId string) (bool, error)
 }
 
-// analyticsEnvelope is the inbound decode shape of the Envelope v1 wrapper
-// on the analytics topic. Declared here (rather than imported from the
-// outbound publisher) so this inbound adapter does not depend on an
-// outbound adapter (arch-go enforced).
-type analyticsEnvelope struct {
-	EventId       string          `json:"event_id"`
-	EventType     string          `json:"event_type"`
-	OccurredAt    time.Time       `json:"occurred_at"`
-	Source        string          `json:"source"`
-	SchemaVersion int             `json:"schema_version"`
-	Data          json.RawMessage `json:"data"`
-}
+// The full CloudEvents `type` strings this consumer's projection handles.
+// Built from the shared cloudevents helper (not imported from the outbound
+// publisher, so this inbound adapter never depends on an outbound adapter
+// — arch-go enforced).
+var (
+	TypeNetworkOrderReceived     = cloudevents.Type("networkorder", "NetworkOrderReceived")
+	TypeNetworkOrderAcknowledged = cloudevents.Type("networkorder", "NetworkOrderAcknowledged")
+	TypeNetworkOrderRejected     = cloudevents.Type("networkorder", "NetworkOrderRejected")
+)
 
 // analyticsEventData is the subset of every event's own JSON this consumer
 // needs to compute the acknowledgement report: the reason for a rejection,
@@ -102,7 +108,7 @@ type analyticsEventData struct {
 
 // AnalyticsConsumer reads analytics events off the analytics topic and
 // applies each to the acknowledgement-report ProjectionStore, exactly once
-// per event_id despite Kafka's at-least-once delivery.
+// per CloudEvents id despite Kafka's at-least-once delivery.
 type AnalyticsConsumer struct {
 	Reader     *kafkago.Reader
 	Projection report.ProjectionStore
@@ -191,10 +197,9 @@ func (c *AnalyticsConsumer) Close() error {
 	return errors.Join(readerErr, c.dlqWriter.Close())
 }
 
-// handleMessage decodes/filters msg (permanent failures are logged and
-// committed immediately, exactly like the pre-DLQ behaviour — a
-// malformed message or an unrecognized event type is not a candidate
-// for retry or dead-lettering), then retries the mark-processed and
+// handleMessage decodes/filters msg (a message that is not a valid
+// CloudEvent is a permanent failure: dead-lettered immediately with no
+// retry; an unrecognized `type` is silently committed past), then retries the mark-processed and
 // projection-apply phases INDEPENDENTLY, each up to maxHandlerAttempts.
 //
 // The two phases are retried SEPARATELY, unlike order-management's
@@ -209,16 +214,22 @@ func (c *AnalyticsConsumer) Close() error {
 func (c *AnalyticsConsumer) handleMessage(ctx context.Context, msg kafkago.Message) error {
 	topic := c.Reader.Config().Topic
 
-	env, recognized, decodeErr := decodeAnalyticsEnvelope(msg.Value)
+	env, recognized, decodeErr := decodeAnalyticsEvent(msg.Value)
 	if decodeErr != nil {
-		c.log(ctx, "skipping unparseable analytics message", "topic", topic, "error", decodeErr)
+		// Not a valid CloudEvent (e.g. a retired flat-envelope message):
+		// deterministic poison, dead-lettered at once without retry.
+		c.log(ctx, "analytics: message is not a valid CloudEvent, sending to dead-letter topic",
+			"topic", topic, "partition", msg.Partition, "offset", msg.Offset, "error", decodeErr)
+		if dlqErr := c.dlqPublish(ctx, msg, decodeErr); dlqErr != nil {
+			return fmt.Errorf("analytics: publish to dead-letter topic: %w", dlqErr)
+		}
 		return c.commit(ctx, msg)
 	}
 	if !recognized {
 		return c.commit(ctx, msg)
 	}
 
-	isNew, err := c.markProcessedWithRetry(ctx, env.EventId)
+	isNew, err := c.markProcessedWithRetry(ctx, env.ID())
 	if err != nil {
 		return c.deadLetter(ctx, msg, topic, env, "mark_processed", err)
 	}
@@ -236,10 +247,10 @@ func (c *AnalyticsConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 // phase has exhausted its retries, then commits the offset regardless —
 // one poison message must never block every other event on this
 // partition.
-func (c *AnalyticsConsumer) deadLetter(ctx context.Context, msg kafkago.Message, topic string, env analyticsEnvelope, phase string, cause error) error {
+func (c *AnalyticsConsumer) deadLetter(ctx context.Context, msg kafkago.Message, topic string, env ce.Event, phase string, cause error) error {
 	c.log(ctx, "analytics: exhausted retries, sending to dead-letter topic",
 		"topic", topic, "dlq_topic", topic+dlqTopicSuffix, "phase", phase,
-		"event_id", env.EventId, "event_type", env.EventType, "attempts", maxHandlerAttempts, "error", cause)
+		"ce_id", env.ID(), "ce_type", env.Type(), "attempts", maxHandlerAttempts, "error", cause)
 	if dlqErr := c.dlqPublish(ctx, msg, cause); dlqErr != nil {
 		return fmt.Errorf("analytics: publish to dead-letter topic: %w", dlqErr)
 	}
@@ -267,7 +278,7 @@ func (c *AnalyticsConsumer) markProcessedWithRetry(ctx context.Context, eventId 
 // event-specific payload plus the matching Projection.Apply* call) with
 // jittered exponential backoff, bounded exactly like
 // markProcessedWithRetry.
-func (c *AnalyticsConsumer) applyWithRetry(ctx context.Context, env analyticsEnvelope) error {
+func (c *AnalyticsConsumer) applyWithRetry(ctx context.Context, env ce.Event) error {
 	policy := backoff.NewExponentialBackOff(
 		backoff.WithInitialInterval(retryInitialInterval),
 		backoff.WithMaxInterval(retryMaxInterval),
@@ -314,58 +325,59 @@ func (c *AnalyticsConsumer) log(ctx context.Context, msg string, args ...any) {
 	}
 }
 
-// decodeAnalyticsEnvelope decodes raw as an analyticsEnvelope and reports
-// whether its event_type is one this consumer's projection contract
-// recognizes. A decode error is permanent (never retried); an
-// unrecognized event type is a normal, expected skip on this
-// shared/fan-out-shaped analytics topic, not an error.
-func decodeAnalyticsEnvelope(raw []byte) (analyticsEnvelope, bool, error) {
-	var env analyticsEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return analyticsEnvelope{}, false, fmt.Errorf("analytics: decode envelope: %w", err)
+// decodeAnalyticsEvent decodes raw as a CloudEvents 1.0 event and reports
+// whether its full `type` is one this consumer's projection contract
+// recognizes. A decode error (wrapping cloudevents.ErrNotCloudEvent) is
+// permanent (never retried); an unrecognized type is a normal, expected
+// skip (forward compatibility), not an error.
+func decodeAnalyticsEvent(raw []byte) (ce.Event, bool, error) {
+	env, err := cloudevents.Decode(raw)
+	if err != nil {
+		return ce.Event{}, false, fmt.Errorf("analytics: decode event: %w", err)
 	}
-	switch env.EventType {
-	case "NetworkOrderReceived", "NetworkOrderAcknowledged", "NetworkOrderRejected":
+	switch env.Type() {
+	case TypeNetworkOrderReceived, TypeNetworkOrderAcknowledged, TypeNetworkOrderRejected:
 		return env, true, nil
 	default:
 		return env, false, nil
 	}
 }
 
-// applyProjection decodes env's event-specific data and applies the
-// matching projection method. Retried independently of MarkProcessed —
-// see handleMessage's doc comment for why.
-func (c *AnalyticsConsumer) applyProjection(ctx context.Context, env analyticsEnvelope) error {
+// applyProjection decodes env's payload (DataAs) and applies the matching
+// projection method, using the CloudEvents `id` and `time` attributes.
+// Retried independently of MarkProcessed — see handleMessage's doc
+// comment for why.
+func (c *AnalyticsConsumer) applyProjection(ctx context.Context, env ce.Event) error {
 	var data analyticsEventData
-	if err := json.Unmarshal(env.Data, &data); err != nil {
+	if err := env.DataAs(&data); err != nil {
 		return fmt.Errorf("analytics: decode event data: %w", err)
 	}
+	at := env.Time()
 
-	switch env.EventType {
-	case "NetworkOrderReceived":
-		return c.Projection.ApplyNetworkOrderReceived(ctx, env.EventId, env.OccurredAt)
-	case "NetworkOrderAcknowledged":
-		latency := env.OccurredAt.Sub(data.ReceivedAt).Seconds()
+	switch env.Type() {
+	case TypeNetworkOrderReceived:
+		return c.Projection.ApplyNetworkOrderReceived(ctx, env.ID(), at)
+	case TypeNetworkOrderAcknowledged:
+		latency := at.Sub(data.ReceivedAt).Seconds()
 		if latency < 0 {
 			latency = 0
 		}
-		return c.Projection.ApplyNetworkOrderAcknowledged(ctx, env.EventId, env.OccurredAt, latency)
-	case "NetworkOrderRejected":
-		return c.Projection.ApplyNetworkOrderRejected(ctx, env.EventId, env.OccurredAt, data.Reason)
+		return c.Projection.ApplyNetworkOrderAcknowledged(ctx, env.ID(), at, latency)
+	case TypeNetworkOrderRejected:
+		return c.Projection.ApplyNetworkOrderRejected(ctx, env.ID(), at, data.Reason)
 	default:
 		return nil
 	}
 }
 
-// HandleMessage decodes raw as an analyticsEnvelope and applies the
-// matching projection method for its event_type, exactly like before
-// ADR 0004 — kept as a thin, non-retrying wrapper around
-// decodeAnalyticsEnvelope/applyProjection/MarkProcessed so every
-// existing unit test that calls HandleMessage directly (never touching
-// Run's retry/DLQ machinery, which needs a real *kafkago.Reader/Message)
-// keeps compiling and behaving identically.
+// HandleMessage decodes raw as a CloudEvent and applies the matching
+// projection method for its `type` — a thin, non-retrying wrapper around
+// decodeAnalyticsEvent/applyProjection/MarkProcessed, used by unit tests
+// that do not need Run's retry/DLQ machinery (which needs a real
+// *kafkago.Reader/Message). A message that is not a valid CloudEvent
+// returns an error wrapping cloudevents.ErrNotCloudEvent.
 func (c *AnalyticsConsumer) HandleMessage(ctx context.Context, raw []byte) error {
-	env, recognized, err := decodeAnalyticsEnvelope(raw)
+	env, recognized, err := decodeAnalyticsEvent(raw)
 	if err != nil {
 		return err
 	}
@@ -373,7 +385,7 @@ func (c *AnalyticsConsumer) HandleMessage(ctx context.Context, raw []byte) error
 		return nil
 	}
 
-	isNew, err := c.Processed.MarkProcessed(ctx, env.EventId)
+	isNew, err := c.Processed.MarkProcessed(ctx, env.ID())
 	if err != nil {
 		return fmt.Errorf("analytics: mark processed: %w", err)
 	}

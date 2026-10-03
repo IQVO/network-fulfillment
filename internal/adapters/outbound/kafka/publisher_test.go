@@ -28,108 +28,142 @@ func (w *fakeWriter) WriteMessages(_ context.Context, msgs ...kafkago.Message) e
 	return nil
 }
 
-// publisherCase is one row of TestPublisher_PublishesEachEventType: a
-// domain event must serialize into the wire envelope with the expected
-// event_type and partition key, its payload carrying the one field that
-// distinguishes that event type's data block.
-type publisherCase struct {
-	name      string
-	event     shared.DomainEvent
-	wantType  string
-	wantKey   string
-	wantField string
-	wantValue any
+// goldenCase is one published event type: the domain event plus the exact
+// CloudEvents JSON (all §3 attributes + data) it must serialize to on the
+// given stream.
+type goldenCase struct {
+	name  string
+	event shared.DomainEvent
+	data  string // exact JSON of the `data` member (payload shape unchanged)
 }
 
-// runPublisherCase publishes one event through the publisher against a
-// capturing fake writer and asserts the single message's key and
-// envelope.
-func runPublisherCase(t *testing.T, at time.Time, tt publisherCase) {
+func goldenCases(at time.Time) []goldenCase {
+	return []goldenCase{
+		{
+			name: "NetworkOrderReceived",
+			event: shared.NetworkOrderReceived{NetworkRef: "po-1", SiteId: "site-1", RequiredShipBy: at.Add(48 * time.Hour),
+				AcknowledgeBy: at.Add(24 * time.Hour), LineCount: 2, At: at},
+			data: `{"networkRef":"po-1","siteId":"site-1","requiredShipBy":"2026-09-25T08:00:00Z","acknowledgeBy":"2026-09-24T08:00:00Z","lineCount":2,"at":"2026-09-23T08:00:00Z"}`,
+		},
+		{
+			name:  "NetworkOrderAcknowledged",
+			event: shared.NetworkOrderAcknowledged{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1", ReceivedAt: at.Add(-time.Minute), At: at},
+			data:  `{"networkRef":"po-1","siteId":"site-1","localOrderId":"ord-1","receivedAt":"2026-09-23T07:59:00Z","at":"2026-09-23T08:00:00Z"}`,
+		},
+		{
+			name:  "NetworkOrderRejected",
+			event: shared.NetworkOrderRejected{NetworkRef: "po-1", SiteId: "site-1", Reason: shared.RejectionReasonUntranslatableSKU, At: at},
+			data:  `{"networkRef":"po-1","siteId":"site-1","reason":"UNTRANSLATABLE_SKU","at":"2026-09-23T08:00:00Z"}`,
+		},
+		{
+			name:  "NetworkOrderShipmentConfirmed",
+			event: shared.NetworkOrderShipmentConfirmed{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1", At: at},
+			data:  `{"networkRef":"po-1","siteId":"site-1","localOrderId":"ord-1","at":"2026-09-23T08:00:00Z"}`,
+		},
+	}
+}
+
+// wantCloudEvent is the exact structured-mode JSON a published event must
+// have: every required attribute, the full type string, the dataschema
+// for stream, and the unchanged payload.
+func wantCloudEvent(eventName, stream, data string) string {
+	return `{"specversion":"1.0","id":"11111111-1111-4111-8111-111111111111",` +
+		`"source":"/warehouse/network-fulfillment",` +
+		`"type":"com.warehouse.wes.network-fulfillment.networkorder.` + eventName + `",` +
+		`"subject":"po-1","time":"2026-09-23T08:00:00Z","datacontenttype":"application/json",` +
+		`"dataschema":"urn:warehouse:network-fulfillment:` + stream + `:` + eventName + `:v1",` +
+		`"data":` + data + `}`
+}
+
+const fixedID = "11111111-1111-4111-8111-111111111111"
+
+// assertGoldenMessage checks one produced message against the golden
+// CloudEvent, key and content-type header.
+func assertGoldenMessage(t *testing.T, msg kafkago.Message, wantTopic, want string) {
 	t.Helper()
-
-	w := &fakeWriter{}
-	p := outboundkafka.NewPublisher(nil, func() string { return "evt-fixed" })
-	p.Writer = w
-
-	if err := p.Publish(context.Background(), tt.event); err != nil {
-		t.Fatalf("Publish: %v", err)
+	if msg.Topic != wantTopic {
+		t.Errorf("topic = %q, want %q", msg.Topic, wantTopic)
 	}
-	if len(w.msgs) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(w.msgs))
+	if string(msg.Key) != "po-1" {
+		t.Errorf("key = %q, want po-1", string(msg.Key))
 	}
-	msg := w.msgs[0]
-	if string(msg.Key) != tt.wantKey {
-		t.Errorf("key = %q, want %q", string(msg.Key), tt.wantKey)
-	}
-
-	var env outboundkafka.Envelope
-	if err := json.Unmarshal(msg.Value, &env); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
-	}
-	if env.EventType != tt.wantType {
-		t.Errorf("event_type = %q, want %q", env.EventType, tt.wantType)
-	}
-	if env.EventId != "evt-fixed" {
-		t.Errorf("event_id = %q, want evt-fixed", env.EventId)
-	}
-	if env.Source != "network-fulfillment" {
-		t.Errorf("source = %q, want network-fulfillment", env.Source)
-	}
-	if !env.OccurredAt.Equal(at) {
-		t.Errorf("occurred_at = %v, want %v", env.OccurredAt, at)
-	}
-
-	var data map[string]any
-	if err := json.Unmarshal(env.Data, &data); err != nil {
-		t.Fatalf("unmarshal data: %v", err)
-	}
-	if got := data[tt.wantField]; got != tt.wantValue {
-		t.Errorf("data[%q] = %v (%T), want %v (%T)", tt.wantField, got, got, tt.wantValue, tt.wantValue)
+	assertJSONEqual(t, msg.Value, want)
+	if got := headerValue(msg.Headers, "content-type"); got != "application/cloudevents+json; charset=UTF-8" {
+		t.Errorf("content-type header = %q", got)
 	}
 }
 
-func TestPublisher_PublishesEachEventType(t *testing.T) {
+func TestPublisher_GoldenCloudEventPerEventType(t *testing.T) {
 	at := time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC)
-
-	tests := []publisherCase{
-		{
-			name:      "NetworkOrderReceived",
-			event:     shared.NetworkOrderReceived{NetworkRef: "po-1", SiteId: "site-1", LineCount: 2, At: at},
-			wantType:  "NetworkOrderReceived",
-			wantKey:   "po-1",
-			wantField: "lineCount",
-			wantValue: float64(2),
-		},
-		{
-			name:      "NetworkOrderAcknowledged",
-			event:     shared.NetworkOrderAcknowledged{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1", At: at},
-			wantType:  "NetworkOrderAcknowledged",
-			wantKey:   "po-1",
-			wantField: "localOrderId",
-			wantValue: "ord-1",
-		},
-		{
-			name:      "NetworkOrderRejected",
-			event:     shared.NetworkOrderRejected{NetworkRef: "po-1", SiteId: "site-1", Reason: shared.RejectionReasonUntranslatableSKU, At: at},
-			wantType:  "NetworkOrderRejected",
-			wantKey:   "po-1",
-			wantField: "reason",
-			wantValue: "UNTRANSLATABLE_SKU",
-		},
-		{
-			name:      "NetworkOrderShipmentConfirmed",
-			event:     shared.NetworkOrderShipmentConfirmed{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1", At: at},
-			wantType:  "NetworkOrderShipmentConfirmed",
-			wantKey:   "po-1",
-			wantField: "localOrderId",
-			wantValue: "ord-1",
-		},
-	}
-
-	for _, tt := range tests {
+	for _, tt := range goldenCases(at) {
 		t.Run(tt.name, func(t *testing.T) {
-			runPublisherCase(t, at, tt)
+			w := &fakeWriter{}
+			p := outboundkafka.NewPublisher(nil, func() string { return fixedID })
+			p.Writer = w
+			if err := p.Publish(context.Background(), tt.event); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			if len(w.msgs) != 1 {
+				t.Fatalf("expected 1 message, got %d", len(w.msgs))
+			}
+			assertGoldenMessage(t, w.msgs[0], outboundkafka.Topic, wantCloudEvent(tt.name, "events", tt.data))
 		})
+	}
+}
+
+// TestPublisher_EncodeMintsIDOnceAndStampsFullType asserts the Encoded
+// metadata the outbox persists: the full CloudEvents type, and an id
+// minted exactly once per event (so the persisted bytes — and every
+// redelivery of them — carry that one id).
+func TestPublisher_EncodeMintsIDOnceAndStampsFullType(t *testing.T) {
+	calls := 0
+	p := outboundkafka.NewPublisher(nil, func() string { calls++; return fixedID })
+	enc, err := p.Encode(context.Background(), shared.NetworkOrderReceived{NetworkRef: "po-1", At: time.Now()})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("NewId called %d times, want 1", calls)
+	}
+	if enc[0].EventType != "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived" {
+		t.Fatalf("EventType = %q", enc[0].EventType)
+	}
+}
+
+func TestPublisher_RejectsEventWithEmptySubject(t *testing.T) {
+	p := outboundkafka.NewPublisher(nil, func() string { return fixedID })
+	w := &fakeWriter{}
+	p.Writer = w
+	if err := p.Publish(context.Background(), shared.NetworkOrderReceived{At: time.Now()}); err == nil {
+		t.Fatal("expected an error for an empty subject (NetworkRef)")
+	}
+	if len(w.msgs) != 0 {
+		t.Fatalf("expected no message written, got %d", len(w.msgs))
+	}
+}
+
+func headerValue(headers []kafkago.Header, key string) string {
+	for _, h := range headers {
+		if h.Key == key {
+			return string(h.Value)
+		}
+	}
+	return ""
+}
+
+func assertJSONEqual(t *testing.T, got []byte, want string) {
+	t.Helper()
+	var g, w any
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("unmarshal got %s: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatalf("unmarshal want: %v", err)
+	}
+	gb, _ := json.Marshal(g)
+	wb, _ := json.Marshal(w)
+	if string(gb) != string(wb) {
+		t.Errorf("JSON mismatch\n got: %s\nwant: %s", gb, wb)
 	}
 }
 
@@ -146,7 +180,7 @@ func TestPublisher_PropagatesWriteError(t *testing.T) {
 
 // TestPublisher_RejectsNonDomainEvent asserts a value that does not
 // implement shared.DomainEvent is refused rather than published without a
-// usable event_type/occurred_at.
+// usable type/time.
 func TestPublisher_RejectsNonDomainEvent(t *testing.T) {
 	p := outboundkafka.NewPublisher(nil, func() string { return "evt" })
 	w := &fakeWriter{}

@@ -11,6 +11,11 @@ description: "ADR 0003 — why saving a NetworkOrder and publishing its domain e
 ## Status
 
 Accepted — implemented in the same change that introduced this record.
+Envelope description superseded by ADR-0008: the outbox mechanism is
+unchanged, but the bytes it stores are now CloudEvents 1.0 structured-mode
+events (the flat `Envelope` / `AnalyticsEnvelope` shapes named below no
+longer exist), `event_type` holds the full CloudEvents `type`, and
+`headers` carries the CloudEvents `content-type` header.
 
 ## Context
 
@@ -61,8 +66,9 @@ Adopt the **transactional outbox** pattern, gated behind `DATABASE_URL`:
    carry), `headers` (JSONB, for future trace propagation), plus
    `created_at`, `published_at`, `attempts`, `last_error` for the relay.
    One row per (event × topic) — not one row per event — because this
-   context fans each event out to two topics with two different envelope
-   shapes (`Envelope` vs `AnalyticsEnvelope`). A partial index over
+   context fans each event out to two topics with two different encoded
+   payloads (originally `Envelope` vs `AnalyticsEnvelope`; since ADR-0008,
+   two CloudEvents with distinct `id` and `dataschema`). A partial index over
    `published_at IS NULL` keeps the relay's scan tiny.
 
 2. **`ports.UnitOfWork`** — a new driven port,

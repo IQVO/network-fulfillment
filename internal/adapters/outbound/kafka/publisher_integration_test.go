@@ -12,6 +12,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tckafka "github.com/testcontainers/testcontainers-go/modules/kafka"
 
+	"github.com/claudioed/network-fulfillment/internal/adapters/kafka/cloudevents"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
@@ -80,7 +81,7 @@ func TestPublisherKeysMessagesForSameNetworkRefOntoTheSamePartition(t *testing.T
 	topic := fmt.Sprintf("warehouse.network-fulfillment.events.itest-part-%d", time.Now().UnixNano())
 	createKafkaTopicWithPartitions(t, ctx, brokers, topic, numPartitions)
 
-	publisher := outboundkafka.NewPublisher(brokers, func() string { return "evt-fixed" })
+	publisher := outboundkafka.NewPublisher(brokers, func() string { return "11111111-1111-4111-8111-111111111111" })
 	// Point the publisher's writer at the isolated test topic instead of
 	// the package-pinned Topic constant, exactly like Encode/Send do for
 	// the outbox relay path (topic travels per-message there); here we
@@ -150,6 +151,12 @@ func TestPublisherKeysMessagesForSameNetworkRefOntoTheSamePartition(t *testing.T
 					return // timeout: no more messages on this partition
 				}
 				partitionOf[string(msg.Key)] = p
+				if _, err := cloudevents.Decode(msg.Value); err != nil {
+					t.Errorf("message on the wire is not a CloudEvent: %v", err)
+				}
+				if got := headerValue(msg.Headers, "content-type"); got != cloudevents.MediaType {
+					t.Errorf("content-type header = %q, want %q", got, cloudevents.MediaType)
+				}
 			}
 		}()
 	}

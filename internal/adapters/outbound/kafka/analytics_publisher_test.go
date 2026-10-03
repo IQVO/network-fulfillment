@@ -2,7 +2,6 @@ package kafka_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -11,35 +10,24 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-func TestAnalyticsPublisher_PublishesToAnalyticsTopicWithSchemaVersion(t *testing.T) {
+// TestAnalyticsPublisher_GoldenCloudEventPerEventType asserts every event
+// type on the analytics stream: same `type` as the integration stream,
+// dataschema ...:analytics:<Event>:v1, and no schema_version field.
+func TestAnalyticsPublisher_GoldenCloudEventPerEventType(t *testing.T) {
 	at := time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC)
-	w := &fakeWriter{}
-	p := outboundkafka.NewAnalyticsPublisher(nil, func() string { return "evt-fixed" })
-	p.Writer = w
-
-	event := shared.NetworkOrderAcknowledged{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1", At: at}
-	if err := p.Publish(context.Background(), event); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-	if len(w.msgs) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(w.msgs))
-	}
-
-	var env outboundkafka.AnalyticsEnvelope
-	if err := json.Unmarshal(w.msgs[0].Value, &env); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
-	}
-	if env.EventType != "NetworkOrderAcknowledged" {
-		t.Errorf("event_type = %q, want NetworkOrderAcknowledged", env.EventType)
-	}
-	if env.SchemaVersion != 1 {
-		t.Errorf("schema_version = %d, want 1", env.SchemaVersion)
-	}
-	if env.Source != "network-fulfillment" {
-		t.Errorf("source = %q, want network-fulfillment", env.Source)
-	}
-	if string(w.msgs[0].Key) != "po-1" {
-		t.Errorf("key = %q, want po-1", string(w.msgs[0].Key))
+	for _, tt := range goldenCases(at) {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &fakeWriter{}
+			p := outboundkafka.NewAnalyticsPublisher(nil, func() string { return fixedID })
+			p.Writer = w
+			if err := p.Publish(context.Background(), tt.event); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			if len(w.msgs) != 1 {
+				t.Fatalf("expected 1 message, got %d", len(w.msgs))
+			}
+			assertGoldenMessage(t, w.msgs[0], outboundkafka.AnalyticsTopic, wantCloudEvent(tt.name, "analytics", tt.data))
+		})
 	}
 }
 

@@ -6,16 +6,19 @@
 // the whole Published Language a downstream Conformist would consume —
 // mirroring facility-layout's ADR-0009 pattern and process-path-management's
 // ADR 0002.
+//
+// Every message is a CloudEvents 1.0 event in structured content mode
+// (ADR 0008): built by internal/adapters/kafka/cloudevents and carrying
+// the content-type header. There is no other envelope.
 package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
 
+	"github.com/claudioed/network-fulfillment/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -24,16 +27,13 @@ import (
 // warehouse.<context>.events.
 const Topic = "warehouse.network-fulfillment.events"
 
-// Envelope is the CloudEvents-like wrapper shared across the
-// warehouse-systems services' integration topics. data carries the domain
-// event's own JSON.
-type Envelope struct {
-	EventId    string          `json:"event_id"`
-	EventType  string          `json:"event_type"`
-	OccurredAt time.Time       `json:"occurred_at"`
-	Source     string          `json:"source"`
-	Data       json.RawMessage `json:"data"`
-}
+// Entity is the `type` entity segment for every event this context
+// raises: they are all raised by the NetworkOrder aggregate.
+const Entity = "networkorder"
+
+// dataSchemaVersion is the dataschema version of every payload this
+// service publishes today (on both streams).
+const dataSchemaVersion = 1
 
 // Writer is the subset of *kafkago.Writer the Publisher needs, so tests can
 // substitute a fake without a live broker.
@@ -41,7 +41,8 @@ type Writer interface {
 	WriteMessages(ctx context.Context, msgs ...kafkago.Message) error
 }
 
-// Encoded is one wire-ready message, produced by Encode without touching
+// Encoded is one wire-ready message (Value is the CloudEvents
+// structured-mode JSON; Headers always include the content-type header), produced by Encode without touching
 // the broker. Topic is set explicitly (rather than pinned on the
 // Writer): the outbox relay's Sink has no fixed topic of its own, and a
 // single relay pass may forward rows destined for either the
@@ -75,7 +76,8 @@ type Publisher struct {
 }
 
 // NewPublisher constructs a Publisher writing to brokers. newId mints the
-// envelope event_id (e.g. a UUID). The underlying Writer carries NO fixed
+// CloudEvents `id` (a UUID) exactly once per encoded event; the outbox
+// persists the encoded bytes, so a redelivery carries the same id. The underlying Writer carries NO fixed
 // topic: Encode always stamps Topic explicitly onto the Encoded message,
 // so the same Writer can carry both integration and analytics traffic
 // when this Publisher is reused as the relay's Sink.
@@ -103,40 +105,45 @@ func NewPublisher(brokers []string, newId func() string) *Publisher {
 	}
 }
 
-// Encode translates events into their integration-topic wire form,
-// without sending them. Each event must implement shared.DomainEvent (a
-// *usecases.recordingPublisher in tests aside, that is the only thing the
-// application layer ever hands an EventPublisher); a value that is not is
-// rejected rather than published headerless.
+// Encode translates events into their integration-topic wire form (one
+// CloudEvent each, dataschema stream "events"), without sending them.
 func (p *Publisher) Encode(_ context.Context, events ...shared.DomainEvent) ([]Encoded, error) {
+	return encodeAll(Topic, cloudevents.StreamEvents, p.NewId, events)
+}
+
+// encodeAll builds one CloudEvents-encoded message per event for topic,
+// with dataschema stream stream. Shared by Publisher and
+// AnalyticsPublisher so both streams carry identical attributes apart
+// from dataschema and id.
+func encodeAll(topic, stream string, newId func() string, events []shared.DomainEvent) ([]Encoded, error) {
 	out := make([]Encoded, 0, len(events))
 	for _, event := range events {
-		data, err := json.Marshal(event)
+		key := aggregateKey(event)
+		value, err := cloudevents.New(cloudevents.Spec{
+			ID:        newId(),
+			Entity:    Entity,
+			EventName: event.EventName(),
+			Subject:   key,
+			Time:      event.OccurredAt(),
+			Stream:    stream,
+			Version:   dataSchemaVersion,
+			Data:      event,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("kafka: marshal event data: %w", err)
-		}
-		env := Envelope{
-			EventId:    p.NewId(),
-			EventType:  event.EventName(),
-			OccurredAt: event.OccurredAt(),
-			Source:     "network-fulfillment",
-			Data:       data,
-		}
-		payload, err := json.Marshal(env)
-		if err != nil {
-			return nil, fmt.Errorf("kafka: marshal envelope: %w", err)
+			return nil, fmt.Errorf("kafka: encode %s for %s: %w", event.EventName(), topic, err)
 		}
 		out = append(out, Encoded{
-			Topic:     Topic,
-			EventType: event.EventName(),
-			Key:       []byte(aggregateKey(event)),
-			Value:     payload,
+			Topic:     topic,
+			EventType: cloudevents.Type(Entity, event.EventName()),
+			Key:       []byte(key),
+			Value:     value,
+			Headers:   []kafkago.Header{cloudevents.ContentTypeHeader()},
 		})
 	}
 	return out, nil
 }
 
-// Publish emits event onto Topic wrapped in an Envelope. event must
+// Publish emits event onto Topic as a CloudEvent. event must
 // implement shared.DomainEvent; a value that does not is rejected rather
 // than published headerless.
 func (p *Publisher) Publish(ctx context.Context, event any) error {
