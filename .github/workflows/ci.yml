@@ -34,6 +34,17 @@ jobs:
           version: v2.13.1
           args: --timeout=5m
 
+  # Agent-guide sensor (harness-template v3): skills load, references resolve, context budget.
+  # BLOCKING: the guides are clean (0 errors); keep them that way.
+  guide-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: python3 scripts/harness/guide_lint.py
+      - run: python3 scripts/harness/test_hook.py
+
+
   # Complexity gate as its own named check: cyclomatic (gocyclo, cyclop),
   # cognitive (gocognit), nesting (nestif) and function size (funlen).
   # Thresholds live in .golangci.yml; --enable-only runs just these five

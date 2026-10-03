@@ -1,3 +1,8 @@
+---
+name: how-to-add-an-integration-event
+description: Publish or consume a cross-service Kafka event: CloudEvents 1.0 type naming, AsyncAPI, transactional outbox, consumer-group rules. Use when touching internal/adapters kafka or outbox code, a publisher/consumer, or apis/asyncapi*.yaml.
+---
+
 
 # How to add an integration event (publish and consume)
 
@@ -95,10 +100,9 @@ hardcoded `localhost:9092` fails CI).
 ### 1. Never import the sibling's Go packages
 
 This service knows a sibling's topic name and payload shape ONLY — never
-its Go types. See `internal/adapters/outbound/facilitycache/consumer.go`'s
-own doc comment: "This service has no business knowing anything else
-about that context beyond this topic name and the envelope/payload shapes
-below." Hand-mirror the payload struct locally; do not add a Go module
+its Go types. See `internal/adapters/inbound/kafka/analytics_consumer.go`, which
+decodes only the envelope and a locally declared `analyticsEventData`
+struct. Hand-mirror the payload struct locally; do not add a Go module
 dependency on the sibling repo (an architecture fitness test in most
 repos in this fleet would catch that anyway for the stricter contexts —
 check this repo's own `internal/architecture/` for a

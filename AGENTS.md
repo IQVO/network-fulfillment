@@ -1,320 +1,120 @@
 # Network Fulfillment
 
-harness-template: v1
+harness-template: v3
 
-Supporting bounded context: the anti-corruption layer between the
-`warehouse-systems` fleet and an external retail fulfillment network
-(a major e-commerce retailer's Selling Partner API, Vendor Direct Fulfillment). **Conformist**
-to the network upstream, **Anti-Corruption Layer** for everything
-downstream of it in this fleet. Owns **NetworkOrder** and
-**CapabilityOffer** as first-class aggregates.
+Supporting bounded context: the anti-corruption layer between the fleet and
+an external retail fulfillment network. **Conformist** upstream, **ACL**
+downstream. Owns **NetworkOrder** (built) and **CapabilityOffer** (planned).
+Study project, not production (see README.md banner).
 
-Study project — not a production system, not affiliated with any real-world
-company (see README.md banner).
+Read `docs/adr/0001-network-fulfillment-bounded-context.md` (companion of
+`order-management` ADR 0020) AND `docs/adr/0002-retail-network-not-amazon-counterpart.md`
+(Accepted, amends 0001: the counterpart is the fleet's own `retail-network`,
+not a real retailer's SP-API) before writing network-facing code. Note
+`docs/adr/0002-mcp-and-analytics-data-product.md` shares number 0002.
 
-## CURRENT STATE: persisted, deployed, stub-only
+## Current state
 
-This repo holds the `NetworkOrder` aggregate, the ACL translation
-boundary, the two use cases (`ReceiveNetworkDemand`,
-`SweepAcknowledgementDeadlines`), in-memory AND Postgres repositories, the
-stub network gateway, a Dockerfile, a Helm chart, and the `netfulfil`
-composition root. It is deployed to the kind cluster.
+Built: `NetworkOrder` aggregate, ACL boundary, use cases
+`ReceiveNetworkDemand` / `SweepAcknowledgementDeadlines`, in-memory and
+Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to boot, never
+a silent fallback), stub gateway, poller (inbound leg), READ-ONLY REST,
+CloudEvents Kafka publishers + outbox, analytics projector, MCP adapter,
+`web/` remote, Helm chart. Not built: `CapabilityOffer` and its Kafka caches,
+a live `retail-network` gateway, shipment confirmation, transaction-status
+reconciliation; no live network call exists.
+Operations, CI, branch protection, gremlins thresholds, related fleet
+ADRs: `docs/operations-notes.md`.
 
-Persistence is opt-in by `DATABASE_URL`: unset means the in-memory repo
-(zero-config local run, hermetic unit suite), set means Postgres or a
-REFUSAL to boot — never a silent fallback, because the fallback costs the
-acknowledgement deadlines this context owes the network.
-
-**Startup is RETRIED (~31s budget) and gated by a `startupProbe`.** Both
-are required by this cluster, not defensive padding: every injected pod's
-first outbound dial is reset ~10s after the app starts (Istio native
-sidecars, so `holdApplicationUntilProxyStarts` is a no-op), and this
-service runs migrations before it starts listening. Without the retry that
-reset is fatal; without the probe the kubelet SIGTERMs a pod that is still
-booting (exit 143, which reads like an app crash and is not one). Both
-were observed live as CrashLoopBackOff. The retry does not weaken
-fail-closed — after the budget it still refuses to boot.
-
-The inbound leg is WIRED: a poller (`internal/adapters/inbound/poller`)
-drives `ReceiveNetworkDemand` on an interval, and a read-only REST surface
-(`internal/adapters/inbound/http`, contract in `apis/openapi.yaml`)
-exposes what we told the network plus whether the poller is alive.
-Previously `ReceiveNetworkDemand` was constructed and DISCARDED
-(`_ = receive`), so nothing deployed could create a NetworkOrder at all.
-
-**The REST surface is read-only on purpose.** Demand arrives by polling
-and by nothing else (ADR 0001 section 5), so an HTTP intake endpoint would
-be a second, fictional inbound path; the only thing it could honestly do
-is inject test demand, which `NETWORK_SEED_FILE` does declaratively
-instead. Do not add a write endpoint here without changing that record.
-
-Two curated files, both following the fleet's `PATH_CATALOGUE_FILE`
-precedent: `PRODUCT_TRANSLATION_FILE` (the ACL dictionary — **without it
-every order is rejected as untranslatable**, and the service logs a
-warning at startup saying so) and `NETWORK_SEED_FILE` (stub demand, which
-refuses to boot if set against a non-stub gateway).
-
-There is still no `web/` and no live network call anywhere. Read
-`docs/adr/0001-network-fulfillment-bounded-context.md` before writing any
-code here — the boundary is **Accepted (2026-09-23)** and is a companion
-to `order-management` ADR 0020. Neither is meaningful without the other.
-
-**`docs/adr/0002-retail-network-not-amazon-counterpart.md` (Proposed)
-amends ADR 0001**: the counterpart this context is Conformist to is
-`retail-network`, a new bounded context inside this same fleet's orbit
-built to play that structural role — not a real e-commerce retailer's
-SP-API. Read ADR 0002 alongside ADR 0001 before writing any network-
-facing code; it renames the ACL adapter package and tightens the PII rule
-(see rules 1 and 2 below, both already updated to match ADR 0002's
-decision even though the ADR itself is still Proposed pending the
-companion `retail-network` ADR 0001's acceptance).
-
-**CI is ACTIVE** (`.github/workflows/ci.yml`), with eleven jobs: `lint`,
-`test`, `integration`, `api-lint`, `mutation-fast`, `vuln`, `arch-test`,
-`helm-lint` (`helm lint` plus the chart wiring tests in
-`charts/network-fulfillment/tests/`), plus the packaging/release trio
-`trivy-scan`, `docker-publish`, `release` — added on parity with
-`order-management` once `main` existed to gate them on.
-`integration` runs the Postgres adapter against a real Postgres started by
-testcontainers INSIDE the test — never a `DATABASE_URL` service container
-with a skip gate, which would report success while asserting nothing. The
-template's remaining jobs are still **dropped, not disabled**: `bdd` (no
-`features/`), `docs-api-drift` (no docs site), `web` (no `web/`), `drift`
-(no `warehouse-ui-kit` frontend dependency here). Add each back in the PR
-that creates or first needs its surface. A job that fails because a
-directory is missing is noise, not signal.
-
-`trivy-scan` builds the image (no push) and blocks on CRITICAL/HIGH with a
-known fix, but only for a PR targeting `main` — same fleet convention as
-`order-management` (validated pre-merge, not on every `develop` push).
-`docker-publish` pushes `ghcr.io/claudioed/network-fulfillment` on every
-push to `main`, cosign-signs the image keylessly (GitHub OIDC), and
-attests it with an SPDX SBOM. `release` runs after `docker-publish`
-succeeds: auto-bumps semver from the latest `vX.Y.Z` tag (starting
-`v0.1.0`), re-tags the image with that version, packages and pushes the
-Helm chart to `oci://ghcr.io/claudioed` as an OCI artifact, cuts the git
-tag, and creates a GitHub Release with the chart `.tgz` attached.
-
-**Branch protection on `develop` requires the eight non-packaging
-contexts** with `strict: true`:
-
-```
-lint  test  integration  api-lint  mutation-fast  vuln  arch-test  helm-lint
-```
-
-**Branch protection on `main` requires `lint`, `test`, `helm-lint`,
-`trivy-scan`** with `strict: true` and `enforce_admins: true` — same shape
-as `order-management`'s `main`. `docker-publish`/`release` are
-push-triggered, not PR checks, so they are deliberately not in the
-required-status-checks list. The earlier deferral on `develop` (protection
-live with `required_status_checks: null`, because requiring contexts that
-could never report would have made every PR permanently unmergeable) is
-resolved: the contexts report, so they are required. Add `bdd` when a
-`features/` directory lands.
-
-`.gremlins.yaml` thresholds are MEASURED, not copied: `efficacy: 99`,
-`mutant-coverage: 92`, set strictly below a real `gremlins unleash
-./internal/domain` run of this repo's own code (100.00% efficacy, 93.33%
-mutant coverage, 14 killed / 0 lived / 1 not covered). Re-measure and
-re-set them when the domain grows; never copy a sibling's numbers.
-
-`.claude/rules/*.md` describe the code as it is: `domain-model.md`
-(NetworkOrder, use cases, ports), `rest-api.md` (the four read-only
-routes, RFC 7807), and `integration-events.md` (the CloudEvents-only Kafka
-publishers/consumer that exist, and their rules). Keep them in sync with the code. Do not write planned
+Core concept: **throughput-constrained advertised availability**
+= `min(physicalAvailable, throughputFeasibleBefore(nextCutoff))` (ADR 0001).
+`.claude/rules/*.md` describe the code as it is; never write planned
 concepts into them as if they exist.
 
-## Why this context exists
+## Architecture (NON-NEGOTIABLE)
 
-`process-path-management` owns per-path `cycleTimeP95` and a site-scoped
-CPT schedule; `wes-work-planning` publishes remaining capacity per
-`(path, CPT)`; `order-management` derives a real delivery promise from
-both. Offering that capability to an external retail network turns out
-**not** to be a matter of publishing it:
-
-> **No Selling Partner API operation accepts a declaration of capability.**
-> Cutoffs and lead times are Vendor Central configuration, not an API
-> surface.
-
-Capability reaches a network only through three *consequence* signals —
-inventory update, order acknowledgement, shipment confirmation — and the
-network infers our capability from the gap between the last two. So the
-domain decision is **what to advertise and what to commit to**.
-
-The one genuinely new concept here is **throughput-constrained advertised
-availability**:
+Hexagonal, enforced by `arch-go` tests in `internal/architecture/`:
+**domain depends on nothing; application depends on domain; adapters
+depend on application/domain.**
 
 ```
-advertisedQuantity = min(
-    physicalAvailable,                       inventory-storage
-    throughputFeasibleBefore(nextCutoff)     PPM cycleTimeP95 + CPTSchedule
-                                             × WES remaining PathCapacity
-)
+cmd/netfulfil (composition root; also cmd/mcp, cmd/netfulfil-projector, cmd/netfulfil-reports)
+internal/domain/{networkorder,shared}  internal/application/{contract,ports,usecases}
+internal/adapters/inbound/{http,poller,kafka,mcp}
+internal/adapters/outbound/{network,ordermanagement,postgres,memory,kafka,events,...}
 ```
 
-Everything else in this context is plumbing that makes that deliverable
-and honest.
-
-## Architecture (NON-NEGOTIABLE — identical shape to the fleet)
-
-Hexagonal / Ports & Adapters, enforced by the `arch-go` fitness tests in
-`internal/architecture/`. Strict dependency rule: **domain depends on
-nothing; application depends on domain; adapters depend on
-application/domain.**
-
-```
-cmd/netfulfil/          composition root (the only binary)
-internal/
-  domain/
-    networkorder/       NetworkOrder aggregate, acknowledgement invariants
-    shared/             NetworkRef, NetworkLineRef, NetworkProductId, SKU,
-                        LocalOrderId, SiteId, validation errors
-  application/
-    contract/           InboundDemand, HeldOrderRequest/Result
-    ports/              NetworkOrderRepo, NetworkGateway, FulfillmentPlanner,
-                        ProductTranslation, EventPublisher, Clock
-    usecases/           ReceiveNetworkDemand, SweepAcknowledgementDeadlines
-  adapters/
-    inbound/http/       read-only REST (apis/openapi.yaml)
-    inbound/poller/     the inbound leg: polls the gateway, feeds Receive...
-    outbound/network/   NETWORK_MODE switch + stub gateway + seed file — the
-                        ONLY place network vocabulary may exist TODAY.
-                        Renamed to outbound/retailnetwork/ in the Phase 3
-                        implementation PR per ADR 0002, once a live
-                        gateway calling retail-network's real Vendor API
-                        is added alongside the stub.
-    outbound/ordermanagement/  held order, release, cancel (OM REST)
-    outbound/postgres/  NetworkOrderRepo + migrations runner
-    outbound/memory/    in-memory repo + product-translation file loader
-  architecture/         arch-go + fleet fitness tests
-migrations/             0001_init (network_orders, network_order_lines)
-charts/network-fulfillment/   Helm chart + Python wiring tests
-```
-
-Still planned (ADR 0001 + ADR 0002), not in the tree: `CapabilityOffer`
-and its Kafka-fed caches, the live `retailnetwork`
-gateway calling `retail-network`'s real Vendor API, shipment
-confirmation, transaction-status reconciliation, and an MCP adapter.
-
-`MUTATION_FAST_PKG` is `./internal/domain/networkorder`, the only aggregate.
-
-## Hard rules for this context
+## Hard rules
 
 1. **The network's vocabulary stops at `adapters/outbound/network/`**
-   (today the stub gateway; per ADR 0002 this package is renamed to
-   `adapters/outbound/retailnetwork/` in the Phase 3 implementation PR,
-   when the live gateway calling `retail-network`'s real Vendor API is
-   added alongside the stub).
-   `purchaseOrderNumber`, `itemSequenceNumber`, `buyerProductIdentifier`
-   (ASIN) and other real-e-commerce-retailer field names must never
-   appear in `internal/domain` or in anything published to the fleet —
-   nor must `retail-network`'s own vocabulary (`poNumber`, `listingId`,
-   `nodeId`, its reason codes) leak past this one package once the live
-   gateway lands. `arch-go` cannot catch a *vocabulary* leak — that check
-   is human.
-2. **No ship-to PII reaches this context at all** (ADR 0002, amending ADR
-   0001's original "Customer PII stops here"). With `retail-network` as
-   the counterpart, ship-to name/address/phone live in `retail-network`'s
-   own `CustomerOrder` aggregate and are never sent to
-   `network-fulfillment` in either direction — this context receives only
-   a `poNumber`, line items, quantities and a `requiredShipBy`, and a
-   shipping-label request returns only `{labelRef, trackingNumber,
-   carrier}`. This context therefore does **not** need to run
-   authenticated for PII reasons (it holds none); it stays unauthenticated
-   for the same fleet-wide reason every other context does.
-3. **Never recompute promise math here.** Deadline feasibility is asked of
-   `order-management`'s `PromisePolicy.FeasibleBy` (its ADR 0020). This
-   context has the deadline and *could* consume the same caches — doing so
-   guarantees the two copies drift.
+   (becomes `outbound/retailnetwork/` per ADR 0002). `purchaseOrderNumber`,
+   `itemSequenceNumber`, `buyerProductIdentifier` (ASIN) and other
+   real-retailer field names must never appear in `internal/domain` or
+   anything published to the fleet; nor may `retail-network`'s (`poNumber`,
+   `listingId`, `nodeId`, reason codes) leak past that package. `arch-go`
+   cannot catch a vocabulary leak: that check is human.
+2. **No ship-to PII reaches this context** (ADR 0002 amending 0001): only
+   a `poNumber`, lines, quantities and `requiredShipBy` come in; a label
+   request returns only `{labelRef, trackingNumber, carrier}`. Hence no
+   auth for PII reasons; unauthenticated like every fleet context.
+3. **Never recompute promise math here.** Ask `order-management`'s
+   `PromisePolicy.FeasibleBy` (its ADR 0020); a second copy drifts.
 4. **Correlation is a persisted mapping, never a string convention.**
-   `NetworkOrder.localOrderId` is stored explicitly. The fleet already got
-   burned once: FE's `order_ref` carries WES's per-LINE `WorkUnitId`, not
-   OM's `OrderId` (OM ADR 0018).
+   `NetworkOrder.localOrderId` is stored explicitly (OM ADR 0018).
 5. **Network demand is ship-complete.** The network confirms or rejects a
-   purchase order in its entirety; partial acknowledgements are rejected.
-   OM ADR 0017's per-shipment-group promising must not apply to it.
-6. **`NETWORK_MODE=live|stub`, default `stub`.** Per ADR 0002, `sandbox` is
-   removed — it only ever meant a real vendor program's own sandbox tier,
-   which `retail-network` has no equivalent of (its one deployed instance
-   in the kind cluster is well-behaved by default and stressed only via
-   its own simulation knobs). The kind cluster, `e2e-tests` and CI must
-   never need a credential. Log the chosen mode at startup so the running
-   value can be verified, not assumed — every `*_MODE` in this fleet
-   defaults permissive and several sat wrong in the cluster for weeks.
-7. **Any FirstOffset-replay Kafka cache needs a consumer group id unique
-   per process instance** (hostname+PID+timestamp). A shared group means a
-   fresh process resumes from an earlier instance's committed offset and
-   is marked ready holding an empty cache. This has bitten this fleet in
-   two separate services.
+   purchase order in full; partial acknowledgements are rejected. OM ADR
+   0017's per-shipment-group promising must not apply.
+6. **`NETWORK_MODE=live|stub`, default `stub`** (ADR 0002 removed
+   `sandbox`). The kind cluster, `e2e-tests` and CI must never need a
+   credential. Log the chosen mode at startup.
+7. **A FirstOffset-replay Kafka cache needs a consumer group id unique per
+   process instance** (hostname+PID+timestamp); a shared group resumes from
+   an old offset and is marked ready with an empty cache.
 8. **Submissions are asynchronous.** `submitAcknowledgement` /
    `submitShipmentConfirmations` return accepted-for-processing; reconcile
-   via `getTransactionStatus` (~15 min for acks, ~10 for shipments). A 200
-   is not a completed commitment — model submitted-but-unreconciled as its
-   own state. Per ADR 0002 D5, `network-fulfillment`/`order-management`
-   release work only once the acknowledgement submission has *reconciled*
-   to `SUCCESS`, never on the 202 alone.
+   via `getTransactionStatus`. A 200 is not a commitment: model
+   submitted-but-unreconciled as its own state; release work only after
+   the acknowledgement reconciled to `SUCCESS` (ADR 0002 D5).
+9. **REST is read-only.** Demand arrives by polling only (ADR 0001 section
+   5); no write endpoint without a new ADR.
 
 ## Events: CloudEvents 1.0 is MANDATORY
 
-Every Kafka message this service produces or consumes (integration
-`warehouse.<ctx>.events` AND analytics `warehouse.<ctx>.analytics`) is a
-CloudEvents 1.0 event in structured content mode. This is a hard fleet rule,
-not a preference:
+Every Kafka message produced or consumed (`warehouse.network-fulfillment.events`
+and `.analytics`) is a CloudEvents 1.0 structured-mode event: no flat
+envelope, no dual-write/read, no toggle. Use `github.com/cloudevents/sdk-go/v2/event`
+via `internal/adapters/kafka/cloudevents/`; header `content-type:
+application/cloudevents+json; charset=UTF-8`. Required: `specversion=1.0`,
+`id` (UUID, stable across outbox redelivery), `source=/warehouse/network-fulfillment`,
+`type=com.warehouse.wes.network-fulfillment.<entity>.<EventName>`, `subject`
+(aggregate id), `time` (UTC), `datacontenttype=application/json`,
+`dataschema=urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v<N>`.
+Breaking change => new `.v2` type and dataschema. Consumers dispatch on the
+FULL `type`, ignore unknown types, dedupe on `id`, DLQ/skip anything that
+fails validation (ADR 0008: `docs/adr/0008-cloudevents-mandatory-event-envelope.md`).
 
-- No flat envelope (`event_id`/`event_type`/`occurred_at`), no dual-write,
-  no dual-read, no envelope toggle env var (`EVENT_ENVELOPE_MODE` is gone).
-- Build/validate/(un)marshal with `github.com/cloudevents/sdk-go/v2/event`
-  via `internal/adapters/kafka/cloudevents/`; transport stays kafka-go.
-- Kafka header `content-type: application/cloudevents+json; charset=UTF-8`.
-- Required attributes: `specversion=1.0`, `id` (UUID, stable across outbox
-  redelivery), `source=/warehouse/network-fulfillment`, `type`, `subject` (aggregate id), `time`
-  (occurred-at, UTC), `datacontenttype=application/json`,
-  `dataschema=urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v<N>`.
-- `type` = `com.warehouse.<subdomain>.<bounded-context>.<entity>.<EventName>`;
-  for this service: `com.warehouse.wes.network-fulfillment.<entity>.<EventName>`
-  (entity `networkorder`, subject = the network order ref). Breaking payload
-  change => new `.v2` type + new dataschema version, never mutate.
-- Consumers dispatch on the FULL `type`, ignore unknown types, dedupe on
-  `id`, and DLQ/skip (never crash, never parse a legacy shape) anything that
-  fails CloudEvents validation.
-
-Full standard and the fleet's cross-service type catalogue: ADR-0008
-(`docs/adr/0008-cloudevents-mandatory-event-envelope.md`).
-
-## Key commands (harness v1 — see HARNESS.md for what each sensor costs)
+## Commands (HARNESS.md describes each sensor)
 
 ```bash
-make check          # fmt-check + vet + build + lint + test
-make check-all      # check + coverage (90% gate) + arch-test + bdd (no features/ yet)
-make arch-test      # arch-go hexagonal + fleet fitness tests
-make integration    # Postgres via testcontainers — never a skip-gated check
-make mutation       # gremlins on MUTATION_FAST_PKG (CI job: mutation-fast)
-make mutation-full  # measure real thresholds before editing .gremlins.yaml
-make vuln           # govulncheck ./...
-lefthook install    # pre-commit fmt/lint/vet, pre-push make check
+make check-fast   # fmt-check + vet + arch-test: run before saying "done"
+make check-all    # check + coverage (90% gate) + arch-test + bdd (no features/ yet)
+make integration  # Postgres via testcontainers, never skip-gated
+make mutation     # gremlins on ./internal/domain/networkorder (CI: mutation-fast)
+make guide-lint   # these agent guides: references resolve, context budget
 ```
 
-## Git workflow
+Git: GitFlow, `feature/*` off `develop`, PR into `develop`, `develop` promotes
+to `main`. Do not merge your own PR; leave it open for independent review.
 
-GitFlow: `feature/*` branches off `develop`, PR into `develop`
-(`gh pr create --base develop`); `develop` promotes to `main` for release.
-This repo has never been released: there is no `main` branch yet.
-Do not merge your own PR — leave it open for independent review.
+<!-- harness:scoped-rules:start (generated by tools/migrate_v3.py in warehouse-harness-template; do not hand-edit) -->
+## Scoped rules and harness
 
-## Related decisions elsewhere in the fleet
+Claude Code loads each rule below automatically when you touch the matching paths. OpenCode and Codex do NOT: read the rule BEFORE editing matching files.
 
-| Repo | ADR | Why it matters here |
-| --- | --- | --- |
-| `retail-network` | 0001 (drafted at `docs/planning/retail-network-adr-0001-DRAFT-for-new-repo.md` in this repo, pending that repo's creation) | Defines the organization this context is Conformist to — the companion to this repo's own ADR 0002 |
-| `order-management` | 0020 | The companion: `releaseOnAllocation` hold, `PromisePolicy.FeasibleBy`, `Network` promise basis |
-| `order-management` | 0014 | The promise is a CPT window derived from fulfillment capability |
-| `order-management` | 0004 | Release is the cancellation boundary — why network demand is held, not optimistically released |
-| `order-management` | 0017 | Per-shipment-group promising — the rule network demand must *not* use |
-| `process-path-management` | 0010 | The fulfillment capability contract this context advertises against |
-| `fulfillment-execution` | 0025 | The sweep pattern the acknowledgement-deadline sweep mirrors |
+| When touching | Read |
+|---|---|
+| `internal/adapters/**/kafka/**`, `internal/adapters/outbound/events/**`, `apis/asyncapi*` | `.claude/rules/integration-events.md` |
+| `internal/adapters/inbound/http/**`, `apis/openapi*.yaml`, `apis/openapi/**` | `.claude/rules/rest-api.md` |
 
-Note: `warehouse-infra` does **not** auto-discover repos. This context is
-deployed by its own `terraform/network-fulfillment.tf`, not through
-`local.services`. It gets its own database Secret (`network-fulfillment-db`)
-and a Kong route at `/api/network-fulfillment`. That file leaves
-`config.networkMode` at the chart's `stub` default on purpose.
+Hooks (`scripts/harness/hook.py`, wired for Claude Code, Codex and OpenCode) block pushes to develop/main, `--no-verify`, bare `rm -rf`, and edits to generated files, and feed gofmt/vet findings back after each edit. Before saying "done" run `make check-fast`; the full gate is `make check-all`. `HARNESS_OFF=1` disables the hooks when debugging the harness itself.
+<!-- harness:scoped-rules:end -->
