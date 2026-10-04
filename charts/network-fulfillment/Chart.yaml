@@ -4,7 +4,7 @@ description: Network Fulfillment — the Anti-Corruption Layer that sells this w
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-home: https://github.com/claudioed/network-fulfillment
+home: https://github.com/IQVO/network-fulfillment
 keywords:
   - ddd
   - hexagonal-architecture
