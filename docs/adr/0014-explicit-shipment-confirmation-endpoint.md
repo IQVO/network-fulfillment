@@ -1,13 +1,13 @@
 ---
-id: 0009-explicit-shipment-confirmation-endpoint
-slug: /adr/0009-explicit-shipment-confirmation-endpoint
-title: "9. Shipment confirmation is an explicit endpoint, not a PackageManifested correlation"
-sidebar_label: "9. Explicit shipment confirmation"
-sidebar_position: 9
-description: "ADR 0009 amends ADR 0001 Rollout step 6: NetworkOrderShipmentConfirmed is raised by an explicit ConfirmNetworkOrderShipment use case/endpoint naming the NetworkRef directly, not by correlating fulfillment-execution's PackageManifested event, because no persisted NetworkRef<->WorkUnitId mapping exists yet and ADR 0001 Hard rule 4 forbids inventing a string-convention join."
+id: 0014-explicit-shipment-confirmation-endpoint
+slug: /adr/0014-explicit-shipment-confirmation-endpoint
+title: "14. Shipment confirmation is an explicit endpoint, not a PackageManifested correlation"
+sidebar_label: "14. Explicit shipment confirmation"
+sidebar_position: 14
+description: "ADR 0014 amends ADR 0001 Rollout step 6: NetworkOrderShipmentConfirmed is raised by an explicit ConfirmNetworkOrderShipment use case/endpoint naming the NetworkRef directly, not by correlating fulfillment-execution's PackageManifested event, because no persisted NetworkRef<->WorkUnitId mapping exists yet and ADR 0001 Hard rule 4 forbids inventing a string-convention join."
 ---
 
-# 9. Shipment confirmation is an explicit endpoint, not a PackageManifested correlation
+# 14. Shipment confirmation is an explicit endpoint, not a PackageManifested correlation
 
 ## Status
 

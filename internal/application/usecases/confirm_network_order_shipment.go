@@ -16,7 +16,7 @@ import (
 // ADR 0001's own Rollout step 6 names the LITERAL trigger as
 // `fulfillment-execution`'s existing PackageManifested event. This use
 // case deliberately does NOT do that (see this package's companion doc
-// note / docs/adr/0009-explicit-shipment-confirmation-endpoint.md for the
+// note / docs/adr/0014-explicit-shipment-confirmation-endpoint.md for the
 // full reasoning): there is no persisted mapping from a
 // PackageManifested's WorkUnitId back to this context's NetworkRef
 // anywhere in this codebase today, and ADR 0001's own Hard rule 4

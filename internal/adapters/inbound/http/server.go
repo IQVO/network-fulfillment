@@ -11,7 +11,7 @@
 // and is the inbound leg alive. Both are questions an operator has during
 // an incident and cannot currently answer without reading logs. The one
 // exception is POST /network-orders/{networkRef}/shipment-confirmation
-// (docs/adr/0009-explicit-shipment-confirmation-endpoint.md): a narrow,
+// (docs/adr/0014-explicit-shipment-confirmation-endpoint.md): a narrow,
 // explicitly-ADR'd write endpoint for a fact this context is TOLD, not
 // demand it decides on.
 package http
@@ -66,7 +66,7 @@ type Server struct {
 	// optional dependency in this Server.
 	Offers ports.CapabilityOfferRepo
 	// ConfirmShipment backs the one write endpoint this adapter has
-	// (ADR 0009). A nil value means that route is not registered.
+	// (ADR 0014). A nil value means that route is not registered.
 	ConfirmShipment *usecases.ConfirmNetworkOrderShipment
 }
 
@@ -191,7 +191,7 @@ func (s *Server) handleListCapabilityOffers(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"capabilityOffers": out})
 }
 
-// handleConfirmShipment is this adapter's one write endpoint (ADR 0009):
+// handleConfirmShipment is this adapter's one write endpoint (ADR 0014):
 // POST /network-orders/{networkRef}/shipment-confirmation, empty body,
 // 204 on success. See ConfirmNetworkOrderShipment's own doc comment for
 // why this is an explicit call rather than a PackageManifested
