@@ -21,6 +21,11 @@ type NetworkOrderRepo interface {
 	Save(ctx context.Context, o *networkorder.NetworkOrder) error
 	FindByRef(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error)
 	ListUnanswered(ctx context.Context) ([]*networkorder.NetworkOrder, error)
+	// ListSubmitted returns every order currently SUBMITTED — accepted
+	// in full and told to the network, but not yet reconciled against
+	// its transaction-status record (ADR 0001 §5). ReconcileSubmittedOrders
+	// is the one caller.
+	ListSubmitted(ctx context.Context) ([]*networkorder.NetworkOrder, error)
 	// ListAll returns every order regardless of state, for the read-only
 	// MCP list_network_orders tool (internal/adapters/inbound/mcp) and
 	// operator tooling. ListUnanswered above remains the one the sweep
@@ -32,13 +37,14 @@ type NetworkOrderRepo interface {
 }
 
 // NetworkGateway is the ONLY route to the external network. Every call
-// to it goes through one adapter with a NETWORK_MODE switch (ADR 0001
-// §4), so that stub and sandbox are reachable without credentials and a
-// live call is impossible to make by accident.
+// to it goes through one adapter with a NETWORK_MODE switch (ADR 0009
+// §4), so that stub is reachable without credentials and a live call is
+// impossible to make by accident.
 //
-// It is expressed entirely in OUR vocabulary. The Amazon wire shapes —
-// purchase orders, ASINs, acknowledgement codes, selling parties — live
-// inside the implementing adapter and are not nameable from here.
+// It is expressed entirely in OUR vocabulary. The network's own wire
+// shapes — purchase orders, product identifiers, acknowledgement codes,
+// selling parties — live inside the implementing adapter and are not
+// nameable from here.
 type NetworkGateway interface {
 	// PollDemand fetches demand the network has for us since a given
 	// instant. Inbound is a poll, not a push (ADR 0001 §5).
@@ -48,6 +54,30 @@ type NetworkGateway interface {
 	// in full, or will not fulfil it at all. accepted=false is a
 	// rejection; the protocol has no middle answer.
 	SubmitAcknowledgement(ctx context.Context, ref shared.NetworkRef, accepted bool) error
+
+	// SubmitAvailability tells the network what we claim we can ship for
+	// one SKU at one site (ADR 0001's submitInventoryUpdate signal).
+	SubmitAvailability(ctx context.Context, update contract.AvailabilityUpdate) error
+
+	// DeclareCapability would tell the network our cutoffs and cycle
+	// times directly. See contract.CapabilityDeclaration's doc comment:
+	// the network's real API has no such operation, so every adapter in
+	// this codebase today treats this as a documented no-op kept for
+	// port-shape completeness and for a future program that might accept
+	// one.
+	DeclareCapability(ctx context.Context, offer contract.CapabilityDeclaration) error
+
+	// RequestLabel asks the network for a shipping label, returning only
+	// {labelRef, trackingNumber, carrier} — never ship-to PII (ADR 0009
+	// §3).
+	RequestLabel(ctx context.Context, ref shared.NetworkRef) (contract.LabelResult, error)
+
+	// SubmissionStatus reconciles a previously-submitted acknowledgement
+	// against the network's own transaction-status record (ADR 0001 §5).
+	// A submission is pending until this reports SUCCESS or FAILURE; a
+	// 200 on the original submit call is never itself a completed
+	// commitment.
+	SubmissionStatus(ctx context.Context, ref shared.NetworkRef) (contract.SubmissionStatusValue, error)
 
 	// SubmitShipmentConfirmation tells the network the order has
 	// shipped.

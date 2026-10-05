@@ -176,10 +176,10 @@ func TestReceive_EventPublishFailureIsReported(t *testing.T) {
 	}
 }
 
-// TestSweep_PublishesRejectedWithAcknowledgementDeadlineMissedReason
-// asserts the sweep's own rejection reason is distinct from the two
+// TestRejectOverdue_PublishesRejectedWithAcknowledgementDeadlineMissedReason
+// asserts rejectOne's own rejection reason is distinct from the two
 // reasons ReceiveNetworkDemand can raise.
-func TestSweep_PublishesRejectedWithAcknowledgementDeadlineMissedReason(t *testing.T) {
+func TestRejectOverdue_PublishesRejectedWithAcknowledgementDeadlineMissedReason(t *testing.T) {
 	f := newFixture(true)
 	pub := &recordingPublisher{}
 
@@ -191,14 +191,14 @@ func TestSweep_PublishesRejectedWithAcknowledgementDeadlineMissedReason(t *testi
 		t.Fatalf("Save: %v", err)
 	}
 
-	sweep := &usecases.SweepAcknowledgementDeadlines{
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders:  f.orders,
 		Planner: f.planner,
 		Events:  pub,
 		Clock:   fixedClock{t: now()},
 	}
-	if _, err := sweep.Execute(context.Background()); err != nil {
-		t.Fatalf("sweep: %v", err)
+	if _, err := rejectOverdue.Execute(context.Background()); err != nil {
+		t.Fatalf("rejectOverdue: %v", err)
 	}
 
 	if len(pub.events) != 1 {
@@ -216,6 +216,42 @@ func TestSweep_PublishesRejectedWithAcknowledgementDeadlineMissedReason(t *testi
 	}
 }
 
+// TestSweep_PublishesAtRiskForAnOverdueOrder asserts the sweep publishes
+// the REPORTING event (never NetworkOrderRejected — it never mutates the
+// aggregate, ADR 0001 §6).
+func TestSweep_PublishesAtRiskForAnOverdueOrder(t *testing.T) {
+	f := newFixture(true)
+	pub := &recordingPublisher{}
+
+	local := shared.LocalOrderId("ord-held")
+	stuck := networkorder.Rehydrate("po-old", "site-1", now().Add(48*time.Hour),
+		now().Add(-time.Hour), now().Add(-25*time.Hour),
+		[]networkorder.Line{mustLine(t)}, networkorder.StateNew, &local)
+	if err := f.orders.Save(context.Background(), stuck); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	sweep := &usecases.SweepAcknowledgementDeadlines{
+		Orders: f.orders,
+		Events: pub,
+		Clock:  fixedClock{t: now()},
+	}
+	if _, err := sweep.Execute(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	if len(pub.events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(pub.events), pub.events)
+	}
+	atRisk, ok := pub.events[0].(shared.AcknowledgementDeadlineAtRisk)
+	if !ok {
+		t.Fatalf("events[0] = %T, want AcknowledgementDeadlineAtRisk", pub.events[0])
+	}
+	if atRisk.NetworkRef != "po-old" {
+		t.Errorf("NetworkRef = %q, want po-old", atRisk.NetworkRef)
+	}
+}
+
 // TestSweep_LeavesOrdersInsideWindowAlone_PublishesNoEvents asserts an
 // order still inside its window generates no analytics noise.
 func TestSweep_LeavesOrdersInsideWindowAlone_PublishesNoEvents(t *testing.T) {
@@ -226,7 +262,7 @@ func TestSweep_LeavesOrdersInsideWindowAlone_PublishesNoEvents(t *testing.T) {
 	}
 
 	sweep := &usecases.SweepAcknowledgementDeadlines{
-		Orders: f.orders, Planner: f.planner, Events: pub,
+		Orders: f.orders, Events: pub,
 		Clock: fixedClock{t: now().Add(time.Hour)},
 	}
 	if _, err := sweep.Execute(context.Background()); err != nil {
@@ -238,7 +274,8 @@ func TestSweep_LeavesOrdersInsideWindowAlone_PublishesNoEvents(t *testing.T) {
 }
 
 // TestSweep_EventPublishFailureIsReported mirrors the receive-side
-// contract: a publish failure during the sweep must not be swallowed.
+// contract: a publish failure during the sweep must not be swallowed
+// into a false AtRisk count.
 func TestSweep_EventPublishFailureIsReported(t *testing.T) {
 	f := newFixture(true)
 	pub := &recordingPublisher{err: errBoom}
@@ -252,17 +289,17 @@ func TestSweep_EventPublishFailureIsReported(t *testing.T) {
 	}
 
 	sweep := &usecases.SweepAcknowledgementDeadlines{
-		Orders: f.orders, Planner: f.planner, Events: pub, Clock: fixedClock{t: now()},
+		Orders: f.orders, Events: pub, Clock: fixedClock{t: now()},
 	}
 	res, err := sweep.Execute(context.Background())
 	if err != nil {
 		t.Fatalf("sweep must not abort the whole pass on a publish failure: %v", err)
 	}
-	// missOne's error is swallowed by the pass loop (by design: one bad
-	// order must not abort the others), so the sweep reports Missed=0
-	// for this order even though the publish failed — the failure is
-	// left for the next pass to retry.
-	if res.Missed != 0 {
-		t.Fatalf("Missed = %d, want 0 (publish failed, so nothing was successfully swept)", res.Missed)
+	// The publish failure is swallowed by the pass loop (by design: one
+	// bad order must not abort the others), so the sweep reports
+	// AtRisk=0 for this order even though the publish failed — the
+	// failure is left for the next pass to retry.
+	if res.AtRisk != 0 {
+		t.Fatalf("AtRisk = %d, want 0 (publish failed, so nothing was successfully reported)", res.AtRisk)
 	}
 }

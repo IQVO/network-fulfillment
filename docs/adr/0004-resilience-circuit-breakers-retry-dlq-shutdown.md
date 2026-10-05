@@ -3,7 +3,7 @@ id: 0004-resilience-circuit-breakers-retry-dlq-shutdown
 slug: /adr/0004-resilience-circuit-breakers-retry-dlq-shutdown
 title: "4. Circuit breaker, Kafka DLQ, and graceful shutdown hardening"
 sidebar_label: "4. Circuit breaker, DLQ, shutdown"
-description: "ADR 0004 — Phase 2 resilience for network-fulfillment, ported from order-management's ADR 0025: a sony/gobreaker/v2 circuit breaker around the one real sync cross-context HTTP client (ordermanagement.Planner), a dead-letter topic for the analytics Kafka consumer, and a readiness-flip-first graceful shutdown sequence. The external network gateway (NETWORK_MODE=stub/sandbox/live) is deliberately deferred: it has no implemented sandbox/live client yet, so there is nothing real to wrap."
+description: "ADR 0004 — Phase 2 resilience for network-fulfillment, ported from order-management's ADR 0025: a sony/gobreaker/v2 circuit breaker around the one real sync cross-context HTTP client (ordermanagement.Planner), a dead-letter topic for the analytics Kafka consumer, and a readiness-flip-first graceful shutdown sequence. The external network gateway (NETWORK_MODE=stub/live, per ADR 0009 §4) is deliberately deferred: it has no implemented live client yet, so there is nothing real to wrap."
 ---
 
 # 4. Circuit breaker, Kafka DLQ, and graceful shutdown hardening
@@ -16,7 +16,7 @@ production-readiness plan, porting order-management's ADR 0025
 verbatim wherever this repo's own shape matches it, and documenting the
 two places it deliberately does not: no permissive/fail-open fallback
 exists on `Planner` today, and the external network gateway has no
-implemented sandbox/live client yet.
+implemented live client yet.
 
 ## Context
 
@@ -38,14 +38,14 @@ to stop the pressure.
 
 `internal/adapters/outbound/network/gateway.go` is this repo's OTHER
 outbound HTTP-shaped dependency, selected by `NETWORK_MODE`
-(`stub`/`sandbox`/`live`). Reading it confirms `stub` (the default)
-talks to nobody, and `sandbox`/`live` both return a plain "not yet
-implemented" error — there is no real client behind either mode today.
+(`stub`/`live`, per ADR 0009 §4). Reading it confirms `stub` (the default)
+talks to nobody, and `live` returns a plain "not yet
+implemented" error — there is no real client behind it today.
 Wrapping a breaker around a gateway with no live implementation would
 protect nothing; per the plan's own scoping and this repo's verified
 state, this gateway is explicitly OUT OF SCOPE here (see
 "Deliberately deferred" below) and is revisited once a real
-sandbox/live client exists.
+live client exists.
 
 On the inbound side, `internal/adapters/inbound/kafka/` has exactly one
 consumer, `AnalyticsConsumer` — it reads THIS SERVICE'S OWN analytics
@@ -280,13 +280,13 @@ introduced.
 ## Deliberately deferred
 
 - **`internal/adapters/outbound/network/gateway.go`
-  (`NETWORK_MODE=stub|sandbox|live`) gets NO breaker.** `stub` (the
-  default) talks to nobody; `sandbox`/`live` both return a plain
+  (`NETWORK_MODE=stub|live`, per ADR 0009 §4) gets NO breaker.** `stub`
+  (the default) talks to nobody; `live` returns a plain
   `errors.New("not yet implemented")` today — there is no real
   transport to protect. Wrapping a breaker around a method that always
   either no-ops or immediately errors "not implemented" would protect
   nothing and would need to be re-verified (and likely reshaped) once
-  a genuine sandbox/live HTTP client exists. Revisit this gateway in
+  a genuine live HTTP client exists. Revisit this gateway in
   the SAME PR that adds its first real client implementation, not
   before.
 - **No dedicated retry/backoff wrapper on the poller itself** — see

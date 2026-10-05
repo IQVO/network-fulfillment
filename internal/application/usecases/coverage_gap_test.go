@@ -137,7 +137,7 @@ func (p *selectiveFailPublisher) Publish(context.Context, any) error {
 
 // A publish failure on reject's own event now happens INSIDE the same
 // atomic Save+Publish scope as the state transition (the transactional
-// outbox, ADR NNNN): the network must never be told "no" for a rejection
+// outbox, ADR 0003): the network must never be told "no" for a rejection
 // that is not yet durably recorded, and inventory must not be
 // commitment-released for demand whose refusal never actually landed.
 // So neither the gateway submission nor anything after it may run.
@@ -207,6 +207,22 @@ func (g errSubmitGateway) SubmitAcknowledgement(context.Context, shared.NetworkR
 	return g.err
 }
 
+func (errSubmitGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
+	return nil
+}
+
+func (errSubmitGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
+	return nil
+}
+
+func (errSubmitGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
+	return contract.LabelResult{}, nil
+}
+
+func (errSubmitGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {
+	return contract.SubmissionSuccess, nil
+}
+
 func (errSubmitGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error {
 	return nil
 }
@@ -251,11 +267,12 @@ func TestReceive_AcknowledgeGatewaySubmissionFailureAborts(t *testing.T) {
 
 // unansweredCancellingRepo wraps the real in-memory repo, delegating
 // ListUnanswered to it (so the sweep sees genuine unanswered orders)
-// while letting a test force Save to fail — isolating
-// SweepAcknowledgementDeadlines.missOne's OWN Save failure from its
-// CancelHeldOrder failure (already covered by
-// TestSweep_OneFailingOrderDoesNotAbortThePass) and from
-// ListUnanswered's failure (TestSweep_RepositoryFailureIsReported).
+// TestRejectOverdue_SaveFailureIsSkippedNotFatalToThePass exercises
+// RejectOverdueOrders.rejectOne's failure path separately from unitOfWork
+// while letting a test force Save to fail — isolating rejectOne's OWN
+// Save failure from its CancelHeldOrder failure (already covered by
+// TestRejectOverdue_OneFailingOrderDoesNotAbortThePass) and from
+// ListUnanswered's failure (TestRejectOverdue_RepositoryFailureIsReported).
 type unansweredCancellingRepo struct {
 	*memory.NetworkOrderRepo
 	saveErr error
@@ -268,7 +285,7 @@ func (r *unansweredCancellingRepo) Save(ctx context.Context, o *networkorder.Net
 	return r.NetworkOrderRepo.Save(ctx, o)
 }
 
-func TestSweep_MissOneSaveFailureIsSkippedNotFatalToThePass(t *testing.T) {
+func TestRejectOverdue_SaveFailureIsSkippedNotFatalToThePass(t *testing.T) {
 	f := newFixture(true)
 	repo := &unansweredCancellingRepo{NetworkOrderRepo: f.orders, saveErr: errBoom}
 
@@ -279,16 +296,16 @@ func TestSweep_MissOneSaveFailureIsSkippedNotFatalToThePass(t *testing.T) {
 		t.Fatalf("seed Save: %v", err)
 	}
 
-	sweep := &usecases.SweepAcknowledgementDeadlines{
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders: repo, Planner: f.planner, Events: nopPublisher{},
 		Clock: fixedClock{t: now()},
 	}
-	res, err := sweep.Execute(context.Background())
+	res, err := rejectOverdue.Execute(context.Background())
 	if err != nil {
-		t.Fatalf("sweep must not abort the whole pass on a single Save failure: %v", err)
+		t.Fatalf("rejectOverdue must not abort the whole pass on a single Save failure: %v", err)
 	}
-	if res.Examined != 1 || res.Missed != 0 {
-		t.Fatalf("res = %+v, want Examined=1 Missed=0 — a Save failure must not count as a hit and must not fail the pass", res)
+	if res.Examined != 1 || res.Rejected != 0 {
+		t.Fatalf("res = %+v, want Examined=1 Rejected=0 — a Save failure must not count as a hit and must not fail the pass", res)
 	}
 }
 
@@ -311,7 +328,7 @@ func TestSweep_UnansweredButNotYetOverdueOrderIsSkipped(t *testing.T) {
 	}
 
 	sweep := &usecases.SweepAcknowledgementDeadlines{
-		Orders: f.orders, Planner: f.planner, Events: nopPublisher{},
+		Orders: f.orders, Events: nopPublisher{},
 		Clock: fixedClock{t: now()},
 	}
 	res, err := sweep.Execute(context.Background())
@@ -321,10 +338,10 @@ func TestSweep_UnansweredButNotYetOverdueOrderIsSkipped(t *testing.T) {
 	if res.Examined != 1 {
 		t.Fatalf("examined = %d, want 1 — the order IS in the unanswered set", res.Examined)
 	}
-	if res.Missed != 0 {
-		t.Fatalf("missed = %d, want 0 — its deadline has not passed", res.Missed)
+	if res.AtRisk != 0 {
+		t.Fatalf("atRisk = %d, want 0 — its deadline has not passed", res.AtRisk)
 	}
 	if len(f.planner.calls) != 0 {
-		t.Fatalf("planner calls = %v, want none — a not-yet-overdue order must not be touched", f.planner.calls)
+		t.Fatalf("planner calls = %v, want none — a not-yet-overdue order must not be touched (the sweep never calls the planner at all)", f.planner.calls)
 	}
 }

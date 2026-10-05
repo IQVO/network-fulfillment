@@ -9,14 +9,19 @@ data:
   PORT: {{ .Values.config.port | quote }}
 
   # NETWORK_MODE decides which external-network adapter is wired:
-  #   stub    - no external calls, no credentials (the default)
-  #   sandbox - the network's sandbox endpoint, sandbox credentials
-  #   live    - the real network, real credentials
+  #   stub - no external calls, no credentials (the default)
+  #   live - the real network, real credentials
   # The binary FAILS CLOSED: an unrecognised value falls back to stub, and
-  # live/sandbox REFUSE TO BOOT without credentials rather than silently
-  # degrading. That refusal is the point -- a context that quietly stopped
-  # talking to the network would look healthy while acknowledging nothing.
+  # live REFUSES TO BOOT without credentials and NETWORK_BASE_URL rather
+  # than silently degrading. That refusal is the point -- a context that
+  # quietly stopped talking to the network would look healthy while
+  # acknowledging nothing. (ADR 0009 section 4 removed the earlier sandbox tier.)
   NETWORK_MODE: {{ .Values.config.networkMode | quote }}
+{{- if .Values.config.networkBaseUrl }}
+
+  # The live-mode target (ADR 0009 section 4). Read only when NETWORK_MODE=live.
+  NETWORK_BASE_URL: {{ .Values.config.networkBaseUrl | quote }}
+{{- end }}
 
   # order-management's REST base URL. This is the one upstream this
   # context calls, and it is a genuine dependency rather than optional

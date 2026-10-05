@@ -52,6 +52,21 @@ func (r *NetworkOrderRepo) ListUnanswered(_ context.Context) ([]*networkorder.Ne
 	return out, nil
 }
 
+// ListSubmitted returns every order currently SUBMITTED — accepted and
+// told to the network, but not yet reconciled. See ListUnanswered's
+// comment on iteration order; the same applies here.
+func (r *NetworkOrderRepo) ListSubmitted(_ context.Context) ([]*networkorder.NetworkOrder, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*networkorder.NetworkOrder
+	for _, o := range r.orders {
+		if o.State() == networkorder.StateSubmitted {
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
 // ListAll returns every order regardless of state. Iteration order is
 // deliberately not specified, for the same reason as ListUnanswered.
 func (r *NetworkOrderRepo) ListAll(_ context.Context) ([]*networkorder.NetworkOrder, error) {

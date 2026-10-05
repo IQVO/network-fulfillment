@@ -180,7 +180,17 @@ func main() {
 	eventPublisher, relay, closeEventPublisher := wireEventPublisher(pool, logger)
 	defer closeEventPublisher()
 
-	receive, sweep := wireUseCases(orders, gateway, planner, translation, eventPublisher, pool)
+	receive, sweep, rejectOverdue := wireUseCases(orders, gateway, planner, translation, eventPublisher, pool)
+	reconcile := &usecases.ReconcileSubmittedOrders{
+		Orders:  orders,
+		Gateway: gateway,
+		Planner: planner,
+		Events:  eventPublisher,
+		Clock:   systemClock{},
+	}
+	if pool != nil {
+		reconcile.UnitOfWork = postgres.NewUnitOfWork(pool)
+	}
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
 	// could create a NetworkOrder at all.
@@ -197,23 +207,29 @@ func main() {
 		MetricsRegistry: circuitBreakerMetrics.Registry,
 	}
 
-	serve(context.Background(), logger, newHTTPServer(api), sweep, inbound, relay, readiness)
+	serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, reconcile, inbound, relay, readiness)
 }
 
 // wireGateway wires the outbound network gateway for the NETWORK_MODE env
 // var, returning the parsed mode alongside it so the composition root can
 // both log it at startup and expose it on the status surface — the
-// running value must be verifiable, not assumed.
+// running value must be verifiable, not assumed. NETWORK_BASE_URL is the
+// live-mode target (ADR 0009 §4); read here so it reaches the gateway
+// even though no live adapter exists yet to dial it with.
 func wireGateway(logger *slog.Logger) (ports.NetworkGateway, network.Mode, error) {
 	mode := network.ParseMode(os.Getenv("NETWORK_MODE"))
-	gateway, err := network.NewGateway(mode, logger)
+	baseURL := os.Getenv("NETWORK_BASE_URL")
+	if mode == network.ModeLive && baseURL == "" {
+		return nil, mode, fmt.Errorf("NETWORK_MODE=live requires NETWORK_BASE_URL to be set")
+	}
+	gateway, err := network.NewGateway(mode, baseURL, logger)
 	if err != nil {
 		// Refusing to boot is deliberate. A deployment that asked for a
 		// real network and silently got a stub would look healthy while
 		// answering nobody.
 		return nil, mode, err
 	}
-	logger.Info("network gateway wired", "mode", mode)
+	logger.Info("network gateway wired", "mode", mode, "baseURL", baseURL)
 	return gateway, mode, nil
 }
 
@@ -264,11 +280,17 @@ func wirePlanner() (ports.FulfillmentPlanner, *telemetry.CircuitBreakerMetrics) 
 	return ordermanagement.NewBreakerClient(rawPlanner, metrics), metrics
 }
 
-// wireUseCases builds the two use cases this composition root serves,
+// wireUseCases builds the use cases this composition root serves,
 // sharing one repository, planner, publisher and clock between them.
 // The UnitOfWork is nil exactly when pool is (in-memory mode): the use
 // cases treat that as "no transactional backing" and run Save+Publish
 // back to back, unchanged from before this rollout.
+//
+// SweepAcknowledgementDeadlines and RejectOverdueOrders are deliberately
+// two separate use cases (ADR 0001 §6): the sweep only ever reports
+// AcknowledgementDeadlineAtRisk and never mutates the aggregate;
+// RejectOverdueOrders is the separate path that performs the actual
+// rejection, with its own audit trail.
 func wireUseCases(
 	orders ports.NetworkOrderRepo,
 	gateway ports.NetworkGateway,
@@ -276,7 +298,7 @@ func wireUseCases(
 	translation ports.ProductTranslation,
 	events ports.EventPublisher,
 	pool *pgxpool.Pool,
-) (*usecases.ReceiveNetworkDemand, *usecases.SweepAcknowledgementDeadlines) {
+) (*usecases.ReceiveNetworkDemand, *usecases.SweepAcknowledgementDeadlines, *usecases.RejectOverdueOrders) {
 	var uow ports.UnitOfWork
 	if pool != nil {
 		uow = postgres.NewUnitOfWork(pool)
@@ -291,13 +313,18 @@ func wireUseCases(
 		UnitOfWork:  uow,
 	}
 	sweep := &usecases.SweepAcknowledgementDeadlines{
+		Orders: orders,
+		Events: events,
+		Clock:  systemClock{},
+	}
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders:     orders,
 		Planner:    planner,
 		Events:     events,
 		Clock:      systemClock{},
 		UnitOfWork: uow,
 	}
-	return receive, sweep
+	return receive, sweep, rejectOverdue
 }
 
 // newHTTPServer builds the REST server around the inbound adapter's
@@ -318,6 +345,8 @@ func serve(
 	logger *slog.Logger,
 	srv *http.Server,
 	sweep *usecases.SweepAcknowledgementDeadlines,
+	rejectOverdue *usecases.RejectOverdueOrders,
+	reconcile *usecases.ReconcileSubmittedOrders,
 	inbound *poller.Poller,
 	relay *postgres.OutboxRelay,
 	readiness *inboundhttp.Readiness,
@@ -326,6 +355,8 @@ func serve(
 	defer stop()
 
 	go runSweep(ctx, sweep, logger)
+	go runRejectOverdue(ctx, rejectOverdue, logger)
+	go runReconcile(ctx, reconcile, logger)
 
 	// pollerDone closes once inbound.Run's goroutine has returned —
 	// mirroring the outbox relay's own relayDone below — so graceful
@@ -419,9 +450,9 @@ func serve(
 	logger.Info("stopped")
 }
 
-// runSweep drives the acknowledgement-deadline sweep on a ticker. An
-// unanswered order holds real inventory reservations, so the sweep is
-// what keeps a missed SLA from quietly becoming unsellable stock.
+// runSweep drives the acknowledgement-deadline sweep on a ticker. It
+// only ever REPORTS a deadline at risk (ADR 0001 §6) — runRejectOverdue
+// below is the separate path that frees the held inventory.
 func runSweep(ctx context.Context, sweep *usecases.SweepAcknowledgementDeadlines, logger *slog.Logger) {
 	ticker := time.NewTicker(sweepInterval())
 	defer ticker.Stop()
@@ -435,8 +466,60 @@ func runSweep(ctx context.Context, sweep *usecases.SweepAcknowledgementDeadlines
 				logger.Error("acknowledgement sweep failed", "err", err)
 				continue
 			}
-			if res.Missed > 0 {
-				logger.Warn("acknowledgement deadlines missed", "examined", res.Examined, "missed", res.Missed)
+			if res.AtRisk > 0 {
+				logger.Warn("acknowledgement deadlines at risk", "examined", res.Examined, "atRisk", res.AtRisk)
+			}
+		}
+	}
+}
+
+// runRejectOverdue drives the actual rejection of orders whose
+// acknowledgement window has closed unanswered, on its own ticker and
+// its own code path from runSweep above (ADR 0001 §6: the sweep never
+// mutates the aggregate; this is the separate path that does, with its
+// own audit trail). An unanswered order holds real inventory
+// reservations, so this is what keeps a missed SLA from quietly becoming
+// permanently unsellable stock.
+func runRejectOverdue(ctx context.Context, rejectOverdue *usecases.RejectOverdueOrders, logger *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := rejectOverdue.Execute(ctx)
+			if err != nil {
+				logger.Error("overdue-order rejection failed", "err", err)
+				continue
+			}
+			if res.Rejected > 0 {
+				logger.Warn("overdue orders rejected", "examined", res.Examined, "rejected", res.Rejected)
+			}
+		}
+	}
+}
+
+// runReconcile drives the submitted-order reconciliation pass (ADR 0001
+// §5) on its own ticker, reusing POLL_INTERVAL as the cadence: a
+// submission is meaningless to re-check faster than new demand can even
+// arrive, and this keeps the knob surface small rather than adding a
+// third interval env var for a v1.
+func runReconcile(ctx context.Context, reconcile *usecases.ReconcileSubmittedOrders, logger *slog.Logger) {
+	ticker := time.NewTicker(pollInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := reconcile.Execute(ctx)
+			if err != nil {
+				logger.Error("submitted-order reconciliation failed", "err", err)
+				continue
+			}
+			if res.Confirmed > 0 || res.Failed > 0 {
+				logger.Info("submitted orders reconciled", "examined", res.Examined, "confirmed", res.Confirmed, "failed", res.Failed, "pending", res.Pending)
 			}
 		}
 	}

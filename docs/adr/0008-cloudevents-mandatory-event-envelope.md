@@ -86,6 +86,7 @@ the payload contract. Published by this service:
     com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged
     com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected
     com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed
+    com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk
 
 Consumed (own analytics projector, `warehouse.network-fulfillment.analytics`):
 `NetworkOrderReceived`, `NetworkOrderAcknowledged`, `NetworkOrderRejected`

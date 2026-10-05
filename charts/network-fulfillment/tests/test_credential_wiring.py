@@ -115,7 +115,7 @@ def check_stub_default_needs_no_secret() -> None:
 
 def check_every_ref_is_created() -> None:
     """The actual invariant: never reference a Secret nothing creates."""
-    for mode in ("sandbox", "live"):
+    for mode in ("live",):
         docs = render(["--set", f"config.networkMode={mode}", *INLINE_CREDS])
         created, referenced = secret_names(docs), secret_refs(docs)
 
@@ -147,7 +147,7 @@ def check_existing_secret_is_trusted() -> None:
 
 def check_non_stub_without_credentials_fails_closed() -> None:
     """The regression this file exists for."""
-    for mode in ("sandbox", "live"):
+    for mode in ("live",):
         stderr = render_expecting_failure(["--set", f"config.networkMode={mode}"])
         assert "no credentials are set" in stderr, (
             f"{mode} without credentials failed, but not with the explanatory "

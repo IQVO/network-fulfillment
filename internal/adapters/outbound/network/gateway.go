@@ -26,28 +26,24 @@ type Mode string
 const (
 	// ModeStub talks to nobody. It is the DEFAULT, deliberately: the
 	// kind cluster and the e2e suite must never need credentials, and a
-	// live network call must be impossible to make by accident (ADR 0001
-	// §4).
+	// live network call must be impossible to make by accident (ADR
+	// 0009 §4).
 	ModeStub Mode = "stub"
 
-	// ModeSandbox targets the network's sandbox. Requires credentials;
-	// not yet implemented.
-	ModeSandbox Mode = "sandbox"
-
-	// ModeLive targets the real network. Requires credentials; not yet
-	// implemented.
+	// ModeLive targets the real network. Requires credentials and
+	// NETWORK_BASE_URL; not yet implemented (ADR 0001 rollout step 5 /
+	// ADR 0009's deferred SP-API adapter).
 	ModeLive Mode = "live"
 )
 
 // ParseMode reads NETWORK_MODE. Anything unrecognised — including the
-// empty string — is stub. Failing CLOSED matters more than failing
-// loudly here: a typo in a deployment manifest must not be the reason
-// this service starts submitting real acknowledgements to a real
-// retailer.
+// empty string, and the retired "sandbox" (ADR 0009 §4 removed it: the
+// network has no separate sandbox tier) — is stub. Failing CLOSED matters
+// more than failing loudly here: a typo in a deployment manifest must not
+// be the reason this service starts submitting real acknowledgements to
+// a real retailer.
 func ParseMode(s string) Mode {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case string(ModeSandbox):
-		return ModeSandbox
 	case string(ModeLive):
 		return ModeLive
 	default:
@@ -55,18 +51,20 @@ func ParseMode(s string) Mode {
 	}
 }
 
-// NewGateway wires the gateway for a mode.
+// NewGateway wires the gateway for a mode and (for live) a base URL.
 //
-// sandbox and live return an explicit error rather than silently
-// degrading to the stub. A deployment that ASKED for a real network and
-// got a fake one would look healthy while quietly answering nobody —
-// the worst possible failure for this context.
-func NewGateway(mode Mode, logger *slog.Logger) (ports.NetworkGateway, error) {
+// live returns an explicit error rather than silently degrading to the
+// stub. A deployment that ASKED for a real network and got a fake one
+// would look healthy while quietly answering nobody — the worst possible
+// failure for this context. baseURL is accepted now (and required by the
+// caller for live, see cmd/netfulfil's wireGateway) so NETWORK_BASE_URL is
+// already wired end to end; the live adapter itself is Phase 3 work.
+func NewGateway(mode Mode, baseURL string, logger *slog.Logger) (ports.NetworkGateway, error) {
 	switch mode {
 	case ModeStub:
 		return NewStubGateway(logger), nil
-	case ModeSandbox, ModeLive:
-		return nil, fmt.Errorf("NETWORK_MODE=%s is not implemented yet: no credentialed adapter exists (ADR 0001 rollout step 5)", mode)
+	case ModeLive:
+		return nil, fmt.Errorf("NETWORK_MODE=live is not implemented yet: no credentialed adapter exists for NETWORK_BASE_URL=%q (ADR 0001 rollout step 5, ADR 0009 §\"A real SP-API adapter is deferred, not dropped\")", baseURL)
 	default:
 		return nil, fmt.Errorf("unknown network mode %q", mode)
 	}
@@ -164,6 +162,49 @@ func (g *StubGateway) SubmitShipmentConfirmation(_ context.Context, ref shared.N
 	g.confirmed[ref] = true
 	g.logger.Info("stub network shipment confirmation", "networkRef", ref)
 	return nil
+}
+
+// SubmitAvailability records what we claim we can ship, for tests and
+// local runs to assert on; the stub makes no external call.
+func (g *StubGateway) SubmitAvailability(_ context.Context, update contract.AvailabilityUpdate) error {
+	g.logger.Info("stub network availability update", "siteId", update.SiteId, "sku", update.SKU, "quantity", update.Quantity)
+	return nil
+}
+
+// DeclareCapability is a documented no-op everywhere in this codebase
+// today — see contract.CapabilityDeclaration's doc comment for why the
+// network's real API has no such operation.
+func (g *StubGateway) DeclareCapability(_ context.Context, offer contract.CapabilityDeclaration) error {
+	g.logger.Info("stub network capability declaration (no-op)", "siteId", offer.SiteId, "sku", offer.SKU, "advertisedQuantity", offer.AdvertisedQuantity)
+	return nil
+}
+
+// RequestLabel returns a deterministic fake label — never a ship-to name,
+// address or phone number, same as a real adapter would be restricted to
+// (ADR 0009 §3).
+func (g *StubGateway) RequestLabel(_ context.Context, ref shared.NetworkRef) (contract.LabelResult, error) {
+	return contract.LabelResult{
+		LabelRef:       "stub-label-" + string(ref),
+		TrackingNumber: "stub-tracking-" + string(ref),
+		Carrier:        "STUB_CARRIER",
+	}, nil
+}
+
+// SubmissionStatus reconciles instantly and deterministically: the stub
+// never leaves anything genuinely pending. A ref that was acknowledged or
+// confirmed reconciles to SUCCESS; any other ref (not yet submitted, or
+// unknown) reconciles to PENDING rather than FAILURE, so a caller never
+// mistakes "nothing has happened yet" for a real network refusal.
+func (g *StubGateway) SubmissionStatus(_ context.Context, ref shared.NetworkRef) (contract.SubmissionStatusValue, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.acknowledged[ref]; ok {
+		return contract.SubmissionSuccess, nil
+	}
+	if g.confirmed[ref] {
+		return contract.SubmissionSuccess, nil
+	}
+	return contract.SubmissionPending, nil
 }
 
 // Acknowledgement reports what was submitted for a ref, and whether

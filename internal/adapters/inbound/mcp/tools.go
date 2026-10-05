@@ -62,10 +62,10 @@ func (d Deps) getNetworkOrder(ctx context.Context, in getNetworkOrderInput) (net
 
 type listNetworkOrdersInput struct {
 	// State optionally filters the listing. Empty lists every order
-	// regardless of state. A value that is not one of NEW, ACKNOWLEDGED,
-	// REJECTED, CONFIRMED is rejected rather than silently matching
-	// nothing.
-	State string `json:"state,omitempty" jsonschema:"optional state filter: NEW, ACKNOWLEDGED, REJECTED, or CONFIRMED; omit to list every order"`
+	// regardless of state. A value that is not one of NEW, SUBMITTED,
+	// ACKNOWLEDGED, REJECTED, CONFIRMED is rejected rather than
+	// silently matching nothing.
+	State string `json:"state,omitempty" jsonschema:"optional state filter: NEW, SUBMITTED, ACKNOWLEDGED, REJECTED, or CONFIRMED; omit to list every order"`
 }
 
 type listNetworkOrdersOutput struct {
@@ -77,9 +77,9 @@ func (d Deps) listNetworkOrders(ctx context.Context, in listNetworkOrdersInput) 
 	if in.State != "" {
 		state = networkorder.State(in.State)
 		switch state {
-		case networkorder.StateNew, networkorder.StateAcknowledged, networkorder.StateRejected, networkorder.StateConfirmed:
+		case networkorder.StateNew, networkorder.StateSubmitted, networkorder.StateAcknowledged, networkorder.StateRejected, networkorder.StateConfirmed:
 		default:
-			return listNetworkOrdersOutput{}, fmt.Errorf("unknown state %q: want one of NEW, ACKNOWLEDGED, REJECTED, CONFIRMED", in.State)
+			return listNetworkOrdersOutput{}, fmt.Errorf("unknown state %q: want one of NEW, SUBMITTED, ACKNOWLEDGED, REJECTED, CONFIRMED", in.State)
 		}
 	}
 

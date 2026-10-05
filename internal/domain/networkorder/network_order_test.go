@@ -108,6 +108,59 @@ func TestAcknowledge_ThenSecondAnswerIsRejected(t *testing.T) {
 	}
 }
 
+// TestSubmit_ThenConfirmAcknowledgement_IsTheTwoPhasePath pins the real
+// shape ReceiveNetworkDemand and ReconcileSubmittedOrders use (ADR 0001
+// §5): the order sits SUBMITTED, visibly, until a reconciliation pass
+// confirms it — never ACKNOWLEDGED on a bare submit.
+func TestSubmit_ThenConfirmAcknowledgement_IsTheTwoPhasePath(t *testing.T) {
+	o := mustReceive(t)
+
+	if err := o.Submit(); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if o.State() != StateSubmitted {
+		t.Fatalf("state = %v, want SUBMITTED", o.State())
+	}
+	// A second submit on an already-submitted order is a duplicate, not
+	// a retry: ReceiveNetworkDemand's own idempotency check (FindByRef)
+	// is what actually prevents this in practice.
+	if err := o.Submit(); !errors.Is(err, ErrAlreadyAnswered) {
+		t.Fatalf("second submit: err = %v, want ErrAlreadyAnswered", err)
+	}
+	// Confirming before submitting has nothing to confirm.
+	fresh := mustReceive(t)
+	if err := fresh.ConfirmAcknowledgement(); !errors.Is(err, ErrNotSubmitted) {
+		t.Fatalf("confirm while NEW: err = %v, want ErrNotSubmitted", err)
+	}
+
+	if err := o.ConfirmAcknowledgement(); err != nil {
+		t.Fatalf("ConfirmAcknowledgement: %v", err)
+	}
+	if o.State() != StateAcknowledged {
+		t.Fatalf("state = %v, want ACKNOWLEDGED", o.State())
+	}
+	// Settled: a second confirm has nothing left to confirm.
+	if err := o.ConfirmAcknowledgement(); !errors.Is(err, ErrNotSubmitted) {
+		t.Fatalf("second confirm: err = %v, want ErrNotSubmitted", err)
+	}
+}
+
+// TestReject_FromSubmittedIsTheReconciliationFailurePath pins
+// ReconcileSubmittedOrders' failure branch: a submission the network
+// itself refuses is rejected from SUBMITTED, not just from NEW.
+func TestReject_FromSubmittedIsTheReconciliationFailurePath(t *testing.T) {
+	o := mustReceive(t)
+	if err := o.Submit(); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := o.Reject(); err != nil {
+		t.Fatalf("Reject from SUBMITTED: %v", err)
+	}
+	if o.State() != StateRejected {
+		t.Fatalf("state = %v, want REJECTED", o.State())
+	}
+}
+
 func TestReject_IsTerminal(t *testing.T) {
 	o := mustReceive(t)
 	if err := o.Reject(); err != nil {

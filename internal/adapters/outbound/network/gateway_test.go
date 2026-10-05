@@ -11,7 +11,7 @@ import (
 func TestParseMode_FailsClosedToStub(t *testing.T) {
 	cases := map[string]Mode{
 		"stub":       ModeStub,
-		"sandbox":    ModeSandbox,
+		"sandbox":    ModeStub, // retired by ADR 0009 §4; falls back to stub like any other typo
 		"live":       ModeLive,
 		"LIVE":       ModeLive,
 		"  live  ":   ModeLive,
@@ -37,13 +37,11 @@ func TestNewGateway_RefusesUnimplementedModesRatherThanDegrading(t *testing.T) {
 	// A deployment that ASKED for a real network and silently got a
 	// stub would look healthy while answering nobody — the worst
 	// possible failure for this context.
-	for _, mode := range []Mode{ModeSandbox, ModeLive} {
-		if _, err := NewGateway(mode, nil); err == nil {
-			t.Fatalf("NewGateway(%v) must fail until a credentialed adapter exists", mode)
-		}
+	if _, err := NewGateway(ModeLive, "https://retail-network.example", nil); err == nil {
+		t.Fatalf("NewGateway(live) must fail until a credentialed adapter exists")
 	}
 
-	g, err := NewGateway(ModeStub, nil)
+	g, err := NewGateway(ModeStub, "", nil)
 	if err != nil {
 		t.Fatalf("NewGateway(stub): %v", err)
 	}
