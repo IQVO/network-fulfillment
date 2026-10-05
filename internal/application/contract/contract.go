@@ -120,3 +120,18 @@ type HeldOrderResult struct {
 	Feasible       bool
 	PromisedCutoff time.Time
 }
+
+// NextCutoff is ports.ProcessPathCapability.NextCutoff's result: one
+// upcoming CPT and the paths eligible to make it.
+type NextCutoff struct {
+	CutoffAt time.Time
+	Paths    []EligiblePath
+}
+
+// EligiblePath is one path eligible for a NextCutoff, with its own
+// cycle-time-p95 (process-path-management's ADR 0010 figure).
+type EligiblePath struct {
+	PathId         string
+	CycleTimeP95   time.Duration
+	CycleTimeKnown bool
+}

@@ -328,6 +328,10 @@ func (passTranslation) ToSKU(_ context.Context, id shared.NetworkProductId) (sha
 	return shared.SKU("sku-" + string(id)), nil
 }
 
+func (passTranslation) KnownSKUs(context.Context) ([]shared.SKU, error) {
+	return nil, nil
+}
+
 type fixedClock struct{ t time.Time }
 
 func (c fixedClock) Now() time.Time { return c.t }

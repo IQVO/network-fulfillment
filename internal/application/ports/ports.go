@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
+	"github.com/claudioed/network-fulfillment/internal/domain/capabilityoffer"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
@@ -119,6 +120,76 @@ type ProductTranslation interface {
 	// correct handling is to reject the order inside the acknowledgement
 	// window rather than retry or crash.
 	ToSKU(ctx context.Context, id shared.NetworkProductId) (shared.SKU, error)
+
+	// KnownSKUs lists every SKU this dictionary maps TO, deduplicated.
+	// RecomputeCapabilityOffers (ADR 0001 §8) is the one caller: it is
+	// the universe of SKUs this context has any business advertising to
+	// the network at all — a SKU this dictionary never translates FROM
+	// a NetworkProductId can never be acknowledged on an order either,
+	// so advertising capability for it would be a number the network
+	// could never actually act on.
+	KnownSKUs(ctx context.Context) ([]shared.SKU, error)
+}
+
+// ProcessPathCapability answers what process-path-management's own
+// fulfillment-capability contract (its ADR 0010) says about one site:
+// its CPT schedule of recurring cutoffs, and which paths are eligible
+// for each, plus each eligible path's own cycle-time-p95. ADR 0001 §8's
+// throughput formula needs both halves — "can this path make the next
+// cutoff" depends on cycle time, and "which cutoff is next" depends on
+// the schedule — which is why this port's one query answers both at
+// once rather than requiring two round trips that could disagree about
+// which cutoff they mean.
+type ProcessPathCapability interface {
+	// NextCutoff returns the next CPT this (siteId) offers on or after
+	// `after`, together with the path(s) eligible for it and each
+	// eligible path's own CycleTimeP95 (known=false for a path whose
+	// cycle time this cache has not yet observed). found=false means
+	// the site has no schedule in the cache yet (not: the site has no
+	// SKUs).
+	NextCutoff(siteId shared.SiteId, after time.Time) (contract.NextCutoff, bool)
+}
+
+// PathCapacity answers wes-work-planning's own remaining-admission-
+// capacity figure for one path at one CPT cutoff (its PathCapacityChanged
+// broadcast). known=false covers both "never observed" and a FlowFed
+// path reporting no hard ceiling (ADR 0001 §8 treats both identically:
+// capacity is not provably the binding constraint, so the offer must
+// not be throttled on an unproven number).
+type PathCapacity interface {
+	RemainingCapacity(pathId string, cutoffAt time.Time) (units int, known bool)
+}
+
+// InventoryAvailability answers inventory-storage's own usable-inventory
+// read model for one SKU (`GET /inventory/{sku}/usable`): on-hand minus
+// active reservations minus held/unlocated stock.
+//
+// This is a SYNCHRONOUS call, not a Kafka-fed cache, and that is a
+// deliberate, documented departure from ADR 0001 §8's literal "three
+// Kafka-fed local caches" wording for this one leg specifically (see
+// internal/adapters/outbound/inventoryclient's package doc comment for
+// why: inventory-storage's stock-ledger events are published to an
+// ANALYTICS-ONLY topic, not a cross-context integration topic, and
+// rebuilding its available-quantity projection from that ledger in a
+// second repository is exactly the kind of promise-math duplication ADR
+// 0001 §7 already rejected for order-management's figures — the same
+// reasoning applies symmetrically here). RecomputeCapabilityOffers calls
+// this from its own background schedule, never from a request's hot
+// path, so the synchronous round trip costs latency on a job already
+// built to tolerate it, not on anything network-facing.
+type InventoryAvailability interface {
+	UsableQuantity(ctx context.Context, sku shared.SKU) (int, error)
+}
+
+// CapabilityOfferRepo persists the latest recomputed CapabilityOffer per
+// (SKU, SiteId). Each recompute pass is a full, replaceable snapshot
+// (the aggregate's own doc comment) — Save upserts, it never appends a
+// history.
+type CapabilityOfferRepo interface {
+	Save(ctx context.Context, o capabilityoffer.CapabilityOffer) error
+	// ListAll returns every currently-stored offer, for the read-only
+	// REST/MCP surface. Iteration order is deliberately not specified.
+	ListAll(ctx context.Context) ([]capabilityoffer.CapabilityOffer, error)
 }
 
 // EventPublisher publishes this context's integration events.
