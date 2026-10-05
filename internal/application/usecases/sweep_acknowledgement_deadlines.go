@@ -4,35 +4,27 @@ import (
 	"context"
 
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
-	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
 // SweepAcknowledgementDeadlines finds orders whose 24h acknowledgement
 // window has closed with no answer (ADR 0001 §6).
 //
-// A miss is a REPORTED FACT, not an error: the window has already
-// closed, so there is nothing left to prevent and nothing to retry. The
-// only useful acts are to record it and to stop holding inventory for
-// demand we never answered — which is the orphaned-hold gap both ADRs
-// named as their honest open consequence, closed here.
+// It is a REPORTED FACT, not a state transition: per ADR 0001 §6, "the
+// sweep never mutates the aggregate — it only raises
+// AcknowledgementDeadlineAtRisk". Structurally this mirrors
+// fulfillment-execution's SweepCPTMisses, which solves the identical
+// problem for internal cutoffs the same way. RejectOverdueOrders is the
+// separate use case (its own audit trail) that performs the actual
+// rejection and frees the held inventory; a scheduler runs both, but
+// they are independent code paths on purpose.
 //
-// It deliberately does NOT acknowledge late. An acknowledgement after
-// the SLA instant is worse than none: the network has already re-sourced
-// the order, and confirming it would commit us to a shipment nobody is
-// expecting.
-//
-// Modelled on fulfillment-execution's SweepCPTMisses, which solves the
-// structurally identical problem for internal cutoffs.
+// Re-firing on every pass for as long as an order remains overdue is
+// intended, not a bug to dedupe: the condition is still true.
 type SweepAcknowledgementDeadlines struct {
-	Orders  ports.NetworkOrderRepo
-	Planner ports.FulfillmentPlanner
-	Events  ports.EventPublisher
-	Clock   ports.Clock
-	// UnitOfWork brackets Save+Publish atomically (transactional
-	// outbox). Optional: nil means "no transactional backing", the
-	// in-memory / log-publisher dev configuration.
-	UnitOfWork ports.UnitOfWork
+	Orders ports.NetworkOrderRepo
+	Events ports.EventPublisher
+	Clock  ports.Clock
 }
 
 // SweepResult reports what one pass did, so a caller (a scheduler, a
@@ -40,7 +32,7 @@ type SweepAcknowledgementDeadlines struct {
 // logs.
 type SweepResult struct {
 	Examined int
-	Missed   int
+	AtRisk   int
 }
 
 func (uc *SweepAcknowledgementDeadlines) Execute(ctx context.Context) (SweepResult, error) {
@@ -56,43 +48,18 @@ func (uc *SweepAcknowledgementDeadlines) Execute(ctx context.Context) (SweepResu
 		if !o.AcknowledgementOverdue(now) {
 			continue
 		}
-		if err := uc.missOne(ctx, o); err != nil {
-			// One bad order must not abort the pass: the remaining
-			// orders are still holding inventory, and they are exactly
-			// what this sweep exists to free. The failure is left for
-			// the next pass to retry — the window is already closed, so
-			// nothing further is lost by waiting.
+		// A publish failure for one order must not abort the pass —
+		// re-firing on the next pass recovers it, and the remaining
+		// orders are just as overdue and just as worth reporting.
+		if err := uc.Events.Publish(ctx, shared.AcknowledgementDeadlineAtRisk{
+			NetworkRef:    o.NetworkRef(),
+			SiteId:        o.SiteId(),
+			AcknowledgeBy: o.AcknowledgeBy(),
+			At:            now,
+		}); err != nil {
 			continue
 		}
-		res.Missed++
+		res.AtRisk++
 	}
 	return res, nil
-}
-
-func (uc *SweepAcknowledgementDeadlines) missOne(ctx context.Context, o *networkorder.NetworkOrder) error {
-	// Free the local hold first. This is the step that actually matters
-	// operationally — an unanswered order sitting on real inventory
-	// reservations is stock we cannot sell to anyone else.
-	if local := o.LocalOrderId(); local != nil {
-		if err := uc.Planner.CancelHeldOrder(ctx, *local); err != nil {
-			return err
-		}
-	}
-	if err := o.Reject(); err != nil {
-		return err
-	}
-	// Save and Publish commit together in one atomic scope
-	// (transactional outbox), same discipline as ReceiveNetworkDemand:
-	// the missed-deadline record and its event can never diverge.
-	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
-		if err := uc.Orders.Save(ctx, o); err != nil {
-			return err
-		}
-		return uc.Events.Publish(ctx, shared.NetworkOrderRejected{
-			NetworkRef: o.NetworkRef(),
-			SiteId:     o.SiteId(),
-			Reason:     shared.RejectionReasonAcknowledgementDeadlineMissed,
-			At:         uc.Clock.Now(),
-		})
-	})
 }

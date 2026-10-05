@@ -4,8 +4,29 @@ import (
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
+	"github.com/claudioed/network-fulfillment/internal/domain/capabilityoffer"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 )
+
+// capabilityOfferResponse is one CapabilityOffer (ADR 0001 §8) as this
+// context's REST surface exposes it.
+type capabilityOfferResponse struct {
+	SKU                string `json:"sku"`
+	SiteId             string `json:"siteId"`
+	AdvertisedQuantity int    `json:"advertisedQuantity"`
+	Basis              string `json:"basis"`
+	ComputedAt         string `json:"computedAt"`
+}
+
+func toCapabilityOfferResponse(o capabilityoffer.CapabilityOffer) capabilityOfferResponse {
+	return capabilityOfferResponse{
+		SKU:                string(o.SKU()),
+		SiteId:             string(o.SiteId()),
+		AdvertisedQuantity: o.AdvertisedQuantity(),
+		Basis:              string(o.Basis()),
+		ComputedAt:         o.ComputedAt().UTC().Format(time.RFC3339),
+	}
+}
 
 // networkOrderResponse is a NetworkOrder as this context's REST surface
 // exposes it.

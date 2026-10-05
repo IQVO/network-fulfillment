@@ -25,14 +25,18 @@ import (
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	outboundevents "github.com/claudioed/network-fulfillment/internal/adapters/outbound/events"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/inventoryclient"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/pathcapacitycache"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/processpathcache"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
 type systemClock struct{}
@@ -152,10 +156,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Loaded before the database is opened, deliberately: every failure
-	// path above this line may os.Exit freely, whereas one below it would
-	// skip `defer closeOrders()` and leak the pool. The dictionary needs
-	// no database, so there is no reason for it to sit after one.
 	orders, pool, closeOrders, err := wireOrders(context.Background(), logger)
 	if err != nil {
 		// Same reasoning as the gateway above: a deployment that asked
@@ -165,7 +165,24 @@ func main() {
 		logger.Error("cannot wire order repository", "err", err)
 		os.Exit(1)
 	}
+
+	// CapabilityOffer (ADR 0001 §8), gated behind CAPABILITY_OFFER_ENABLED
+	// (default false) so this service's zero-config, no-broker-required
+	// boot (ADR 0001 §4) is unaffected when the feature is not wanted —
+	// mirroring the EVENT_PUBLISHER=kafka convention used below for
+	// another optional Kafka dependency. See wireCapabilityOffer's own
+	// doc comment for what "enabled" wires. Wired here, BEFORE
+	// `defer closeOrders()` below, so a fatal error can still os.Exit
+	// without a linter-flagged skipped defer (closeOrders has not been
+	// registered yet at this point; os.Exit is still safe here because
+	// the process is terminating regardless of any open pool/reader).
+	offersRepo, recompute, capDone, closeCapabilityOffer, err := wireCapabilityOffer(context.Background(), pool, translation, logger)
+	if err != nil {
+		logger.Error("cannot wire capability offer pipeline", "err", err)
+		os.Exit(1)
+	}
 	defer closeOrders()
+	defer closeCapabilityOffer()
 
 	planner, circuitBreakerMetrics := wirePlanner()
 
@@ -180,7 +197,17 @@ func main() {
 	eventPublisher, relay, closeEventPublisher := wireEventPublisher(pool, logger)
 	defer closeEventPublisher()
 
-	receive, sweep := wireUseCases(orders, gateway, planner, translation, eventPublisher, pool)
+	receive, sweep, rejectOverdue := wireUseCases(orders, gateway, planner, translation, eventPublisher, pool)
+	reconcile := &usecases.ReconcileSubmittedOrders{
+		Orders:  orders,
+		Gateway: gateway,
+		Planner: planner,
+		Events:  eventPublisher,
+		Clock:   systemClock{},
+	}
+	if pool != nil {
+		reconcile.UnitOfWork = postgres.NewUnitOfWork(pool)
+	}
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
 	// could create a NetworkOrder at all.
@@ -195,25 +222,40 @@ func main() {
 		NetworkMode:     string(mode),
 		Readiness:       readiness,
 		MetricsRegistry: circuitBreakerMetrics.Registry,
+		Offers:          offersRepo,
 	}
 
-	serve(context.Background(), logger, newHTTPServer(api), sweep, inbound, relay, readiness)
+	api.ConfirmShipment = &usecases.ConfirmNetworkOrderShipment{
+		Orders:     orders,
+		Gateway:    gateway,
+		Events:     eventPublisher,
+		Clock:      systemClock{},
+		UnitOfWork: wireUnitOfWork(pool),
+	}
+
+	serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, reconcile, inbound, relay, readiness, recompute, capDone)
 }
 
 // wireGateway wires the outbound network gateway for the NETWORK_MODE env
 // var, returning the parsed mode alongside it so the composition root can
 // both log it at startup and expose it on the status surface — the
-// running value must be verifiable, not assumed.
+// running value must be verifiable, not assumed. NETWORK_BASE_URL is the
+// live-mode target (ADR 0009 §4); read here so it reaches the gateway
+// even though no live adapter exists yet to dial it with.
 func wireGateway(logger *slog.Logger) (ports.NetworkGateway, network.Mode, error) {
 	mode := network.ParseMode(os.Getenv("NETWORK_MODE"))
-	gateway, err := network.NewGateway(mode, logger)
+	baseURL := os.Getenv("NETWORK_BASE_URL")
+	if mode == network.ModeLive && baseURL == "" {
+		return nil, mode, fmt.Errorf("NETWORK_MODE=live requires NETWORK_BASE_URL to be set")
+	}
+	gateway, err := network.NewGateway(mode, baseURL, logger)
 	if err != nil {
 		// Refusing to boot is deliberate. A deployment that asked for a
 		// real network and silently got a stub would look healthy while
 		// answering nobody.
 		return nil, mode, err
 	}
-	logger.Info("network gateway wired", "mode", mode)
+	logger.Info("network gateway wired", "mode", mode, "baseURL", baseURL)
 	return gateway, mode, nil
 }
 
@@ -264,11 +306,17 @@ func wirePlanner() (ports.FulfillmentPlanner, *telemetry.CircuitBreakerMetrics) 
 	return ordermanagement.NewBreakerClient(rawPlanner, metrics), metrics
 }
 
-// wireUseCases builds the two use cases this composition root serves,
+// wireUseCases builds the use cases this composition root serves,
 // sharing one repository, planner, publisher and clock between them.
 // The UnitOfWork is nil exactly when pool is (in-memory mode): the use
 // cases treat that as "no transactional backing" and run Save+Publish
 // back to back, unchanged from before this rollout.
+//
+// SweepAcknowledgementDeadlines and RejectOverdueOrders are deliberately
+// two separate use cases (ADR 0001 §6): the sweep only ever reports
+// AcknowledgementDeadlineAtRisk and never mutates the aggregate;
+// RejectOverdueOrders is the separate path that performs the actual
+// rejection, with its own audit trail.
 func wireUseCases(
 	orders ports.NetworkOrderRepo,
 	gateway ports.NetworkGateway,
@@ -276,7 +324,7 @@ func wireUseCases(
 	translation ports.ProductTranslation,
 	events ports.EventPublisher,
 	pool *pgxpool.Pool,
-) (*usecases.ReceiveNetworkDemand, *usecases.SweepAcknowledgementDeadlines) {
+) (*usecases.ReceiveNetworkDemand, *usecases.SweepAcknowledgementDeadlines, *usecases.RejectOverdueOrders) {
 	var uow ports.UnitOfWork
 	if pool != nil {
 		uow = postgres.NewUnitOfWork(pool)
@@ -291,13 +339,236 @@ func wireUseCases(
 		UnitOfWork:  uow,
 	}
 	sweep := &usecases.SweepAcknowledgementDeadlines{
+		Orders: orders,
+		Events: events,
+		Clock:  systemClock{},
+	}
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders:     orders,
 		Planner:    planner,
 		Events:     events,
 		Clock:      systemClock{},
 		UnitOfWork: uow,
 	}
-	return receive, sweep
+	return receive, sweep, rejectOverdue
+}
+
+// wireUnitOfWork returns a UnitOfWork bound to pool, or nil when pool is
+// nil (in-memory mode) — the same "nil means no transactional backing"
+// convention wireUseCases already establishes for ReceiveNetworkDemand
+// and SweepAcknowledgementDeadlines.
+func wireUnitOfWork(pool *pgxpool.Pool) ports.UnitOfWork {
+	if pool == nil {
+		return nil
+	}
+	return postgres.NewUnitOfWork(pool)
+}
+
+// capabilityOfferEnabled reports whether CAPABILITY_OFFER_ENABLED=true
+// (default false). See wireCapabilityOffer's own doc comment for why
+// this feature is opt-in rather than always-on.
+func capabilityOfferEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("CAPABILITY_OFFER_ENABLED")), "true")
+}
+
+// siteId is the single site CapabilityOffer recompute targets (ADR 0001
+// §8's inherited single-site simplification — see
+// RecomputeCapabilityOffers's own doc comment on SiteId).
+func siteId() shared.SiteId {
+	if v := os.Getenv("SITE_ID"); v != "" {
+		return shared.SiteId(v)
+	}
+	return shared.SiteId("site-1")
+}
+
+// recomputeInterval bounds how often RecomputeCapabilityOffers runs.
+func recomputeInterval() time.Duration {
+	return durationEnv("RECOMPUTE_INTERVAL", time.Minute)
+}
+
+// wireCapabilityOffer wires ADR 0001 §8's CapabilityOffer pipeline: the
+// two Kafka-fed caches (process-path-management's CPT schedule / cycle
+// times, wes-work-planning's PathCapacityChanged), the inventory-storage
+// REST client (internal/adapters/outbound/inventoryclient — a
+// deliberate, documented departure from a third Kafka cache; see that
+// package's own doc comment), the CapabilityOfferRepo, and the
+// RecomputeCapabilityOffers use case a ticker in serve() drives.
+//
+// Gated behind CAPABILITY_OFFER_ENABLED=true (default false): this
+// service's defining property is that it runs fully functional with NO
+// configuration at all (ADR 0001 §4), and two more mandatory Kafka
+// topics plus a mandatory inventory-storage dependency would break that
+// for every existing deployment that has not opted in — the same reason
+// EVENT_PUBLISHER=kafka is opt-in above. Disabled (the default), every
+// return value is its zero value and the caller leaves api.Offers nil,
+// which simply does not register the read endpoints/tools (the same
+// "nil means not registered" convention MetricsRegistry/Reports already
+// follow).
+//
+// When enabled, boot BLOCKS (bounded by each cache's own
+// WaitReadyTimeout) until BOTH caches have replayed their topic's full
+// history: an empty, not-yet-replayed cache would otherwise silently
+// advertise a zero or under-counted throughput figure, which is a worse
+// failure mode than a slightly slower boot (ADR 0001 §8: a throttled
+// offer must be provably correct, never a guess from an incomplete
+// read model).
+func wireCapabilityOffer(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	translation ports.ProductTranslation,
+	logger *slog.Logger,
+) (ports.CapabilityOfferRepo, *usecases.RecomputeCapabilityOffers, []chan struct{}, func(), error) {
+	noop := func() {}
+	if !capabilityOfferEnabled() {
+		return nil, nil, nil, noop, nil
+	}
+
+	pathCap, capacity, runDone, err := startCapabilityOfferCaches(ctx, logger)
+	if err != nil {
+		return nil, nil, nil, noop, err
+	}
+
+	offers := wireOffersRepo(pool, logger)
+	recompute := &usecases.RecomputeCapabilityOffers{
+		Translation: translation,
+		Inventory:   wireInventoryClient(),
+		PathCap:     pathCap,
+		Capacity:    capacity,
+		Offers:      offers,
+		Clock:       systemClock{},
+		Logger:      logger,
+		SiteId:      siteId(),
+	}
+
+	closeFn := func() { closeCaches(pathCap, capacity) }
+	return offers, recompute, runDone, closeFn, nil
+}
+
+// startCapabilityOfferCaches dials both Kafka-fed caches, starts their
+// Run goroutines, and blocks until both have replayed their topic's full
+// history. See wireCapabilityOffer's own doc comment for why boot blocks
+// here rather than serving traffic against an incomplete read model.
+func startCapabilityOfferCaches(ctx context.Context, logger *slog.Logger) (*processpathcache.Consumer, *pathcapacitycache.Consumer, []chan struct{}, error) {
+	brokers := strings.Split(kafkaBrokers(), ",")
+
+	// Retried for the same reason the Postgres dials above are: each
+	// NewConsumer call dials the broker synchronously to capture the
+	// readiness watermark before any consuming begins, and that dial is
+	// exactly this fleet's known ~10s post-start first-outbound-dial
+	// reset (Istio native sidecars; docs/adr/0011-boot-retry-for-istio-
+	// first-dial-reset.md).
+	var pathCap *processpathcache.Consumer
+	if err := retry(ctx, logger, "dial process-path-management kafka topic", func() error {
+		c, err := processpathcache.NewConsumer(ctx, brokers, logger)
+		if err != nil {
+			return err
+		}
+		pathCap = c
+		return nil
+	}); err != nil {
+		return nil, nil, nil, fmt.Errorf("start process-path capability cache: %w", err)
+	}
+
+	var capacity *pathcapacitycache.Consumer
+	if err := retry(ctx, logger, "dial work-planning kafka topic", func() error {
+		c, err := pathcapacitycache.NewConsumer(ctx, brokers, logger)
+		if err != nil {
+			return err
+		}
+		capacity = c
+		return nil
+	}); err != nil {
+		_ = pathCap.Close()
+		return nil, nil, nil, fmt.Errorf("start path capacity cache: %w", err)
+	}
+
+	pathCapDone := make(chan struct{})
+	go func() {
+		defer close(pathCapDone)
+		if err := pathCap.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("process-path capability cache consumer stopped", "err", err)
+		}
+	}()
+	capacityDone := make(chan struct{})
+	go func() {
+		defer close(capacityDone)
+		if err := capacity.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("path capacity cache consumer stopped", "err", err)
+		}
+	}()
+
+	logger.Info("waiting for capability-offer caches to replay their initial history before accepting traffic")
+	waitCtx, cancel := context.WithTimeout(ctx, processpathcache.WaitReadyTimeout+pathcapacitycache.WaitReadyTimeout)
+	defer cancel()
+	if err := pathCap.WaitReady(waitCtx); err != nil {
+		closeCaches(pathCap, capacity)
+		return nil, nil, nil, fmt.Errorf("process-path capability cache did not become ready within %s: %w", processpathcache.WaitReadyTimeout, err)
+	}
+	if err := capacity.WaitReady(waitCtx); err != nil {
+		closeCaches(pathCap, capacity)
+		return nil, nil, nil, fmt.Errorf("path capacity cache did not become ready within %s: %w", pathcapacitycache.WaitReadyTimeout, err)
+	}
+	logger.Info("capability-offer caches are ready")
+
+	return pathCap, capacity, []chan struct{}{pathCapDone, capacityDone}, nil
+}
+
+// wireInventoryClient wires the REST client for inventory-storage's
+// usable-inventory read model (INVENTORY_STORAGE_URL, defaulting to
+// localhost for local dev, matching ORDER_MANAGEMENT_URL's own default
+// in wirePlanner).
+func wireInventoryClient() ports.InventoryAvailability {
+	inventoryURL := os.Getenv("INVENTORY_STORAGE_URL")
+	if inventoryURL == "" {
+		inventoryURL = "http://localhost:8080"
+	}
+	return inventoryclient.NewClient(inventoryURL, nil)
+}
+
+// wireOffersRepo chooses the CapabilityOfferRepo backend, mirroring
+// wireOrders's own in-memory/Postgres choice.
+func wireOffersRepo(pool *pgxpool.Pool, logger *slog.Logger) ports.CapabilityOfferRepo {
+	if pool != nil {
+		logger.Info("capability offer repository wired", "backend", "postgres")
+		return postgres.NewCapabilityOfferRepo(pool)
+	}
+	logger.Info("capability offer repository wired", "backend", "memory")
+	return memory.NewCapabilityOfferRepo()
+}
+
+func closeCaches(pathCap *processpathcache.Consumer, capacity *pathcapacitycache.Consumer) {
+	if pathCap != nil {
+		_ = pathCap.Close()
+	}
+	if capacity != nil {
+		_ = capacity.Close()
+	}
+}
+
+// runRecompute drives RecomputeCapabilityOffers on a ticker, exactly
+// mirroring runSweep's shape. recompute is nil when CAPABILITY_OFFER_ENABLED
+// is not set, in which case this goroutine does nothing and returns
+// immediately once ctx is done.
+func runRecompute(ctx context.Context, recompute *usecases.RecomputeCapabilityOffers, logger *slog.Logger) {
+	if recompute == nil {
+		return
+	}
+	ticker := time.NewTicker(recomputeInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := recompute.Execute(ctx)
+			if err != nil {
+				logger.Error("capability offer recompute failed", "err", err)
+				continue
+			}
+			logger.Info("capability offer recompute completed",
+				"examined", res.Examined, "throughput_constrained", res.ThroughputConstrained)
+		}
+	}
 }
 
 // newHTTPServer builds the REST server around the inbound adapter's
@@ -318,14 +589,21 @@ func serve(
 	logger *slog.Logger,
 	srv *http.Server,
 	sweep *usecases.SweepAcknowledgementDeadlines,
+	rejectOverdue *usecases.RejectOverdueOrders,
+	reconcile *usecases.ReconcileSubmittedOrders,
 	inbound *poller.Poller,
 	relay *postgres.OutboxRelay,
 	readiness *inboundhttp.Readiness,
+	recompute *usecases.RecomputeCapabilityOffers,
+	capabilityCacheDone []chan struct{},
 ) {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go runSweep(ctx, sweep, logger)
+	go runRejectOverdue(ctx, rejectOverdue, logger)
+	go runReconcile(ctx, reconcile, logger)
+	go runRecompute(ctx, recompute, logger)
 
 	// pollerDone closes once inbound.Run's goroutine has returned —
 	// mirroring the outbox relay's own relayDone below — so graceful
@@ -416,12 +694,23 @@ func serve(
 		logger.Warn("poller did not stop before the shutdown deadline")
 	}
 
+	// capabilityCacheDone is empty when CAPABILITY_OFFER_ENABLED is not
+	// set (wireCapabilityOffer's zero-value return), so this loop is a
+	// no-op in that case.
+	for _, done := range capabilityCacheDone {
+		select {
+		case <-done:
+		case <-shutdownCtx.Done():
+			logger.Warn("a capability-offer cache consumer did not stop before the shutdown deadline")
+		}
+	}
+
 	logger.Info("stopped")
 }
 
-// runSweep drives the acknowledgement-deadline sweep on a ticker. An
-// unanswered order holds real inventory reservations, so the sweep is
-// what keeps a missed SLA from quietly becoming unsellable stock.
+// runSweep drives the acknowledgement-deadline sweep on a ticker. It
+// only ever REPORTS a deadline at risk (ADR 0001 §6) — runRejectOverdue
+// below is the separate path that frees the held inventory.
 func runSweep(ctx context.Context, sweep *usecases.SweepAcknowledgementDeadlines, logger *slog.Logger) {
 	ticker := time.NewTicker(sweepInterval())
 	defer ticker.Stop()
@@ -435,8 +724,60 @@ func runSweep(ctx context.Context, sweep *usecases.SweepAcknowledgementDeadlines
 				logger.Error("acknowledgement sweep failed", "err", err)
 				continue
 			}
-			if res.Missed > 0 {
-				logger.Warn("acknowledgement deadlines missed", "examined", res.Examined, "missed", res.Missed)
+			if res.AtRisk > 0 {
+				logger.Warn("acknowledgement deadlines at risk", "examined", res.Examined, "atRisk", res.AtRisk)
+			}
+		}
+	}
+}
+
+// runRejectOverdue drives the actual rejection of orders whose
+// acknowledgement window has closed unanswered, on its own ticker and
+// its own code path from runSweep above (ADR 0001 §6: the sweep never
+// mutates the aggregate; this is the separate path that does, with its
+// own audit trail). An unanswered order holds real inventory
+// reservations, so this is what keeps a missed SLA from quietly becoming
+// permanently unsellable stock.
+func runRejectOverdue(ctx context.Context, rejectOverdue *usecases.RejectOverdueOrders, logger *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := rejectOverdue.Execute(ctx)
+			if err != nil {
+				logger.Error("overdue-order rejection failed", "err", err)
+				continue
+			}
+			if res.Rejected > 0 {
+				logger.Warn("overdue orders rejected", "examined", res.Examined, "rejected", res.Rejected)
+			}
+		}
+	}
+}
+
+// runReconcile drives the submitted-order reconciliation pass (ADR 0001
+// §5) on its own ticker, reusing POLL_INTERVAL as the cadence: a
+// submission is meaningless to re-check faster than new demand can even
+// arrive, and this keeps the knob surface small rather than adding a
+// third interval env var for a v1.
+func runReconcile(ctx context.Context, reconcile *usecases.ReconcileSubmittedOrders, logger *slog.Logger) {
+	ticker := time.NewTicker(pollInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := reconcile.Execute(ctx)
+			if err != nil {
+				logger.Error("submitted-order reconciliation failed", "err", err)
+				continue
+			}
+			if res.Confirmed > 0 || res.Failed > 0 {
+				logger.Info("submitted orders reconciled", "examined", res.Examined, "confirmed", res.Confirmed, "failed", res.Failed, "pending", res.Pending)
 			}
 		}
 	}

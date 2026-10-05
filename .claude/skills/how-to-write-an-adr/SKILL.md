@@ -89,7 +89,7 @@ Don't edit the old ADR's Decision section. Add a `## Status` line noting
 new ADR referencing it: `**Accepted.** <date>. Supersedes [NN. Old title](./NNNN-old-slug.md).`
 — for wording, see how ADR 0003 notes that its envelope description is
 superseded by ADR 0008 (`docs/adr/0003-transactional-outbox.md`, Status),
-and how `docs/adr/0002-retail-network-not-amazon-counterpart.md` amends
+and how `docs/adr/0009-retail-network-not-amazon-counterpart.md` amends
 ADR 0001.
 
 ## Cross-repo decisions: use a companion ADR, not one repo's private opinion

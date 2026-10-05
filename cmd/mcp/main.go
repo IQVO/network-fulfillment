@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	inboundmcp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/mcp"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
@@ -63,11 +64,13 @@ func run() error {
 	migrationsDatabaseURL := getenv("MIGRATIONS_DATABASE_URL", databaseURL)
 	migrationsPath := getenv("MIGRATIONS_PATH", "/app/migrations")
 
-	orders, closeOrders, err := buildOrders(context.Background(), databaseURL, migrationsDatabaseURL, migrationsPath, logger)
+	orders, pool, closeOrders, err := buildOrders(context.Background(), databaseURL, migrationsDatabaseURL, migrationsPath, logger)
 	if err != nil {
 		return err
 	}
 	defer closeOrders()
+
+	offers := buildOffers(pool)
 
 	// The MCP adapter reuses the SAME repository the HTTP adapter reads
 	// (internal/adapters/inbound/http.Server.Orders): no write use case
@@ -80,6 +83,7 @@ func run() error {
 	deps := inboundmcp.Deps{
 		Orders: orders,
 		Clock:  systemClock{},
+		Offers: offers,
 	}
 	if reportsURL := os.Getenv("REPORTS_BASE_URL"); reportsURL != "" {
 		deps.Reports = inboundmcp.NewReportsRESTClient(reportsURL, nil)
@@ -131,21 +135,39 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 // cmd/netfulfil/main.go's wireOrders does: in-memory with no DATABASE_URL,
 // Postgres (with migrations run) when one is set. Kept independent of
 // cmd/netfulfil so the MCP process can be deployed and scaled separately.
-func buildOrders(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath string, logger *slog.Logger) (ports.NetworkOrderRepo, func(), error) {
+// The returned pool is nil exactly when the repo is the in-memory one,
+// mirroring wireOrders's own convention — buildOffers uses it to decide
+// its own backend without opening a second pool.
+func buildOrders(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath string, logger *slog.Logger) (ports.NetworkOrderRepo, *pgxpool.Pool, func(), error) {
 	if databaseURL == "" {
 		logger.Info("order repository wired", "backend", "memory")
-		return memory.NewNetworkOrderRepo(), func() {}, nil
+		return memory.NewNetworkOrderRepo(), nil, func() {}, nil
 	}
 
 	if err := postgres.RunMigrations(migrationsDatabaseURL, migrationsPath); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	pool, err := postgres.NewPool(ctx, databaseURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	logger.Info("order repository wired", "backend", "postgres")
-	return postgres.NewNetworkOrderRepo(pool), pool.Close, nil
+	return postgres.NewNetworkOrderRepo(pool), pool, pool.Close, nil
+}
+
+// buildOffers wires ports.CapabilityOfferRepo for the list_capability_offers
+// tool, following the SAME backend choice as buildOrders: in-memory with
+// no DATABASE_URL (pool == nil), the SAME already-migrated pool
+// buildOrders opened when one is set. Note this process's own in-memory
+// map, when DATABASE_URL is unset, is NOT the same map cmd/netfulfil's
+// recompute pass writes to (two separate processes) — exactly the same
+// existing quirk buildOrders already has for Orders in that mode;
+// Postgres is what makes the two processes genuinely share data.
+func buildOffers(pool *pgxpool.Pool) ports.CapabilityOfferRepo {
+	if pool != nil {
+		return postgres.NewCapabilityOfferRepo(pool)
+	}
+	return memory.NewCapabilityOfferRepo()
 }
 
 func getenv(key, fallback string) string {
