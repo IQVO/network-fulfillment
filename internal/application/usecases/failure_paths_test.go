@@ -116,25 +116,25 @@ func TestReceive_CancelFailureOnRejectionAborts(t *testing.T) {
 	}
 }
 
-func TestSweep_RepositoryFailureIsReported(t *testing.T) {
+func TestRejectOverdue_RepositoryFailureIsReported(t *testing.T) {
 	f := newFixture(true)
-	sweep := &usecases.SweepAcknowledgementDeadlines{
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders: &failingRepo{listErr: errBoom}, Planner: f.planner,
 		Events: nopPublisher{}, Clock: fixedClock{t: now()},
 	}
-	if _, err := sweep.Execute(context.Background()); !errors.Is(err, errBoom) {
+	if _, err := rejectOverdue.Execute(context.Background()); !errors.Is(err, errBoom) {
 		t.Fatalf("err = %v, want errBoom", err)
 	}
 }
 
-func TestSweep_OneFailingOrderDoesNotAbortThePass(t *testing.T) {
+func TestRejectOverdue_OneFailingOrderDoesNotAbortThePass(t *testing.T) {
 	f := newFixture(true)
 	f.planner.cancelErr = errBoom
 
 	// Two overdue orders, both holding inventory. The cancel fails for
 	// both, but the pass must still EXAMINE both rather than stopping at
-	// the first — the remaining orders are exactly what the sweep exists
-	// to free.
+	// the first — the remaining orders are exactly what this use case
+	// exists to free.
 	for _, ref := range []shared.NetworkRef{"po-a", "po-b"} {
 		local := shared.LocalOrderId("ord-" + string(ref))
 		stuck := networkorder.Rehydrate(ref, "site-1", now().Add(48*time.Hour),
@@ -145,19 +145,19 @@ func TestSweep_OneFailingOrderDoesNotAbortThePass(t *testing.T) {
 		}
 	}
 
-	sweep := &usecases.SweepAcknowledgementDeadlines{
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders: f.orders, Planner: f.planner, Events: nopPublisher{},
 		Clock: fixedClock{t: now()},
 	}
-	res, err := sweep.Execute(context.Background())
+	res, err := rejectOverdue.Execute(context.Background())
 	if err != nil {
-		t.Fatalf("sweep must not abort on a single failing order: %v", err)
+		t.Fatalf("rejectOverdue must not abort on a single failing order: %v", err)
 	}
 	if res.Examined != 2 {
 		t.Fatalf("examined = %d, want 2", res.Examined)
 	}
-	if res.Missed != 0 {
-		t.Fatalf("missed = %d, want 0 — nothing was successfully swept", res.Missed)
+	if res.Rejected != 0 {
+		t.Fatalf("rejected = %d, want 0 — nothing was successfully rejected", res.Rejected)
 	}
 	if len(f.planner.calls) != 2 {
 		t.Fatalf("planner calls = %v, want one cancel attempt per overdue order", f.planner.calls)

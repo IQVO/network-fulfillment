@@ -190,6 +190,8 @@ func aggregateKey(event shared.DomainEvent) string {
 		return string(e.NetworkRef)
 	case shared.NetworkOrderShipmentConfirmed:
 		return string(e.NetworkRef)
+	case shared.AcknowledgementDeadlineAtRisk:
+		return string(e.NetworkRef)
 	default:
 		return event.EventName()
 	}

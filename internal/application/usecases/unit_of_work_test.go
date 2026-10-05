@@ -142,7 +142,7 @@ func TestReceive_NilUnitOfWork_StillSavesAndPublishes(t *testing.T) {
 	}
 }
 
-// stuckOrder mirrors TestSweep_FreesTheHoldOfAnOrderThatWasNeverAnswered's
+// stuckOrder mirrors TestRejectOverdue_FreesTheHoldOfAnOrderThatWasNeverAnswered's
 // setup: an order received a full window ago, held but never answered —
 // the real shape of a crash between raising the hold and answering.
 func stuckOrder(t *testing.T, local shared.LocalOrderId) *networkorder.NetworkOrder {
@@ -152,7 +152,7 @@ func stuckOrder(t *testing.T, local shared.LocalOrderId) *networkorder.NetworkOr
 		[]networkorder.Line{mustLine(t)}, networkorder.StateNew, &local)
 }
 
-func TestSweep_MissOneRunsInsideOneUnitOfWork(t *testing.T) {
+func TestRejectOverdue_RejectOneRunsInsideOneUnitOfWork(t *testing.T) {
 	f := newFixture(true)
 	pub := &scopedPublisher{}
 	uow := &recordingUnitOfWork{}
@@ -161,26 +161,26 @@ func TestSweep_MissOneRunsInsideOneUnitOfWork(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	sweep := &usecases.SweepAcknowledgementDeadlines{
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders: f.orders, Planner: f.planner, Events: pub,
 		Clock: fixedClock{t: now()}, UnitOfWork: uow,
 	}
-	res, err := sweep.Execute(context.Background())
+	res, err := rejectOverdue.Execute(context.Background())
 	if err != nil {
-		t.Fatalf("sweep: %v", err)
+		t.Fatalf("rejectOverdue: %v", err)
 	}
-	if res.Missed != 1 {
-		t.Fatalf("Missed = %d, want 1", res.Missed)
+	if res.Rejected != 1 {
+		t.Fatalf("Rejected = %d, want 1", res.Rejected)
 	}
 	if uow.opened != 1 || uow.committed != 1 || uow.rolledBack != 0 {
 		t.Fatalf("expected one committed scope, got opened=%d committed=%d rolledBack=%d", uow.opened, uow.committed, uow.rolledBack)
 	}
 	if len(pub.inScope) != 1 || !pub.inScope[0] {
-		t.Fatalf("expected the sweep's publish to run inside the unit of work, got %v", pub.inScope)
+		t.Fatalf("expected rejectOne's publish to run inside the unit of work, got %v", pub.inScope)
 	}
 }
 
-func TestSweep_PublishFailure_RollsBackTheUnitOfWork(t *testing.T) {
+func TestRejectOverdue_PublishFailure_RollsBackTheUnitOfWork(t *testing.T) {
 	f := newFixture(true)
 	pub := &scopedPublisher{failOn: 1, err: errors.New("outbox insert failed")}
 	uow := &recordingUnitOfWork{}
@@ -189,19 +189,19 @@ func TestSweep_PublishFailure_RollsBackTheUnitOfWork(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	sweep := &usecases.SweepAcknowledgementDeadlines{
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders: f.orders, Planner: f.planner, Events: pub,
 		Clock: fixedClock{t: now()}, UnitOfWork: uow,
 	}
-	// missOne's error is swallowed by the pass loop by design (one bad
+	// rejectOne's error is swallowed by the pass loop by design (one bad
 	// order must not abort the others) but the scope must still have
 	// rolled back.
-	res, err := sweep.Execute(context.Background())
+	res, err := rejectOverdue.Execute(context.Background())
 	if err != nil {
-		t.Fatalf("sweep must not abort the whole pass: %v", err)
+		t.Fatalf("rejectOverdue must not abort the whole pass: %v", err)
 	}
-	if res.Missed != 0 {
-		t.Fatalf("Missed = %d, want 0 (the publish failed, so nothing was successfully swept)", res.Missed)
+	if res.Rejected != 0 {
+		t.Fatalf("Rejected = %d, want 0 (the publish failed, so nothing was successfully rejected)", res.Rejected)
 	}
 	if uow.rolledBack != 1 || uow.committed != 0 {
 		t.Fatalf("expected the scope to roll back, got committed=%d rolledBack=%d", uow.committed, uow.rolledBack)

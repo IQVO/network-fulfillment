@@ -93,6 +93,7 @@ channels:
           - $ref: "#/components/messages/NetworkOrderAcknowledged"
           - $ref: "#/components/messages/NetworkOrderRejected"
           - $ref: "#/components/messages/NetworkOrderShipmentConfirmed"
+          - $ref: "#/components/messages/AcknowledgementDeadlineAtRisk"
 
   warehouse.network-fulfillment.analytics:
     description: |
@@ -290,6 +291,47 @@ components:
               siteId: "site-1"
               localOrderId: "ord-1"
               at: "2026-09-23T08:00:00Z"
+
+    AcknowledgementDeadlineAtRisk:
+      name: AcknowledgementDeadlineAtRisk
+      title: Acknowledgement deadline at risk
+      summary: "An order's 24h acknowledgement window has closed with no answer — a reported fact, not a state transition."
+      description: |
+        Raised by `SweepAcknowledgementDeadlines` for every order found still `NEW` past its `acknowledgeBy` instant (ADR 0001 §6). The sweep itself NEVER mutates the aggregate — this event re-fires on every pass for as long as the condition holds true, and a consumer must not treat it as edge-triggered. `RejectOverdueOrders` is the separate use case (its own code path, its own audit trail) that performs the actual rejection, publishing `NetworkOrderRejected` with `reason=ACKNOWLEDGEMENT_DEADLINE_MISSED`.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk` — `dataschema`: `urn:warehouse:network-fulfillment:events:AcknowledgementDeadlineAtRisk:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: network-fulfillment
+      payload:
+        $ref: "#/components/schemas/AcknowledgementDeadlineAtRiskEvent"
+      examples:
+        - name: acknowledgementDeadlineAtRisk
+          summary: "Network order po-1's acknowledgement window has closed unanswered."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "1a2b3c4d-5e6f-4788-9900-aabbccddeeff"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk"
+            subject: "po-1"
+            time: "2026-09-24T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:events:AcknowledgementDeadlineAtRisk:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              acknowledgeBy: "2026-09-24T08:00:00Z"
+              at: "2026-09-24T08:00:00Z"
 
     NetworkOrderReceivedAnalytics:
       name: NetworkOrderReceivedAnalytics
@@ -611,7 +653,7 @@ components:
           description: "Fulfilling site."
         reason:
           type: string
-          enum: ["UNTRANSLATABLE_SKU", "INFEASIBLE_DEADLINE", "ACKNOWLEDGEMENT_DEADLINE_MISSED"]
+          enum: ["UNTRANSLATABLE_SKU", "INFEASIBLE_DEADLINE", "ACKNOWLEDGEMENT_DEADLINE_MISSED", "SUBMISSION_FAILED"]
           description: "Why the order was rejected."
         at:
           type: string
@@ -640,6 +682,30 @@ components:
           type: string
           format: date-time
           description: "Domain occurred-at (same instant as `time`)."
+
+    AcknowledgementDeadlineAtRiskData:
+      type: object
+      title: AcknowledgementDeadlineAtRisk payload
+      required:
+        - networkRef
+        - siteId
+        - acknowledgeBy
+        - at
+      properties:
+        networkRef:
+          type: string
+          description: "Network order reference; also the `subject`."
+        siteId:
+          type: string
+          description: "Fulfilling site."
+        acknowledgeBy:
+          type: string
+          format: date-time
+          description: "The SLA instant this order has missed (or is at risk of missing)."
+        at:
+          type: string
+          format: date-time
+          description: "When this sweep pass observed the risk (same instant as `time`). Re-fires on every pass for as long as the order stays unanswered — not edge-triggered."
 
     NetworkOrderReceivedEvent:
       title: NetworkOrderReceived CloudEvent (events)
@@ -700,6 +766,21 @@ components:
               const: "urn:warehouse:network-fulfillment:events:NetworkOrderShipmentConfirmed:v1"
             data:
               $ref: "#/components/schemas/NetworkOrderShipmentConfirmedData"
+
+    AcknowledgementDeadlineAtRiskEvent:
+      title: AcknowledgementDeadlineAtRisk CloudEvent (events)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:events:AcknowledgementDeadlineAtRisk:v1"
+            data:
+              $ref: "#/components/schemas/AcknowledgementDeadlineAtRiskData"
 
     NetworkOrderReceivedAnalyticsEvent:
       title: NetworkOrderReceived CloudEvent (analytics)

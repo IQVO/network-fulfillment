@@ -364,12 +364,17 @@ components:
           type: string
           description: >
             `NEW` is received and unanswered, with the clock running.
-            `ACKNOWLEDGED` is a commitment to fulfil in full — the
-            protocol has no partial acknowledgement. `REJECTED` is a
-            refusal, and just as valid an answer: a deadline we cannot
-            meet is better refused inside the window than missed after it.
+            `SUBMITTED` means we answered and told the network, but that
+            submission has not yet been reconciled against the network's
+            own transaction-status record (a 200 on the submit call is
+            accepted-for-processing, never itself a settled commitment).
+            `ACKNOWLEDGED` is a settled commitment to fulfil in full,
+            reached once reconciliation confirms it — the protocol has no
+            partial acknowledgement. `REJECTED` is a refusal, and just as
+            valid an answer: a deadline we cannot meet, or a submission
+            the network itself refused, is better refused than missed.
             `CONFIRMED` means shipment has been confirmed to the network.
-          enum: [NEW, ACKNOWLEDGED, REJECTED, CONFIRMED]
+          enum: [NEW, SUBMITTED, ACKNOWLEDGED, REJECTED, CONFIRMED]
         requiredShipBy:
           type: string
           format: date-time

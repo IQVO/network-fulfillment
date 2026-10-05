@@ -267,7 +267,7 @@ func TestReceive_PlannerFailureLeavesNoAnswerOnTheNetwork(t *testing.T) {
 	}
 }
 
-func TestSweep_FreesTheHoldOfAnOrderThatWasNeverAnswered(t *testing.T) {
+func TestRejectOverdue_FreesTheHoldOfAnOrderThatWasNeverAnswered(t *testing.T) {
 	f := newFixture(true)
 
 	// An order received a full window ago and never answered.
@@ -295,18 +295,18 @@ func TestSweep_FreesTheHoldOfAnOrderThatWasNeverAnswered(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	sweep := &usecases.SweepAcknowledgementDeadlines{
+	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders:  f.orders,
 		Planner: f.planner,
 		Events:  nopPublisher{},
 		Clock:   fixedClock{t: now()},
 	}
-	res, err := sweep.Execute(context.Background())
+	res, err := rejectOverdue.Execute(context.Background())
 	if err != nil {
-		t.Fatalf("sweep: %v", err)
+		t.Fatalf("rejectOverdue: %v", err)
 	}
-	if res.Missed != 1 {
-		t.Fatalf("missed = %d, want 1", res.Missed)
+	if res.Rejected != 1 {
+		t.Fatalf("rejected = %d, want 1", res.Rejected)
 	}
 
 	// The operationally important part: the inventory is no longer held
@@ -321,6 +321,63 @@ func TestSweep_FreesTheHoldOfAnOrderThatWasNeverAnswered(t *testing.T) {
 	}
 }
 
+// TestSweep_ReportsAtRiskWithoutMutatingOrCallingThePlanner pins ADR
+// 0001 §6's actual rule: the sweep is a pure reporter. It takes no
+// Planner at all (a compile-time guarantee, not just a runtime
+// assertion) and must never call CancelHeldOrder or change state —
+// TestRejectOverdue_FreesTheHoldOfAnOrderThatWasNeverAnswered above is
+// the separate path that does that.
+func TestSweep_ReportsAtRiskWithoutMutatingOrCallingThePlanner(t *testing.T) {
+	f := newFixture(true)
+
+	local := shared.LocalOrderId("ord-held")
+	stuck := networkorder.Rehydrate("po-old", "site-1", now().Add(48*time.Hour),
+		now().Add(-time.Hour), now().Add(-25*time.Hour),
+		[]networkorder.Line{mustLine(t)}, networkorder.StateNew, &local)
+	if err := f.orders.Save(context.Background(), stuck); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var pub recordingEventPublisher
+	sweep := &usecases.SweepAcknowledgementDeadlines{
+		Orders: f.orders, Events: &pub, Clock: fixedClock{t: now()},
+	}
+	res, err := sweep.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if res.AtRisk != 1 {
+		t.Fatalf("atRisk = %d, want 1", res.AtRisk)
+	}
+	if len(pub.events) != 1 {
+		t.Fatalf("published events = %d, want 1 (AcknowledgementDeadlineAtRisk)", len(pub.events))
+	}
+	if _, ok := pub.events[0].(shared.AcknowledgementDeadlineAtRisk); !ok {
+		t.Fatalf("published event = %T, want shared.AcknowledgementDeadlineAtRisk", pub.events[0])
+	}
+
+	// Still NEW, still holding its local order: the sweep must not
+	// have touched the aggregate at all.
+	after, _ := f.orders.FindByRef(context.Background(), "po-old")
+	if after.State() != networkorder.StateNew {
+		t.Fatalf("state = %v, want unchanged NEW — the sweep must never mutate the aggregate (ADR 0001 §6)", after.State())
+	}
+	if got := after.LocalOrderId(); got == nil || *got != local {
+		t.Fatalf("localOrderId = %v, want still %v — the sweep must not touch the hold", got, local)
+	}
+}
+
+// recordingEventPublisher is a minimal ports.EventPublisher for
+// asserting WHICH event type was published, not just that something was.
+type recordingEventPublisher struct {
+	events []any
+}
+
+func (p *recordingEventPublisher) Publish(_ context.Context, event any) error {
+	p.events = append(p.events, event)
+	return nil
+}
+
 func TestSweep_LeavesOrdersInsideTheirWindowAlone(t *testing.T) {
 	f := newFixture(true)
 	if _, err := f.receive().Execute(context.Background(), demand("po-1", "ASIN-1")); err != nil {
@@ -329,15 +386,15 @@ func TestSweep_LeavesOrdersInsideTheirWindowAlone(t *testing.T) {
 	f.planner.calls = nil
 
 	sweep := &usecases.SweepAcknowledgementDeadlines{
-		Orders: f.orders, Planner: f.planner, Events: nopPublisher{},
+		Orders: f.orders, Events: nopPublisher{},
 		Clock: fixedClock{t: now().Add(time.Hour)},
 	}
 	res, err := sweep.Execute(context.Background())
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if res.Missed != 0 {
-		t.Fatalf("missed = %d, want 0", res.Missed)
+	if res.AtRisk != 0 {
+		t.Fatalf("atRisk = %d, want 0", res.AtRisk)
 	}
 	if len(f.planner.calls) != 0 {
 		t.Fatalf("planner calls = %v, want none", f.planner.calls)
