@@ -29,7 +29,7 @@ var ErrOrderNotFound = errors.New("network order not found")
 //     acknowledge in full what we cannot identify in full, and the
 //     network's protocol has no partial acknowledgement.
 //  2. RECORD receipt: Save the aggregate and Publish NetworkOrderReceived
-//     in one atomic scope (ADR NNNN, transactional outbox — see
+//     in one atomic scope (ADR 0003, transactional outbox — see
 //     saveAndPublishReceived). The store and the topic can never
 //     disagree about whether we received this demand.
 //  3. RAISE A HELD ORDER in order-management and ask it whether the

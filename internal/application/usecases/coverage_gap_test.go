@@ -137,7 +137,7 @@ func (p *selectiveFailPublisher) Publish(context.Context, any) error {
 
 // A publish failure on reject's own event now happens INSIDE the same
 // atomic Save+Publish scope as the state transition (the transactional
-// outbox, ADR NNNN): the network must never be told "no" for a rejection
+// outbox, ADR 0003): the network must never be told "no" for a rejection
 // that is not yet durably recorded, and inventory must not be
 // commitment-released for demand whose refusal never actually landed.
 // So neither the gateway submission nor anything after it may run.
