@@ -4,30 +4,44 @@ harness-template: v3
 
 Supporting bounded context: the anti-corruption layer between the fleet and
 an external retail fulfillment network. **Conformist** upstream, **ACL**
-downstream. Owns **NetworkOrder** (built) and **CapabilityOffer** (planned).
+downstream. Owns **NetworkOrder** and **CapabilityOffer** (both built).
 Study project, not production (see README.md banner).
 
 Read `docs/adr/0001-network-fulfillment-bounded-context.md` (companion of
-`order-management` ADR 0020) AND `docs/adr/0002-retail-network-not-amazon-counterpart.md`
+`order-management` ADR 0020) AND `docs/adr/0009-retail-network-not-amazon-counterpart.md`
 (Accepted, amends 0001: the counterpart is the fleet's own `retail-network`,
-not a real retailer's SP-API) before writing network-facing code. Note
-`docs/adr/0002-mcp-and-analytics-data-product.md` shares number 0002.
+not a real retailer's SP-API) before writing network-facing code. That ADR
+was renumbered from 0002 to 0009 on 2026-10-05 to resolve a duplicate
+ADR-0002 (`0002-mcp-and-analytics-data-product.md` keeps 0002); a stub at
+the old `0002-retail-network-not-amazon-counterpart.md` path redirects here.
 
 ## Current state
 
 Built: `NetworkOrder` aggregate, ACL boundary, use cases
-`ReceiveNetworkDemand` / `SweepAcknowledgementDeadlines`, in-memory and
-Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to boot, never
-a silent fallback), stub gateway, poller (inbound leg), READ-ONLY REST,
-CloudEvents Kafka publishers + outbox, analytics projector, MCP adapter,
-`web/` remote, Helm chart. Not built: `CapabilityOffer` and its Kafka caches,
-a live `retail-network` gateway, shipment confirmation, transaction-status
-reconciliation; no live network call exists.
+`ReceiveNetworkDemand` / `SweepAcknowledgementDeadlines` /
+`RejectOverdueOrders` / `ReconcileSubmittedOrders` (SUBMITTED state,
+ADR 0001 §5) / `ConfirmNetworkOrderShipment` (explicit endpoint, ADR 0014),
+in-memory and Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to
+boot, never a silent fallback), stub gateway (`NetworkGateway` port also
+declares the live-mode methods — `DeclareCapability`/`SubmitAvailability`/
+`RequestLabel`/`SubmissionStatus` — but no live HTTP adapter exists yet;
+`NETWORK_MODE=live` errors clearly until one is built), poller (inbound
+leg), READ-ONLY REST plus the one explicit write endpoint above, CloudEvents
+Kafka publishers + outbox, analytics projector, MCP adapter, `web/` remote,
+Helm chart. Also built (ADR 0001 §8): the `CapabilityOffer` aggregate, its
+three Kafka-fed caches (process-path cycle time, path capacity, and a
+synchronous inventory-storage read — see that ADR for why inventory is REST,
+not a cache), and the `GET /capability-offers` / `list_capability_offers`
+read surface, opt-in via `CAPABILITY_OFFER_ENABLED`.
+Not built: a live `retail-network` HTTP adapter, and the
+`adapters/outbound/network/` -> `outbound/retailnetwork/` package rename
+(still deferred).
 Operations, CI, branch protection, gremlins thresholds, related fleet
 ADRs: `docs/operations-notes.md`.
 
 Core concept: **throughput-constrained advertised availability**
-= `min(physicalAvailable, throughputFeasibleBefore(nextCutoff))` (ADR 0001).
+= `min(physicalAvailable, throughputFeasibleBefore(nextCutoff))` (ADR 0001,
+implemented by `CapabilityOffer.Compute()`).
 `.claude/rules/*.md` describe the code as it is; never write planned
 concepts into them as if they exist.
 
@@ -47,13 +61,13 @@ internal/adapters/outbound/{network,ordermanagement,postgres,memory,kafka,events
 ## Hard rules
 
 1. **The network's vocabulary stops at `adapters/outbound/network/`**
-   (becomes `outbound/retailnetwork/` per ADR 0002). `purchaseOrderNumber`,
+   (becomes `outbound/retailnetwork/` per ADR 0009). `purchaseOrderNumber`,
    `itemSequenceNumber`, `buyerProductIdentifier` (ASIN) and other
    real-retailer field names must never appear in `internal/domain` or
    anything published to the fleet; nor may `retail-network`'s (`poNumber`,
    `listingId`, `nodeId`, reason codes) leak past that package. `arch-go`
    cannot catch a vocabulary leak: that check is human.
-2. **No ship-to PII reaches this context** (ADR 0002 amending 0001): only
+2. **No ship-to PII reaches this context** (ADR 0009 amending 0001): only
    a `poNumber`, lines, quantities and `requiredShipBy` come in; a label
    request returns only `{labelRef, trackingNumber, carrier}`. Hence no
    auth for PII reasons; unauthenticated like every fleet context.
@@ -64,7 +78,7 @@ internal/adapters/outbound/{network,ordermanagement,postgres,memory,kafka,events
 5. **Network demand is ship-complete.** The network confirms or rejects a
    purchase order in full; partial acknowledgements are rejected. OM ADR
    0017's per-shipment-group promising must not apply.
-6. **`NETWORK_MODE=live|stub`, default `stub`** (ADR 0002 removed
+6. **`NETWORK_MODE=live|stub`, default `stub`** (ADR 0009 removed
    `sandbox`). The kind cluster, `e2e-tests` and CI must never need a
    credential. Log the chosen mode at startup.
 7. **A FirstOffset-replay Kafka cache needs a consumer group id unique per
@@ -74,9 +88,12 @@ internal/adapters/outbound/{network,ordermanagement,postgres,memory,kafka,events
    `submitShipmentConfirmations` return accepted-for-processing; reconcile
    via `getTransactionStatus`. A 200 is not a commitment: model
    submitted-but-unreconciled as its own state; release work only after
-   the acknowledgement reconciled to `SUCCESS` (ADR 0002 D5).
-9. **REST is read-only.** Demand arrives by polling only (ADR 0001 section
-   5); no write endpoint without a new ADR.
+   the acknowledgement reconciled to `SUCCESS` (ADR 0009 D5). Implemented via
+   the `SUBMITTED` status + `ReconcileSubmittedOrders` (ADR 0001 §5).
+9. **REST is read-only except the explicit shipment-confirmation endpoint**
+   (`POST /network-orders/{networkRef}/shipment-confirmation`, ADR 0014 —
+   demand itself still arrives by polling only, ADR 0001 §5); any further
+   write endpoint needs its own new ADR.
 
 ## Events: CloudEvents 1.0 is MANDATORY
 
