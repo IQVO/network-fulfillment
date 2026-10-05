@@ -1,13 +1,18 @@
 ---
-id: 0002-retail-network-not-amazon-counterpart
-slug: /adr/0002-retail-network-not-amazon-counterpart
-title: "2. The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API"
-sidebar_label: "2. retail-network, not the real network"
-sidebar_position: 2
-description: "ADR 0002 (Accepted) amends ADR 0001: the external retail fulfillment network this context is Conformist to is retail-network, a new service inside our own ecosystem playing that role — not an integration against a real e-commerce retailer's Selling Partner API. Renames the ACL adapter package, defers (not drops) a real SP-API adapter, and tightens the PII rule to zero ship-to data in this context at all."
+id: 0009-retail-network-not-amazon-counterpart
+slug: /adr/0009-retail-network-not-amazon-counterpart
+title: "9. The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API"
+sidebar_label: "9. retail-network, not the real network"
+sidebar_position: 9
+description: "ADR 0009 (Accepted) amends ADR 0001: the external retail fulfillment network this context is Conformist to is retail-network, a new service inside our own ecosystem playing that role — not an integration against a real e-commerce retailer's Selling Partner API. Renames the ACL adapter package, defers (not drops) a real SP-API adapter, and tightens the PII rule to zero ship-to data in this context at all."
 ---
 
-# 2. The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API
+# 9. The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API
+
+> Renumbered from ADR-0002 (2026-10) because this repo had two ADRs both
+> numbered 0002 (this one and `0002-mcp-and-analytics-data-product.md`,
+> which keeps 0002). Content unchanged; only the id/slug/title number and
+> cross-references moved.
 
 ## Status
 
@@ -168,7 +173,7 @@ that label encodes stays inside `retail-network`.
 
 ```
 Old (ADR 0001): "Customer PII stops here." (this context holds it)
-New (ADR 0002): "No ship-to PII reaches this context at all." (this
+New (ADR 0009): "No ship-to PII reaches this context at all." (this
                  context never holds it; retail-network does)
 ```
 
