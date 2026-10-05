@@ -8,6 +8,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/claudioed/network-fulfillment/internal/domain/capabilityoffer"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
@@ -109,4 +110,54 @@ func (t *ProductTranslation) ToSKU(_ context.Context, id shared.NetworkProductId
 		return "", shared.ErrUnknownProduct
 	}
 	return sku, nil
+}
+
+// KnownSKUs lists every distinct SKU this dictionary maps to.
+func (t *ProductTranslation) KnownSKUs(_ context.Context) ([]shared.SKU, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	seen := make(map[shared.SKU]struct{}, len(t.skm))
+	out := make([]shared.SKU, 0, len(t.skm))
+	for _, sku := range t.skm {
+		if _, dup := seen[sku]; dup {
+			continue
+		}
+		seen[sku] = struct{}{}
+		out = append(out, sku)
+	}
+	return out, nil
+}
+
+// CapabilityOfferRepo is an in-memory ports.CapabilityOfferRepo, keyed
+// by (SKU, SiteId) so Save genuinely upserts the one current snapshot
+// per pair rather than accumulating history.
+type CapabilityOfferRepo struct {
+	mu     sync.RWMutex
+	offers map[capabilityOfferKey]capabilityoffer.CapabilityOffer
+}
+
+type capabilityOfferKey struct {
+	sku    shared.SKU
+	siteId shared.SiteId
+}
+
+func NewCapabilityOfferRepo() *CapabilityOfferRepo {
+	return &CapabilityOfferRepo{offers: make(map[capabilityOfferKey]capabilityoffer.CapabilityOffer)}
+}
+
+func (r *CapabilityOfferRepo) Save(_ context.Context, o capabilityoffer.CapabilityOffer) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.offers[capabilityOfferKey{sku: o.SKU(), siteId: o.SiteId()}] = o
+	return nil
+}
+
+func (r *CapabilityOfferRepo) ListAll(_ context.Context) ([]capabilityoffer.CapabilityOffer, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]capabilityoffer.CapabilityOffer, 0, len(r.offers))
+	for _, o := range r.offers {
+		out = append(out, o)
+	}
+	return out, nil
 }

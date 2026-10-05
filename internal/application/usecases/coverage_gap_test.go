@@ -34,6 +34,10 @@ func (erroringTranslation) ToSKU(context.Context, shared.NetworkProductId) (shar
 	return "", errOtherTranslation
 }
 
+func (erroringTranslation) KnownSKUs(context.Context) ([]shared.SKU, error) {
+	return nil, nil
+}
+
 func TestReceive_NonUnknownProductTranslationFailureAborts(t *testing.T) {
 	f := newFixture(true)
 	uc := f.receive()
