@@ -207,6 +207,22 @@ func (g errSubmitGateway) SubmitAcknowledgement(context.Context, shared.NetworkR
 	return g.err
 }
 
+func (errSubmitGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
+	return nil
+}
+
+func (errSubmitGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
+	return nil
+}
+
+func (errSubmitGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
+	return contract.LabelResult{}, nil
+}
+
+func (errSubmitGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {
+	return contract.SubmissionSuccess, nil
+}
+
 func (errSubmitGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error {
 	return nil
 }

@@ -28,6 +28,9 @@ func (r *failingRepo) FindByRef(context.Context, shared.NetworkRef) (*networkord
 func (r *failingRepo) ListUnanswered(context.Context) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.listErr
 }
+func (r *failingRepo) ListSubmitted(context.Context) ([]*networkorder.NetworkOrder, error) {
+	return nil, r.listErr
+}
 func (r *failingRepo) ListAll(context.Context) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.listErr
 }
@@ -70,19 +73,26 @@ func TestReceive_SaveFailureLeavesNoAcknowledgementOnTheNetwork(t *testing.T) {
 	}
 }
 
-func TestReceive_ReleaseFailureIsReportedAfterAcknowledgement(t *testing.T) {
+func TestReconcile_ReleaseFailureIsReportedButOrderStaysAcknowledged(t *testing.T) {
 	f := newFixture(true)
+	if _, err := f.receive().Execute(context.Background(), demand("po-1", "ASIN-1")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
 	f.planner.releaseErr = errBoom
 
-	_, err := f.receive().Execute(context.Background(), demand("po-1", "ASIN-1"))
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("err = %v, want errBoom", err)
+	rc := &usecases.ReconcileSubmittedOrders{
+		Orders: f.orders, Gateway: f.gateway, Planner: f.planner,
+		Events: nopPublisher{}, Clock: fixedClock{t: now()},
+	}
+	if _, err := rc.Execute(context.Background()); err != nil {
+		t.Fatalf("reconcile must not abort the whole pass on one release failure: %v", err)
 	}
 
-	// The acknowledgement already went out and the record is saved, so
+	// The acknowledgement is already settled and the record is saved, so
 	// this is recoverable: the order is ACKNOWLEDGED with a local order
-	// that is still held, and a retry can release it. What must NOT
-	// happen is the failure being swallowed.
+	// that is still held, and a retry (the next reconciliation pass) can
+	// release it. What must NOT happen is the failure being swallowed
+	// silently or the order being left SUBMITTED.
 	o, _ := f.orders.FindByRef(context.Background(), "po-1")
 	if o == nil || o.State() != networkorder.StateAcknowledged {
 		t.Fatalf("order state = %v, want ACKNOWLEDGED and persisted", o)

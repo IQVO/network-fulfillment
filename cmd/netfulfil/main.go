@@ -181,6 +181,16 @@ func main() {
 	defer closeEventPublisher()
 
 	receive, sweep := wireUseCases(orders, gateway, planner, translation, eventPublisher, pool)
+	reconcile := &usecases.ReconcileSubmittedOrders{
+		Orders:  orders,
+		Gateway: gateway,
+		Planner: planner,
+		Events:  eventPublisher,
+		Clock:   systemClock{},
+	}
+	if pool != nil {
+		reconcile.UnitOfWork = postgres.NewUnitOfWork(pool)
+	}
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
 	// could create a NetworkOrder at all.
@@ -197,23 +207,29 @@ func main() {
 		MetricsRegistry: circuitBreakerMetrics.Registry,
 	}
 
-	serve(context.Background(), logger, newHTTPServer(api), sweep, inbound, relay, readiness)
+	serve(context.Background(), logger, newHTTPServer(api), sweep, reconcile, inbound, relay, readiness)
 }
 
 // wireGateway wires the outbound network gateway for the NETWORK_MODE env
 // var, returning the parsed mode alongside it so the composition root can
 // both log it at startup and expose it on the status surface — the
-// running value must be verifiable, not assumed.
+// running value must be verifiable, not assumed. NETWORK_BASE_URL is the
+// live-mode target (ADR 0009 §4); read here so it reaches the gateway
+// even though no live adapter exists yet to dial it with.
 func wireGateway(logger *slog.Logger) (ports.NetworkGateway, network.Mode, error) {
 	mode := network.ParseMode(os.Getenv("NETWORK_MODE"))
-	gateway, err := network.NewGateway(mode, logger)
+	baseURL := os.Getenv("NETWORK_BASE_URL")
+	if mode == network.ModeLive && baseURL == "" {
+		return nil, mode, fmt.Errorf("NETWORK_MODE=live requires NETWORK_BASE_URL to be set")
+	}
+	gateway, err := network.NewGateway(mode, baseURL, logger)
 	if err != nil {
 		// Refusing to boot is deliberate. A deployment that asked for a
 		// real network and silently got a stub would look healthy while
 		// answering nobody.
 		return nil, mode, err
 	}
-	logger.Info("network gateway wired", "mode", mode)
+	logger.Info("network gateway wired", "mode", mode, "baseURL", baseURL)
 	return gateway, mode, nil
 }
 
@@ -318,6 +334,7 @@ func serve(
 	logger *slog.Logger,
 	srv *http.Server,
 	sweep *usecases.SweepAcknowledgementDeadlines,
+	reconcile *usecases.ReconcileSubmittedOrders,
 	inbound *poller.Poller,
 	relay *postgres.OutboxRelay,
 	readiness *inboundhttp.Readiness,
@@ -326,6 +343,7 @@ func serve(
 	defer stop()
 
 	go runSweep(ctx, sweep, logger)
+	go runReconcile(ctx, reconcile, logger)
 
 	// pollerDone closes once inbound.Run's goroutine has returned —
 	// mirroring the outbox relay's own relayDone below — so graceful
@@ -437,6 +455,31 @@ func runSweep(ctx context.Context, sweep *usecases.SweepAcknowledgementDeadlines
 			}
 			if res.Missed > 0 {
 				logger.Warn("acknowledgement deadlines missed", "examined", res.Examined, "missed", res.Missed)
+			}
+		}
+	}
+}
+
+// runReconcile drives the submitted-order reconciliation pass (ADR 0001
+// §5) on its own ticker, reusing POLL_INTERVAL as the cadence: a
+// submission is meaningless to re-check faster than new demand can even
+// arrive, and this keeps the knob surface small rather than adding a
+// third interval env var for a v1.
+func runReconcile(ctx context.Context, reconcile *usecases.ReconcileSubmittedOrders, logger *slog.Logger) {
+	ticker := time.NewTicker(pollInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := reconcile.Execute(ctx)
+			if err != nil {
+				logger.Error("submitted-order reconciliation failed", "err", err)
+				continue
+			}
+			if res.Confirmed > 0 || res.Failed > 0 {
+				logger.Info("submitted orders reconciled", "examined", res.Examined, "confirmed", res.Confirmed, "failed", res.Failed, "pending", res.Pending)
 			}
 		}
 	}

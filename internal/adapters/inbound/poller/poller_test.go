@@ -66,6 +66,18 @@ func (g *fakeGateway) PollDemand(_ context.Context, since time.Time) ([]contract
 func (g *fakeGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, bool) error {
 	return nil
 }
+func (g *fakeGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
+	return nil
+}
+func (g *fakeGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
+	return nil
+}
+func (g *fakeGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
+	return contract.LabelResult{}, nil
+}
+func (g *fakeGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {
+	return contract.SubmissionSuccess, nil
+}
 func (g *fakeGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error {
 	return nil
 }

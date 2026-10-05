@@ -71,6 +71,12 @@ const (
 	// acknowledgement window closed with no answer ever sent
 	// (SweepAcknowledgementDeadlines).
 	RejectionReasonAcknowledgementDeadlineMissed RejectionReason = "ACKNOWLEDGEMENT_DEADLINE_MISSED"
+
+	// RejectionReasonSubmissionFailed: a submitted acknowledgement's
+	// transaction-status reconciliation (ADR 0001 §5) reported FAILURE —
+	// the network itself refused what we told it we would do
+	// (ReconcileSubmittedOrders).
+	RejectionReasonSubmissionFailed RejectionReason = "SUBMISSION_FAILED"
 )
 
 // NetworkOrderRejected is raised whenever we tell the network no — inside

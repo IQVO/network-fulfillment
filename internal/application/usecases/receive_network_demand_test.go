@@ -114,8 +114,13 @@ func TestReceive_FeasibleDemandIsAcknowledgedAndReleased(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if o.State() != networkorder.StateAcknowledged {
-		t.Fatalf("state = %v, want ACKNOWLEDGED", o.State())
+	// SUBMITTED, not yet ACKNOWLEDGED: ADR 0001 §5 models this
+	// submission as pending until a later reconciliation pass confirms
+	// it (see TestReceive_FeasibleDemandIsSubmittedNotYetReleased and
+	// TestReconcile_SuccessConfirmsAndReleases in
+	// reconcile_submitted_orders_test.go for the rest of this path).
+	if o.State() != networkorder.StateSubmitted {
+		t.Fatalf("state = %v, want SUBMITTED", o.State())
 	}
 
 	accepted, submitted := f.gateway.Acknowledgement("po-1")
@@ -123,9 +128,10 @@ func TestReceive_FeasibleDemandIsAcknowledgedAndReleased(t *testing.T) {
 		t.Fatalf("acknowledgement submitted=%v accepted=%v, want true/true", submitted, accepted)
 	}
 
-	// Release is LAST: nothing reaches the floor until every fallible
-	// step has already succeeded.
-	want := []string{"raise", "release"}
+	// Release is deferred to reconciliation, not performed here: nothing
+	// may reach the floor until the submission is actually confirmed,
+	// not merely accepted-for-processing.
+	want := []string{"raise"}
 	if got := f.planner.calls; !equal(got, want) {
 		t.Fatalf("planner calls = %v, want %v", got, want)
 	}
@@ -270,8 +276,11 @@ func TestSweep_FreesTheHoldOfAnOrderThatWasNeverAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Receive: %v", err)
 	}
-	if err := o.Acknowledge(); err != nil {
-		t.Fatalf("Acknowledge: %v", err)
+	if err := o.Submit(); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := o.ConfirmAcknowledgement(); err != nil {
+		t.Fatalf("ConfirmAcknowledgement: %v", err)
 	}
 	if err := o.LinkLocalOrder("ord-held"); err != nil {
 		t.Fatalf("LinkLocalOrder: %v", err)
