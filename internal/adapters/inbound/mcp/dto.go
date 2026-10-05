@@ -3,8 +3,31 @@ package mcp
 import (
 	"time"
 
+	"github.com/claudioed/network-fulfillment/internal/domain/capabilityoffer"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 )
+
+// capabilityOfferDTO is one CapabilityOffer (ADR 0001 §8) as this MCP
+// surface exposes it, mirroring the HTTP adapter's capabilityOfferResponse
+// field-for-field for the same reason networkOrderDTO mirrors
+// networkOrderResponse.
+type capabilityOfferDTO struct {
+	SKU                string `json:"sku"`
+	SiteId             string `json:"siteId"`
+	AdvertisedQuantity int    `json:"advertisedQuantity"`
+	Basis              string `json:"basis"`
+	ComputedAt         string `json:"computedAt"`
+}
+
+func toCapabilityOfferDTO(o capabilityoffer.CapabilityOffer) capabilityOfferDTO {
+	return capabilityOfferDTO{
+		SKU:                string(o.SKU()),
+		SiteId:             string(o.SiteId()),
+		AdvertisedQuantity: o.AdvertisedQuantity(),
+		Basis:              string(o.Basis()),
+		ComputedAt:         o.ComputedAt().UTC().Format(time.RFC3339),
+	}
+}
 
 // networkOrderDTO is a NetworkOrder as this MCP surface exposes it. It
 // deliberately mirrors internal/adapters/inbound/http's

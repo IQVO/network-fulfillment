@@ -1,20 +1,25 @@
 // Package http is this context's inbound REST adapter.
 //
-// It is deliberately READ-ONLY. Demand enters this context by polling the
-// network (ADR 0001 §5) and by nothing else: the network offers us no
+// It is almost entirely READ-ONLY. Demand enters this context by polling
+// the network (ADR 0001 §5) and by nothing else: the network offers us no
 // push, so an HTTP intake endpoint would be a second, fictional inbound
 // path with no counterpart in production — and the only thing it could
 // genuinely be used for is injecting test demand, which the stub
 // gateway's file-seeded mode already does honestly.
 //
-// So what is here is observation: what did we tell the network, and is
-// the inbound leg alive. Both are questions an operator has during an
-// incident and cannot currently answer without reading logs.
+// So most of what is here is observation: what did we tell the network,
+// and is the inbound leg alive. Both are questions an operator has during
+// an incident and cannot currently answer without reading logs. The one
+// exception is POST /network-orders/{networkRef}/shipment-confirmation
+// (docs/adr/0009-explicit-shipment-confirmation-endpoint.md): a narrow,
+// explicitly-ADR'd write endpoint for a fact this context is TOLD, not
+// demand it decides on.
 package http
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -56,6 +61,13 @@ type Server struct {
 	// simply not registered — every pre-existing caller/test that does
 	// not care about metrics is unaffected.
 	MetricsRegistry *prometheus.Registry
+	// Offers backs GET /capability-offers (ADR 0001 §8). A nil Offers
+	// means that route is simply not registered, matching every other
+	// optional dependency in this Server.
+	Offers ports.CapabilityOfferRepo
+	// ConfirmShipment backs the one write endpoint this adapter has
+	// (ADR 0009). A nil value means that route is not registered.
+	ConfirmShipment *usecases.ConfirmNetworkOrderShipment
 }
 
 // Routes returns this adapter's handler.
@@ -71,6 +83,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /inbound-status", s.handleInboundStatus)
 	if s.MetricsRegistry != nil {
 		mux.Handle("GET /metrics", promhttp.HandlerFor(s.MetricsRegistry, promhttp.HandlerOpts{}))
+	}
+	if s.Offers != nil {
+		mux.HandleFunc("GET /capability-offers", s.handleListCapabilityOffers)
+	}
+	if s.ConfirmShipment != nil {
+		mux.HandleFunc("POST /network-orders/{networkRef}/shipment-confirmation", s.handleConfirmShipment)
 	}
 	return corsMiddleware()(mux)
 }
@@ -155,6 +173,44 @@ func (s *Server) handleInboundStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK,
 		toInboundStatusResponse(s.NetworkMode, s.Poller.Stats(), unanswered, overdue))
+}
+
+// handleListCapabilityOffers lists every currently-advertised
+// CapabilityOffer (ADR 0001 §8): the figure this context would tell the
+// network it can ship for each (SKU, site) it knows about.
+func (s *Server) handleListCapabilityOffers(w http.ResponseWriter, r *http.Request) {
+	offers, err := s.Offers.ListAll(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	out := make([]capabilityOfferResponse, 0, len(offers))
+	for _, o := range offers {
+		out = append(out, toCapabilityOfferResponse(o))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"capabilityOffers": out})
+}
+
+// handleConfirmShipment is this adapter's one write endpoint (ADR 0009):
+// POST /network-orders/{networkRef}/shipment-confirmation, empty body,
+// 204 on success. See ConfirmNetworkOrderShipment's own doc comment for
+// why this is an explicit call rather than a PackageManifested
+// correlation.
+func (s *Server) handleConfirmShipment(w http.ResponseWriter, r *http.Request) {
+	ref := shared.NetworkRef(r.PathValue("networkRef"))
+	if ref == "" {
+		writeError(w, r, shared.ErrEmptyNetworkRef)
+		return
+	}
+	if _, err := s.ConfirmShipment.Execute(r.Context(), ref); err != nil {
+		if errors.Is(err, usecases.ErrOrderNotFound) {
+			writeError(w, r, usecases.ErrOrderNotFound)
+			return
+		}
+		writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) countUnanswered(ctx context.Context) (unanswered, overdue int, err error) {

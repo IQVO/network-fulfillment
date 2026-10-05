@@ -20,9 +20,9 @@ import (
 // this adapter follows the SAME convention so the two read surfaces
 // cannot drift onto two different query paths.
 //
-// This context is read-only to the rest of the system (ADR 0001 §5), so
-// every dependency here is a read dependency. There is no write use case
-// and no write tool.
+// This surface is entirely read-only (the one write affordance this
+// context has, ADR 0009's shipment-confirmation endpoint, is REST-only
+// today). Every dependency here is a read dependency.
 type Deps struct {
 	// Orders is the same ports.NetworkOrderRepo the HTTP adapter reads,
 	// backing get_network_order and list_network_orders.
@@ -36,6 +36,9 @@ type Deps struct {
 	// that tool is not registered (an MCP deployment without the
 	// reports service).
 	Reports ReportsClient
+	// Offers backs list_capability_offers (ADR 0001 §8). When nil, that
+	// tool is not registered.
+	Offers ports.CapabilityOfferRepo
 }
 
 // --- get_network_order ----------------------------------------------------
@@ -99,6 +102,24 @@ func (d Deps) listNetworkOrders(ctx context.Context, in listNetworkOrdersInput) 
 	return out, nil
 }
 
+// --- list_capability_offers --------------------------------------------
+
+type listCapabilityOffersOutput struct {
+	CapabilityOffers []capabilityOfferDTO `json:"capabilityOffers"`
+}
+
+func (d Deps) listCapabilityOffers(ctx context.Context, _ struct{}) (listCapabilityOffersOutput, error) {
+	offers, err := d.Offers.ListAll(ctx)
+	if err != nil {
+		return listCapabilityOffersOutput{}, err
+	}
+	out := listCapabilityOffersOutput{CapabilityOffers: make([]capabilityOfferDTO, 0, len(offers))}
+	for _, o := range offers {
+		out.CapabilityOffers = append(out.CapabilityOffers, toCapabilityOfferDTO(o))
+	}
+	return out, nil
+}
+
 // --- registration -----------------------------------------------------------
 
 // registerTools adds every tool to the server.
@@ -125,6 +146,16 @@ func (d Deps) registerTools(server *mcp.Server) {
 	// Curated read-only data-product tool, registered only when the
 	// reports client is configured.
 	d.registerReportTool(server)
+
+	// list_capability_offers, registered only when the Offers repo is
+	// configured (ADR 0001 §8).
+	if d.Offers != nil {
+		addTool(server, &mcp.Tool{
+			Name:        "list_capability_offers",
+			Description: "List every currently-advertised CapabilityOffer (ADR 0001 §8): the throughput-constrained advertised quantity this context would tell the network it can ship, per SKU and site, and whether that figure is limited by physical stock (PHYSICAL) or by the process path's remaining admission capacity before its next cutoff (THROUGHPUT_CONSTRAINED).",
+			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
+		}, d.listCapabilityOffers)
+	}
 }
 
 // addTool registers one tool. network-fulfillment has no OTel package
