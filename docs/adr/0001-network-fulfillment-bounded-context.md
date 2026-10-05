@@ -18,6 +18,14 @@ deadline without the two capabilities that record adds, and those
 capabilities have no caller until this context exists. Raised together
 so the boundary can be accepted or rejected as one decision.
 
+Amended by ADR-0009 (`retail-network, not the real network`): the
+external network this record describes in the real e-commerce
+retailer's own vocabulary is, concretely, `retail-network` — this
+fleet's own ecosystem service playing that structural role — and
+`NETWORK_MODE`'s `sandbox` tier (§4 below) is retired. ADR 0009's own
+Decision section records exactly what changes and what, in this
+record's reasoning and shape, stands unmodified.
+
 ## Context
 
 ### What "selling capability to a network" actually means

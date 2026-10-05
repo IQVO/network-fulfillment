@@ -322,7 +322,7 @@ func TestInboundStatus_ReportsModeCountsAndOverdue(t *testing.T) {
 			Since: time.Date(2026, 9, 23, 7, 55, 0, 0, time.UTC),
 		}},
 		Clock:       fixedClock{t: now()},
-		NetworkMode: "sandbox",
+		NetworkMode: "live",
 	}
 	e := &testEnv{orders: orders, handler: srv.Routes()}
 	e.seed(t, "po-late", 30*time.Hour)
@@ -346,8 +346,8 @@ func TestInboundStatus_ReportsModeCountsAndOverdue(t *testing.T) {
 	}
 
 	// The running mode must be verifiable, not assumed.
-	if got.NetworkMode != "sandbox" {
-		t.Fatalf("networkMode = %q, want sandbox", got.NetworkMode)
+	if got.NetworkMode != "live" {
+		t.Fatalf("networkMode = %q, want live", got.NetworkMode)
 	}
 	if got.Polls != 7 || got.Received != 4 || got.Failed != 1 {
 		t.Fatalf("counters = %+v, want 7/4/1", got)

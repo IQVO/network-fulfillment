@@ -17,10 +17,10 @@ call locally, which is why it needs no credentials and no Secret. That is
 the intended default for local clusters and e2e runs -- an install that
 reached a real retailer's API by accident would acknowledge real orders.
 
-To integrate for real, set config.networkMode to "sandbox" (or "live")
-AND provide credentials via credentials.* or credentials.existingSecret.
-The binary refuses to boot in those modes without them rather than
-falling back to stub.
+To integrate for real, set config.networkMode to "live" and
+config.networkBaseUrl, AND provide credentials via credentials.* or
+credentials.existingSecret. The binary refuses to boot in live mode
+without them rather than falling back to stub.
 {{- else }}
 
   !! This install is configured for {{ .Values.config.networkMode }} mode.

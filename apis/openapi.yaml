@@ -453,7 +453,7 @@ components:
             The gateway mode actually in force, echoed so it can be
             verified rather than assumed. `stub` reaches no external
             network and needs no credentials.
-          enum: [stub, sandbox, live]
+          enum: [stub, live]
         polls:
           type: integer
           description: Poll passes attempted since start.

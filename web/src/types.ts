@@ -44,7 +44,7 @@ export interface ListNetworkOrdersResponse {
  *  `since` is ABSENT before any poll has completed cleanly, which after
  *  real uptime is itself the signal that no poll has ever succeeded. */
 export interface InboundStatus {
-  networkMode: "stub" | "sandbox" | "live";
+  networkMode: "stub" | "live";
   polls: number;
   received: number;
   failed: number;
