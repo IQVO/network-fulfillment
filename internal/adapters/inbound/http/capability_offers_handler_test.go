@@ -25,6 +25,18 @@ func (nopGateway) PollDemand(context.Context, time.Time) ([]contract.InboundDema
 
 func (nopGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, bool) error { return nil }
 func (nopGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error  { return nil }
+func (nopGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
+	return nil
+}
+func (nopGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
+	return nil
+}
+func (nopGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
+	return contract.LabelResult{}, nil
+}
+func (nopGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {
+	return contract.SubmissionSuccess, nil
+}
 
 type nopPublisher struct{}
 

@@ -21,15 +21,25 @@ func (f *fixture) confirmShipment() *usecases.ConfirmNetworkOrderShipment {
 	}
 }
 
-// acknowledgedOrder seeds and acknowledges one order via the real
-// ReceiveNetworkDemand use case, end to end, so these tests exercise
-// ConfirmNetworkOrderShipment against a genuinely ACKNOWLEDGED aggregate
-// rather than a hand-built one.
+// acknowledgedOrder seeds, acknowledges and reconciles one order via the
+// real ReceiveNetworkDemand + ReconcileSubmittedOrders use cases, end to
+// end, so these tests exercise ConfirmNetworkOrderShipment against a
+// genuinely ACKNOWLEDGED aggregate rather than a hand-built one. Since
+// ADR 0001 §5's two-phase submit/reconcile split, ReceiveNetworkDemand
+// alone only reaches SUBMITTED; a reconciliation pass (the stub gateway
+// reconciles deterministically to SUCCESS) is what settles it to
+// ACKNOWLEDGED.
 func acknowledgedOrder(t *testing.T, f *fixture, ref shared.NetworkRef) *networkorder.NetworkOrder {
 	t.Helper()
-	o, err := f.receive().Execute(context.Background(), demand(ref, "ASIN-1"))
-	if err != nil {
+	if _, err := f.receive().Execute(context.Background(), demand(ref, "ASIN-1")); err != nil {
 		t.Fatalf("seed receive: %v", err)
+	}
+	if _, err := f.reconcile().Execute(context.Background()); err != nil {
+		t.Fatalf("seed reconcile: %v", err)
+	}
+	o, err := f.orders.FindByRef(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("seed find: %v", err)
 	}
 	if o.State() != networkorder.StateAcknowledged {
 		t.Fatalf("seed state = %v, want ACKNOWLEDGED (feasible fixture)", o.State())
@@ -181,4 +191,20 @@ func (errSubmitConfirmationGateway) SubmitAcknowledgement(context.Context, share
 
 func (g errSubmitConfirmationGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error {
 	return g.err
+}
+
+func (errSubmitConfirmationGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
+	return nil
+}
+
+func (errSubmitConfirmationGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
+	return nil
+}
+
+func (errSubmitConfirmationGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
+	return contract.LabelResult{}, nil
+}
+
+func (errSubmitConfirmationGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {
+	return contract.SubmissionSuccess, nil
 }
