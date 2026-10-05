@@ -88,7 +88,7 @@ What exists today:
 
 Not built yet:
 
-- **`NETWORK_MODE=sandbox|live`**: both refuse to boot with "not implemented
+- **`NETWORK_MODE=live`**: refuses to boot with "not implemented
   yet". Only the stub gateway exists, so no call to a real network is made.
 - **`CapabilityOffer`** / throughput-constrained advertised availability,
   and shipment confirmation. `NetworkOrder.ConfirmShipment` exists in the
@@ -186,16 +186,17 @@ apis/openapi.yaml              REST contract (Spectral-linted in CI)
 charts/network-fulfillment/    Helm chart (+ Python wiring tests)
 ```
 
-`NETWORK_MODE=live|sandbox|stub` gates every outbound call to the network.
+`NETWORK_MODE=live|stub` gates every outbound call to the network.
 It defaults to `stub`, and any unrecognised value is also treated as `stub`.
 The kind cluster, `e2e-tests` and CI run in `stub` and never need a
-credential.
+credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 
 ## Configuration
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `NETWORK_MODE` | `stub` | `sandbox`/`live` currently refuse to boot (not implemented) |
+| `NETWORK_MODE` | `stub` | `live` currently refuses to boot (not implemented) |
+| `NETWORK_BASE_URL` | unset | live-mode target (ADR 0009 §4); only read when `NETWORK_MODE=live` |
 | `ORDER_MANAGEMENT_URL` | `http://localhost:8080` | base URL for the held-order calls |
 | `DATABASE_URL` | unset (in-memory) | set = Postgres or refuse to boot |
 | `MIGRATIONS_PATH` | `/app/migrations` | override for a local run from the repo root |

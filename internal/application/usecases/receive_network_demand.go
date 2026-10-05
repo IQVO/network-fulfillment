@@ -29,7 +29,7 @@ var ErrOrderNotFound = errors.New("network order not found")
 //     acknowledge in full what we cannot identify in full, and the
 //     network's protocol has no partial acknowledgement.
 //  2. RECORD receipt: Save the aggregate and Publish NetworkOrderReceived
-//     in one atomic scope (ADR NNNN, transactional outbox — see
+//     in one atomic scope (ADR 0003, transactional outbox — see
 //     saveAndPublishReceived). The store and the topic can never
 //     disagree about whether we received this demand.
 //  3. RAISE A HELD ORDER in order-management and ask it whether the
@@ -221,7 +221,7 @@ func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.Netw
 // step before it — including the record and the network submission — has
 // already succeeded.
 func (uc *ReceiveNetworkDemand) acknowledge(ctx context.Context, o *networkorder.NetworkOrder, result contract.HeldOrderResult) (*networkorder.NetworkOrder, error) {
-	if err := o.Acknowledge(); err != nil {
+	if err := o.Submit(); err != nil {
 		return nil, err
 	}
 	if err := o.LinkLocalOrder(result.LocalOrderId); err != nil {
@@ -244,8 +244,11 @@ func (uc *ReceiveNetworkDemand) acknowledge(ctx context.Context, o *networkorder
 	if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), true); err != nil {
 		return nil, fmt.Errorf("submit acknowledgement: %w", err)
 	}
-	if err := uc.Planner.ReleaseHeldOrder(ctx, result.LocalOrderId); err != nil {
-		return nil, fmt.Errorf("release held order: %w", err)
-	}
+	// Deliberately NOT released here. ADR 0001 §5 models this submission
+	// as pending until a later transaction-status query reconciles it;
+	// releasing now would commit real work to the floor for a
+	// submission that is merely accepted-for-processing, not yet a
+	// settled commitment. ReconcileSubmittedOrders performs the release,
+	// once SubmissionStatus actually confirms it.
 	return o, nil
 }

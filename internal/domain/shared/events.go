@@ -71,6 +71,12 @@ const (
 	// acknowledgement window closed with no answer ever sent
 	// (SweepAcknowledgementDeadlines).
 	RejectionReasonAcknowledgementDeadlineMissed RejectionReason = "ACKNOWLEDGEMENT_DEADLINE_MISSED"
+
+	// RejectionReasonSubmissionFailed: a submitted acknowledgement's
+	// transaction-status reconciliation (ADR 0001 §5) reported FAILURE —
+	// the network itself refused what we told it we would do
+	// (ReconcileSubmittedOrders).
+	RejectionReasonSubmissionFailed RejectionReason = "SUBMISSION_FAILED"
 )
 
 // NetworkOrderRejected is raised whenever we tell the network no — inside
@@ -105,3 +111,21 @@ type NetworkOrderShipmentConfirmed struct {
 
 func (e NetworkOrderShipmentConfirmed) EventName() string     { return "NetworkOrderShipmentConfirmed" }
 func (e NetworkOrderShipmentConfirmed) OccurredAt() time.Time { return e.At }
+
+// AcknowledgementDeadlineAtRisk is raised by SweepAcknowledgementDeadlines
+// for every order found still NEW past its acknowledgeBy instant (ADR
+// 0001 §6). It is a REPORTED FACT, not a state transition: the sweep
+// itself never mutates the aggregate, and this event is expected to
+// re-fire on every pass for as long as the condition holds true — a
+// consumer must not treat it as edge-triggered. RejectOverdueOrders is
+// the separate path that performs the actual rejection, with its own
+// audit trail (NetworkOrderRejected, reason=ACKNOWLEDGEMENT_DEADLINE_MISSED).
+type AcknowledgementDeadlineAtRisk struct {
+	NetworkRef    NetworkRef `json:"networkRef"`
+	SiteId        SiteId     `json:"siteId"`
+	AcknowledgeBy time.Time  `json:"acknowledgeBy"`
+	At            time.Time  `json:"at"`
+}
+
+func (e AcknowledgementDeadlineAtRisk) EventName() string     { return "AcknowledgementDeadlineAtRisk" }
+func (e AcknowledgementDeadlineAtRisk) OccurredAt() time.Time { return e.At }

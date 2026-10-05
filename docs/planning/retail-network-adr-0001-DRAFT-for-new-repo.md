@@ -23,11 +23,13 @@ description: "ADR 0001 (Accepted) — why the ecosystem's own stand-in for an ex
 
 ## Status
 
-**Accepted** (2026-09-26). Companion to `network-fulfillment` ADR 0002 (drafted at
-`network-fulfillment/docs/docs/adr/0002-retail-network-not-amazon-counterpart.md`
-in that repo's real ADR sequence). Neither is meaningful without the
+**Accepted** (2026-09-26). Companion to `network-fulfillment` ADR 0009 (drafted at
+`network-fulfillment/docs/adr/0009-retail-network-not-amazon-counterpart.md`
+in that repo's real ADR sequence; originally drafted as ADR 0002 there,
+renumbered to 0009 in 2026-10 because that repo had a duplicate 0002).
+Neither is meaningful without the
 other: this record defines the organization `network-fulfillment` ADR
-0002 says it is now conformist to, and ADR 0002 records the rename and
+0009 says it is now conformist to, and ADR 0009 records the rename and
 narrowing (`adapters/outbound/network/` → `adapters/outbound/retailnetwork/`,
 no ship-to PII in that context at all) that only make sense once this
 context is agreed to exist. Raised together so the boundary can be
@@ -357,7 +359,7 @@ to build.
   (`network-fulfillment` ADR 0001, "Deliberately out of scope").
 - A second network (a distinct organization playing a second retailer).
 - A real e-commerce retailer's SP-API adapter. Explicitly **deferred, not
-  dropped** — see the companion `network-fulfillment` ADR 0002 — as an
+  dropped** — see the companion `network-fulfillment` ADR 0009 — as an
   adapter swap behind the same `NetworkGateway` port, should this project
   ever want to integrate against the genuine article.
 
