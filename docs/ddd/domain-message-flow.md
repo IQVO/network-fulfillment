@@ -87,7 +87,9 @@ Source: `internal/application/usecases/receive_network_demand.go`
 
 Omitted: the untranslatable path never calls `order-management` at all.
 In the `FAILURE` path the network already knows its own refusal, so no
-second `SubmitAcknowledgement` is sent.
+second `SubmitAcknowledgement` is sent. The analytics projector counts a
+`SUBMISSION_FAILED` rejection in `orders_rejected_submission_failed`
+(surfaced as `ordersRejectedSubmissionFailed` in the acknowledgement report).
 
 ## 3. Acknowledgement window missed
 

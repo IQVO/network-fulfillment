@@ -50,9 +50,12 @@ CREATE INDEX idx_network_orders_unanswered
     ON network_orders (acknowledge_by)
     WHERE state = 'NEW';
 
--- Reverse lookup for the shipment-confirmation leg: PackageManifested
--- arrives carrying order-management's id, and this context must find the
--- network order to confirm back to the network.
+-- Reverse lookup (local_order_id -> network order) for a future
+-- PackageManifested-driven shipment-confirmation leg. NOTE: no code queries
+-- this index today. ADR 0014 chose an explicit endpoint
+-- (POST /network-orders/{networkRef}/shipment-confirmation, addressed by
+-- networkRef) over correlating PackageManifested, because no persisted
+-- WorkUnitId -> NetworkRef mapping exists; the index is kept for when it does.
 CREATE INDEX idx_network_orders_local_order
     ON network_orders (local_order_id)
     WHERE local_order_id IS NOT NULL;

@@ -5,7 +5,7 @@ description: Add or change a REST endpoint in this service in the fleet's hexago
 
 # How to add a REST endpoint
 
-> **Read this first.** The REST surface is **read-only by design** (see
+> **Read this first.** The REST surface is **read-only by design** apart from the single shipment-confirmation write (see
 > `.claude/rules/rest-api.md` and ADR 0001 section 5): demand arrives only
 > by polling, so do **not** add a write/intake endpoint without a new ADR.
 > This guide therefore covers adding a new *read* route. There is no docs

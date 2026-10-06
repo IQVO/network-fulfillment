@@ -17,7 +17,7 @@ Procedure:
 
 Interpretation:
 - acknowledgementOverdue=true on an order in NEW means its 24-hour window has already closed with no answer ever sent — this is the sweep's own definition of overdue, not a local approximation.
-- A rejection with reason UNTRANSLATABLE_SKU is a catalogue gap (no SKU mapping existed for a product the network sent); INFEASIBLE_DEADLINE is a genuine capacity refusal from order-management's promise policy; ACKNOWLEDGEMENT_DEADLINE_MISSED is an operational failure (the window closed unanswered).
+- A rejection with reason UNTRANSLATABLE_SKU is a catalogue gap (no SKU mapping existed for a product the network sent); INFEASIBLE_DEADLINE is a genuine capacity refusal from order-management's promise policy; ACKNOWLEDGEMENT_DEADLINE_MISSED is an operational failure (the window closed unanswered); SUBMISSION_FAILED means we submitted an acknowledgement but the network's own transaction-status reconciliation reported failure.
 - This surface never carries customer PII (ship-to name, address, phone): those live in a different bounded context entirely and are out of scope for every tool here.
 
 Done means: you have named the specific network reference(s), state(s), or report window that answers the question, each justified from tool output. Do not attempt to change anything; this service exposes no write tool.`

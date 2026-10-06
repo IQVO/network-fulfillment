@@ -9,6 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/eventwire"
+	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
 // LogPublisher publishes domain events by logging them as JSON. It is the
@@ -27,8 +30,16 @@ func NewLogPublisher(logger *slog.Logger) *LogPublisher {
 	return &LogPublisher{logger: logger}
 }
 
-// Publish logs event as JSON.
+// Publish logs event as JSON. A shared.DomainEvent is logged in its
+// adapter-owned wire shape (eventwire.Payload), the same as on Kafka.
 func (p *LogPublisher) Publish(ctx context.Context, event any) error {
+	if de, ok := event.(shared.DomainEvent); ok {
+		wire, err := eventwire.Payload(de)
+		if err != nil {
+			return err
+		}
+		event = wire
+	}
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return err

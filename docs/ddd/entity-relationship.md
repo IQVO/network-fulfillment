@@ -6,7 +6,7 @@ separate databases:
 - the **OLTP** database (`DATABASE_URL`): `migrations/0001_init`,
   `0002_outbox`, `0003_submitted_state`, `0004_capability_offers`;
 - the **analytical** database (`ANALYTICS_DATABASE_URL`):
-  `migrations/analytics/0001_report`.
+  `migrations/analytics/0001_report`, `0002_rejected_submission_failed`.
 
 With `DATABASE_URL` unset the service runs on in-memory repositories and
 uses neither.
@@ -111,6 +111,7 @@ erDiagram
         BIGINT orders_rejected_untranslatable_sku
         BIGINT orders_rejected_domain
         BIGINT acknowledgement_deadlines_missed
+        BIGINT orders_rejected_submission_failed
     }
     schema_migrations {
         BIGINT version PK
@@ -118,7 +119,9 @@ erDiagram
     }
 ```
 
-Source: `migrations/analytics/0001_report.up.sql`;
+Source: `migrations/analytics/0001_report.up.sql` and
+`0002_rejected_submission_failed.up.sql` (adds
+`orders_rejected_submission_failed`);
 `internal/adapters/outbound/analyticsstore/postgres_projection.go`,
 `consumed_events_repo.go`.
 

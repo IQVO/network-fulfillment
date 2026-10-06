@@ -508,3 +508,85 @@ func anyContains(items []string, sub string) bool {
 	}
 	return false
 }
+
+// domainTagRE matches a Go struct tag that carries serialisation metadata
+// (`json:"..."` or `db:"..."`) inside a backtick-delimited tag literal.
+var domainTagRE = regexp.MustCompile("`[^`]*\\b(json|db):\"[^`]*`")
+
+// domainTagWhitelist lists non-test files under internal/domain/** that may
+// keep serialisation tags, each with the reason. Empty: wire shape belongs
+// to adapters (see internal/adapters/outbound/eventwire).
+var domainTagWhitelist = map[string]string{}
+
+// domainTagViolations returns file:line violations for one file: any
+// non-comment line declaring a `json:"` / `db:"` struct tag. Pure over
+// (path) so the fixture test can feed it bad input.
+func domainTagViolations(t *testing.T, path string) []string {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var out []string
+	lineNo := 0
+	scanner := bufio.NewScanner(strings.NewReader(string(src)))
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Text()
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		if domainTagRE.MatchString(line) {
+			out = append(out, fmt.Sprintf("%s:%d: domain struct carries a serialisation tag (%q) — wire/storage shape is an adapter concern; map through an adapter-owned DTO (see internal/adapters/outbound/eventwire) and keep internal/domain/** tag-free", path, lineNo, strings.TrimSpace(line)))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan %s: %v", path, err)
+	}
+	return out
+}
+
+// TestDomainHasNoSerialisationTags: no `json:"` / `db:"` struct tags in
+// non-test files under internal/domain/** (ADR: serialisation lives in
+// adapters, so a wire-format change never touches the domain).
+func TestDomainHasNoSerialisationTags(t *testing.T) {
+	for _, path := range goFilesUnder(t, "../domain", false) {
+		if reason, ok := domainTagWhitelist[filepath.ToSlash(path)]; ok && reason != "" {
+			continue
+		}
+		for _, v := range domainTagViolations(t, path) {
+			t.Error(v)
+		}
+	}
+}
+
+// TestDomainTagSensorFailsOnBadFixtures proves the sensor can fail: tagged
+// structs are reported, an untagged struct and comment mentions are not.
+func TestDomainTagSensorFailsOnBadFixtures(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"json tag", "package x\n\ntype E struct {\n	A string `json:\"a\"`\n}\n", true},
+		{"db tag", "package x\n\ntype E struct {\n	A string `db:\"a\"`\n}\n", true},
+		{"multi tag", "package x\n\ntype E struct {\n	A string `yaml:\"a\" json:\"a,omitempty\"`\n}\n", true},
+		{"untagged struct", "package x\n\ntype E struct {\n	A string\n}\n", false},
+		{"comment mention", "package x\n\n// A used to be `json:\"a\"`\ntype E struct {\n	A string\n}\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "fixture.go")
+			if err := os.WriteFile(p, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			got := domainTagViolations(t, p)
+			if tc.wantErr && len(got) == 0 {
+				t.Fatal("sensor did not flag the tagged fixture")
+			}
+			if !tc.wantErr && len(got) != 0 {
+				t.Fatalf("compliant fixture reported violations: %v", got)
+			}
+		})
+	}
+}
