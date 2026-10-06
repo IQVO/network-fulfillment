@@ -36,6 +36,18 @@ const (
 	BasisThroughputConstrained Basis = "THROUGHPUT_CONSTRAINED"
 )
 
+// ParseBasis validates a persisted basis string and returns the matching
+// Basis, or ErrUnknownBasis. Repositories rehydrate through it instead of
+// casting Basis(raw). Matching is exact: the vocabulary is closed.
+func ParseBasis(value string) (Basis, error) {
+	switch b := Basis(value); b {
+	case BasisPhysical, BasisThroughputConstrained:
+		return b, nil
+	default:
+		return "", ErrUnknownBasis
+	}
+}
+
 var (
 	// ErrEmptySKU rejects an offer naming no product.
 	ErrEmptySKU = errors.New("capability offer: sku must not be empty")
@@ -92,10 +104,8 @@ func New(sku shared.SKU, siteId shared.SiteId, advertisedQuantity int, physicalA
 	if advertisedQuantity > physicalAvailable {
 		return CapabilityOffer{}, ErrAdvertisedExceedsPhysical
 	}
-	switch basis {
-	case BasisPhysical, BasisThroughputConstrained:
-	default:
-		return CapabilityOffer{}, ErrUnknownBasis
+	if _, err := ParseBasis(string(basis)); err != nil {
+		return CapabilityOffer{}, err
 	}
 	return CapabilityOffer{
 		sku:                sku,
