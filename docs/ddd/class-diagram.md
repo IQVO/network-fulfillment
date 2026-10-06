@@ -171,8 +171,16 @@ classDiagram
         +LineCount int
         +At time.Time
     }
-    class NetworkOrderAcknowledged {
+    class NetworkOrderSubmitted {
         <<DomainEvent>>
+        +NetworkRef NetworkRef
+        +SiteId SiteId
+        +LocalOrderId LocalOrderId
+        +ReceivedAt time.Time
+        +At time.Time
+    }
+    class NetworkOrderAcknowledged {
+        <<DomainEvent, wire v2>>
         +NetworkRef NetworkRef
         +SiteId SiteId
         +LocalOrderId LocalOrderId
@@ -208,6 +216,7 @@ classDiagram
         SUBMISSION_FAILED
     }
     DomainEvent <|.. NetworkOrderReceived
+    DomainEvent <|.. NetworkOrderSubmitted
     DomainEvent <|.. NetworkOrderAcknowledged
     DomainEvent <|.. NetworkOrderRejected
     DomainEvent <|.. NetworkOrderShipmentConfirmed

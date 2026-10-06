@@ -12,8 +12,10 @@ info:
 
     - `NetworkOrder` (package `internal/domain/networkorder`) — one network
       purchase order and its acknowledgement lifecycle. Raises
-      `NetworkOrderReceived`, `NetworkOrderAcknowledged`,
-      `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed` and (from the
+      `NetworkOrderReceived`, `NetworkOrderSubmitted`,
+      `NetworkOrderAcknowledged` (v2: raised when the order settles
+      `ACKNOWLEDGED`, ADR 0016), `NetworkOrderRejected`,
+      `NetworkOrderShipmentConfirmed` and (from the
       acknowledgement sweep, without a state transition)
       `AcknowledgementDeadlineAtRisk`.
 
@@ -37,9 +39,12 @@ info:
     `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived`.
     The SAME `type` is used for the occurrence on the integration and on
     the analytics channel; `dataschema`
-    (`urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v1`)
-    names the payload shape. A breaking payload change gets a new `.v2`
-    type and a new dataschema version, never a mutation of these.
+    (`urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v<N>`)
+    names the payload shape. A breaking change gets a new `.v2`
+    type and a new dataschema version, never a mutation of these:
+    `NetworkOrderAcknowledged` changed meaning in ADR 0016 and is published
+    as `...networkorder.NetworkOrderAcknowledged.v2` /
+    `...:NetworkOrderAcknowledged:v2`.
 
     **Consumers** must dispatch on the full `type`, ignore unknown types,
     dedupe on `id` (stable across outbox redelivery), and dead-letter or
@@ -80,7 +85,8 @@ channels:
       `internal/adapters/outbound/kafka/publisher.go`). Every domain event
       the `NetworkOrder` aggregate raises is published here, via the
       transactional outbox when `DATABASE_URL` is configured (ADR 0003).
-      dataschema: `urn:warehouse:network-fulfillment:events:<EventName>:v1`.
+      dataschema: `urn:warehouse:network-fulfillment:events:<EventName>:v<N>`
+      (v1, except `NetworkOrderAcknowledged` which is v2 — ADR 0016).
     subscribe:
       operationId: consumeNetworkFulfillmentEvents
       summary: Consume Network Fulfillment integration events.
@@ -92,6 +98,7 @@ channels:
       message:
         oneOf:
           - $ref: "#/components/messages/NetworkOrderReceived"
+          - $ref: "#/components/messages/NetworkOrderSubmitted"
           - $ref: "#/components/messages/NetworkOrderAcknowledged"
           - $ref: "#/components/messages/NetworkOrderRejected"
           - $ref: "#/components/messages/NetworkOrderShipmentConfirmed"
@@ -101,14 +108,19 @@ channels:
     description: |
       The internal analytics topic (the `AnalyticsTopic` constant in
       `internal/adapters/outbound/kafka/analytics_publisher.go`). Carries the
-      same five occurrences with the same `type` and payload, but a distinct
+      same six occurrences with the same `type` and payload, but a distinct
       `id` per occurrence and dataschema
-      `urn:warehouse:network-fulfillment:analytics:<EventName>:v1`. There is
+      `urn:warehouse:network-fulfillment:analytics:<EventName>:v<N>` (v1,
+      except `NetworkOrderAcknowledged` which is v2). There is
       no `schema_version` field. Consumed by this service's own analytics
       projector (`internal/adapters/inbound/kafka/analytics_consumer.go`),
-      which handles `NetworkOrderReceived`, `NetworkOrderAcknowledged` and
-      `NetworkOrderRejected`, ignores other types (`NetworkOrderShipmentConfirmed`
-      and `AcknowledgementDeadlineAtRisk` today), and dead-letters to
+      which handles `NetworkOrderReceived`, `NetworkOrderSubmitted` (claimed,
+      no report effect), `NetworkOrderAcknowledged` v2, the HISTORIC
+      `NetworkOrderAcknowledged` v1 still on the topic (unsuffixed type,
+      published before ADR 0016, counted as before so a replay keeps the
+      report numbers) and `NetworkOrderRejected`, ignores other types
+      (`NetworkOrderShipmentConfirmed` and `AcknowledgementDeadlineAtRisk`
+      today), and dead-letters to
       `warehouse.network-fulfillment.analytics.dlq` anything that is not a
       valid CloudEvent.
     subscribe:
@@ -122,6 +134,7 @@ channels:
       message:
         oneOf:
           - $ref: "#/components/messages/NetworkOrderReceivedAnalytics"
+          - $ref: "#/components/messages/NetworkOrderSubmittedAnalytics"
           - $ref: "#/components/messages/NetworkOrderAcknowledgedAnalytics"
           - $ref: "#/components/messages/NetworkOrderRejectedAnalytics"
           - $ref: "#/components/messages/NetworkOrderShipmentConfirmedAnalytics"
@@ -172,16 +185,58 @@ components:
               lineCount: 2
               at: "2026-09-23T08:00:00Z"
 
+    NetworkOrderSubmitted:
+      name: NetworkOrderSubmitted
+      title: Network order submitted
+      summary: "We told the network yes (the order is SUBMITTED) and a held order exists in order-management; the submission is not yet reconciled."
+      description: |
+        Raised by the `NetworkOrder` aggregate in the same atomic scope that moves the order to `SUBMITTED` (ADR 0016): the decision to accept in full has been taken, the network has been told yes and a held order exists in order-management (`localOrderId`), but the submission is only accepted-for-processing and NOT yet reconciled against the network's transaction-status record (ADR 0001 §5). It is exactly what `NetworkOrderAcknowledged` v1 used to announce. A consumer must not treat it as a settled commitment: the settle is `NetworkOrderAcknowledged` (v2); a refused submission is `NetworkOrderRejected` with `reason=SUBMISSION_FAILED`.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderSubmitted` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderSubmitted:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: network-fulfillment
+      payload:
+        $ref: "#/components/schemas/NetworkOrderSubmittedEvent"
+      examples:
+        - name: networkOrderSubmitted
+          summary: "Network order submitted for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "9f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e34"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderSubmitted"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:events:NetworkOrderSubmitted:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              localOrderId: "ord-1"
+              receivedAt: "2026-09-23T07:59:00Z"
+              at: "2026-09-23T08:00:00Z"
+
     NetworkOrderAcknowledged:
       name: NetworkOrderAcknowledged
-      title: Network order acknowledged
-      summary: "We committed to fulfilling the network order in full and raised a local order in order-management."
+      title: Network order acknowledged (v2)
+      summary: "The order settled ACKNOWLEDGED: the network's transaction status confirmed the submission."
       description: |
-        Raised by the `NetworkOrder` aggregate once the network has been told yes and a held order exists in order-management (`localOrderId`). `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that.
+        Raised by the `NetworkOrder` aggregate when `ReconcileSubmittedOrders` settles the order `SUBMITTED -> ACKNOWLEDGED` (ADR 0016), in the same atomic scope as the state save and before the held order is released. It is a settled commitment. `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that. A pending submission raises nothing; a failed one raises `NetworkOrderRejected` with `reason=SUBMISSION_FAILED` and never this event.
 
-        **Timing.** This event is published when the order moves to `SUBMITTED` — the acknowledgement has been submitted to the network but NOT yet reconciled against its transaction-status record (ADR 0001 §5). The later `SUBMITTED -> ACKNOWLEDGED` settlement raises no event, and a failed reconciliation is signalled by `NetworkOrderRejected` with `reason=SUBMISSION_FAILED`. A consumer must therefore not treat this event as a settled commitment.
+        **Versioning (breaking change).** Until ADR 0016 this event was published when the order moved to `SUBMITTED`. Because its meaning changed, it is published as a NEW `.v2` type and `:v2` dataschema (fleet CloudEvents standard §4); the v1 type `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` is no longer published. The payload field set is unchanged. The earlier fact is now `NetworkOrderSubmitted`.
 
-        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v1`.
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v2`.
       contentType: application/cloudevents+json
       headers:
         $ref: "#/components/schemas/KafkaHeaders"
@@ -204,17 +259,17 @@ components:
             specversion: "1.0"
             id: "9f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
             source: "/warehouse/network-fulfillment"
-            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2"
             subject: "po-1"
-            time: "2026-09-23T08:00:00Z"
+            time: "2026-09-23T08:05:00Z"
             datacontenttype: "application/json"
-            dataschema: "urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v1"
+            dataschema: "urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v2"
             data:
               networkRef: "po-1"
               siteId: "site-1"
               localOrderId: "ord-1"
               receivedAt: "2026-09-23T07:59:00Z"
-              at: "2026-09-23T08:00:00Z"
+              at: "2026-09-23T08:05:00Z"
 
     NetworkOrderRejected:
       name: NetworkOrderRejected
@@ -382,14 +437,58 @@ components:
               lineCount: 2
               at: "2026-09-23T08:00:00Z"
 
+    NetworkOrderSubmittedAnalytics:
+      name: NetworkOrderSubmittedAnalytics
+      title: Network order submitted (analytics)
+      summary: "We told the network yes (the order is SUBMITTED) and a held order exists in order-management; not yet reconciled."
+      description: |
+        Raised when the order moves to `SUBMITTED`; what `NetworkOrderAcknowledged` v1 used to announce (ADR 0016). Recognised and claimed by the analytics projector, with no effect on the acknowledgement report.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderSubmitted` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderSubmitted:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/NetworkOrderSubmittedAnalyticsEvent"
+      examples:
+        - name: networkOrderSubmittedAnalytics
+          summary: "Network order submitted for network order po-1."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "3d4a1f60-2b8e-4c17-8a55-0c6f9d2b41ab"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderSubmitted"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:analytics:NetworkOrderSubmitted:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              localOrderId: "ord-1"
+              receivedAt: "2026-09-23T07:59:00Z"
+              at: "2026-09-23T08:00:00Z"
+
     NetworkOrderAcknowledgedAnalytics:
       name: NetworkOrderAcknowledgedAnalytics
-      title: Network order acknowledged (analytics)
-      summary: "We committed to fulfilling the network order in full and raised a local order in order-management."
+      title: Network order acknowledged (analytics, v2)
+      summary: "The order settled ACKNOWLEDGED: the network's transaction status confirmed the submission."
       description: |
-        Raised by the `NetworkOrder` aggregate once the network has been told yes and a held order exists in order-management (`localOrderId`). `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that. Consumed by the analytics projector. Published at `SUBMITTED`, before reconciliation; `SUBMITTED -> ACKNOWLEDGED` raises no event (see the integration-channel message for the full timing note).
+        Raised when `ReconcileSubmittedOrders` settles the order `SUBMITTED -> ACKNOWLEDGED` (ADR 0016). `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that. Consumed by the analytics projector.
 
-        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v1`.
+        **Versioning.** This is the v2 type; the meaning of the unsuffixed v1 type changed (it was published at `SUBMITTED`, before reconciliation), which the fleet CloudEvents standard treats as breaking. The v1 type `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` (dataschema `...:analytics:NetworkOrderAcknowledged:v1`) is no longer published but messages already on the topic stay, and the projector still handles them as before (v1 counted once, with the same latency).
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v2`.
       contentType: application/cloudevents+json
       headers:
         $ref: "#/components/schemas/KafkaHeaders"
@@ -412,17 +511,17 @@ components:
             specversion: "1.0"
             id: "3d4a1f60-2b8e-4c17-8a55-0c6f9d2b41aa"
             source: "/warehouse/network-fulfillment"
-            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2"
             subject: "po-1"
-            time: "2026-09-23T08:00:00Z"
+            time: "2026-09-23T08:05:00Z"
             datacontenttype: "application/json"
-            dataschema: "urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v1"
+            dataschema: "urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v2"
             data:
               networkRef: "po-1"
               siteId: "site-1"
               localOrderId: "ord-1"
               receivedAt: "2026-09-23T07:59:00Z"
-              at: "2026-09-23T08:00:00Z"
+              at: "2026-09-23T08:05:00Z"
 
     NetworkOrderRejectedAnalytics:
       name: NetworkOrderRejectedAnalytics
@@ -655,9 +754,38 @@ components:
           format: date-time
           description: "Domain occurred-at (same instant as the CloudEvents `time`)."
 
+    NetworkOrderSubmittedData:
+      type: object
+      title: NetworkOrderSubmitted payload
+      required:
+        - networkRef
+        - siteId
+        - localOrderId
+        - receivedAt
+        - at
+      properties:
+        networkRef:
+          type: string
+          description: "Network order reference; also the `subject`."
+        siteId:
+          type: string
+          description: "Fulfilling site."
+        localOrderId:
+          type: string
+          description: "order-management held order id correlated to this network order."
+        receivedAt:
+          type: string
+          format: date-time
+          description: "When the order was received."
+        at:
+          type: string
+          format: date-time
+          description: "When the order moved to SUBMITTED (same instant as `time`)."
+
     NetworkOrderAcknowledgedData:
       type: object
-      title: NetworkOrderAcknowledged payload
+      title: NetworkOrderAcknowledged payload (v2)
+      description: "Field set identical to the v1 payload; the MEANING changed (ADR 0016): `at` is the instant the order settled ACKNOWLEDGED."
       required:
         - networkRef
         - siteId
@@ -681,7 +809,7 @@ components:
         at:
           type: string
           format: date-time
-          description: "Domain occurred-at (same instant as `time`)."
+          description: "When the order settled ACKNOWLEDGED (same instant as `time`)."
 
     NetworkOrderRejectedData:
       type: object
@@ -769,18 +897,33 @@ components:
             data:
               $ref: "#/components/schemas/NetworkOrderReceivedData"
 
-    NetworkOrderAcknowledgedEvent:
-      title: NetworkOrderAcknowledged CloudEvent (events)
+    NetworkOrderSubmittedEvent:
+      title: NetworkOrderSubmitted CloudEvent (events)
       allOf:
         - $ref: "#/components/schemas/CloudEvent"
         - type: object
           properties:
             type:
               type: string
-              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderSubmitted"
             dataschema:
               type: string
-              const: "urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v1"
+              const: "urn:warehouse:network-fulfillment:events:NetworkOrderSubmitted:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderSubmittedData"
+
+    NetworkOrderAcknowledgedEvent:
+      title: NetworkOrderAcknowledged CloudEvent v2 (events)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v2"
             data:
               $ref: "#/components/schemas/NetworkOrderAcknowledgedData"
 
@@ -844,18 +987,33 @@ components:
             data:
               $ref: "#/components/schemas/NetworkOrderReceivedData"
 
-    NetworkOrderAcknowledgedAnalyticsEvent:
-      title: NetworkOrderAcknowledged CloudEvent (analytics)
+    NetworkOrderSubmittedAnalyticsEvent:
+      title: NetworkOrderSubmitted CloudEvent (analytics)
       allOf:
         - $ref: "#/components/schemas/CloudEvent"
         - type: object
           properties:
             type:
               type: string
-              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderSubmitted"
             dataschema:
               type: string
-              const: "urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v1"
+              const: "urn:warehouse:network-fulfillment:analytics:NetworkOrderSubmitted:v1"
+            data:
+              $ref: "#/components/schemas/NetworkOrderSubmittedData"
+
+    NetworkOrderAcknowledgedAnalyticsEvent:
+      title: NetworkOrderAcknowledged CloudEvent v2 (analytics)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v2"
             data:
               $ref: "#/components/schemas/NetworkOrderAcknowledgedData"
 

@@ -15,11 +15,11 @@ mode** (ADR 0008), built only by `internal/adapters/kafka/cloudevents.New`:
 | `specversion` | `1.0` |
 | `id` | a UUID minted once per encoded event. In outbox mode the encoded bytes are persisted, so a redelivery carries the same `id` |
 | `source` | `/warehouse/network-fulfillment` |
-| `type` | `com.warehouse.wes.network-fulfillment.networkorder.<EventName>` (entity `networkorder` for every event) |
+| `type` | `com.warehouse.wes.network-fulfillment.networkorder.<EventName>` (entity `networkorder` for every event); a breaking change adds a `.v2` suffix: `...NetworkOrderAcknowledged.v2` (ADR 0016) |
 | `subject` | the `networkRef` |
 | `time` | the event's own `At`, in UTC |
 | `datacontenttype` | `application/json` |
-| `dataschema` | `urn:warehouse:network-fulfillment:<events\|analytics>:<EventName>:v1` |
+| `dataschema` | `urn:warehouse:network-fulfillment:<events\|analytics>:<EventName>:v<N>`: `v1` for every event except `NetworkOrderAcknowledged`, which is `v2` |
 | Kafka header | `content-type: application/cloudevents+json; charset=UTF-8` |
 | Kafka key | `networkRef`, with the `kafkago.Hash` balancer, so one order's events share a partition (ADR 0005) |
 
@@ -41,7 +41,8 @@ same transaction as the aggregate (ADR 0003), and the relay drains them.
 | Event | Full `type` | Payload fields (`data`) | Producer use case | Known consumers |
 | --- | --- | --- | --- | --- |
 | `NetworkOrderReceived` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived` | `networkRef`, `siteId`, `requiredShipBy`, `acknowledgeBy`, `lineCount` (0 for untranslatable demand), `at` | `ReceiveNetworkDemand` (both paths) | own analytics projector (`orders_received`) |
-| `NetworkOrderAcknowledged` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` | `networkRef`, `siteId`, `localOrderId`, `receivedAt`, `at` | `ReceiveNetworkDemand.acknowledge`, at **submission** (state `SUBMITTED`) | own analytics projector (`orders_acknowledged`, latency `at - receivedAt`) |
+| `NetworkOrderSubmitted` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderSubmitted` (v1) | `networkRef`, `siteId`, `localOrderId`, `receivedAt`, `at` | `ReceiveNetworkDemand.acknowledge`, when the order moves to `SUBMITTED` (the fact the old Acknowledged announced, ADR 0016) | own analytics projector (claimed, no report effect) |
+| `NetworkOrderAcknowledged` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2` (dataschema `...:NetworkOrderAcknowledged:v2`) | `networkRef`, `siteId`, `localOrderId`, `receivedAt`, `at` | `ReconcileSubmittedOrders.confirm`, only when the order **settles** `ACKNOWLEDGED`, atomically with the save (ADR 0016) | own analytics projector (`orders_acknowledged`, latency `at - receivedAt`) |
 | `NetworkOrderRejected` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` | `networkRef`, `siteId`, `reason` (`UNTRANSLATABLE_SKU` \| `INFEASIBLE_DEADLINE` \| `ACKNOWLEDGEMENT_DEADLINE_MISSED` \| `SUBMISSION_FAILED`), `at` | `ReceiveNetworkDemand.reject` (first two reasons), `RejectOverdueOrders`, `ReconcileSubmittedOrders.fail` | own analytics projector (counters by reason, including `SUBMISSION_FAILED` -> `orders_rejected_submission_failed`) |
 | `NetworkOrderShipmentConfirmed` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` | `networkRef`, `siteId`, `localOrderId`, `at` | `ConfirmNetworkOrderShipment` | none (the projector ignores it) |
 | `AcknowledgementDeadlineAtRisk` | `com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk` | `networkRef`, `siteId`, `acknowledgeBy`, `at` | `SweepAcknowledgementDeadlines`, re-fired every pass while the order is overdue | none (the projector ignores it) |
@@ -53,7 +54,7 @@ yet.
 
 Partition key and `subject` are always `networkRef`
 (`kafka.aggregateKey`). The default branch, which keys by event name, is
-never reached by these five types.
+never reached by these six types.
 
 `CapabilityOffer` raises no events.
 
@@ -61,7 +62,7 @@ never reached by these five types.
 
 | Topic | Full `type` | Fields used | Consumer | Group id |
 | --- | --- | --- | --- | --- |
-| `warehouse.network-fulfillment.analytics` (own) | `...networkorder.NetworkOrderReceived`, `...NetworkOrderAcknowledged`, `...NetworkOrderRejected`; other types ignored | `reason`, `receivedAt`; `time`, `id` from the envelope | `internal/adapters/inbound/kafka/analytics_consumer.go` (`cmd/netfulfil-projector`) | `network-fulfillment-analytics-<host>-<pid>-<ts>` |
+| `warehouse.network-fulfillment.analytics` (own) | `...networkorder.NetworkOrderReceived`, `...NetworkOrderSubmitted`, `...NetworkOrderAcknowledged.v2`, the historic `...NetworkOrderAcknowledged` (v1, published before ADR 0016, counted as before so a replay keeps the report numbers), `...NetworkOrderRejected`; other types ignored | `reason`, `receivedAt`; `time`, `id` from the envelope | `internal/adapters/inbound/kafka/analytics_consumer.go` (`cmd/netfulfil-projector`) | `network-fulfillment-analytics-<host>-<pid>-<ts>` |
 | `warehouse.process-path-management.events` | `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`, `...processpath.ProcessPathUpdated`, `...processpath.ProcessPathDeactivated`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | `path_id`, `cycle_time_p95`; schedule `site_id`, `timezone`, `cutoffs[].cpt_id/local_time/days_of_week/ship_method/eligible_path_ids` | `internal/adapters/outbound/processpathcache/consumer.go` (opt-in) | `network-fulfillment-process-path-capability-cache-<host>-<pid>-<ts>` |
 | `warehouse.work-planning.events` | `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | `path_id`, `cutoff_at`, `remaining_units`, `known` | `internal/adapters/outbound/pathcapacitycache/consumer.go` (opt-in) | `network-fulfillment-path-capacity-cache-<host>-<pid>-<ts>` |
 
@@ -95,10 +96,13 @@ Fixed on 2026-10-06 (docs-audit PR, [ADR 0015](../adr/0015-docs-audit-contract-c
    `ordersRejectedSubmissionFailed` in the report (history before the
    migration reads 0).
 
-Still open (needs a product decision, see ADR 0015 "Not decided here"):
+Resolved on 2026-10-06 (decisions PR):
 
-- `NetworkOrderAcknowledged` is published at `SUBMITTED`, before
-  reconciliation, and `SUBMITTED -> ACKNOWLEDGED` raises no event. The
-  AsyncAPI now states this timing explicitly.
-- `contract.EligiblePath.CycleTimeP95` is cached but unused by
-  `throughputFeasible`.
+- **`NetworkOrderAcknowledged` timing (ex-hotspot H6/H7).** Decided
+  2026-10-06: `NetworkOrderSubmitted` is raised at `SUBMITTED`,
+  `NetworkOrderAcknowledged` only when the order settles `ACKNOWLEDGED`,
+  published as the `.v2` type/dataschema (ADR 0016). Nothing is left open here.
+- **`contract.EligiblePath.CycleTimeP95` unused (ex-hotspot).** Decided
+  2026-10-06: a path is eligible for a cutoff only if
+  `CycleTimeP95 <= cutoff - now`; missing/zero cycle time stays eligible
+  (fail-open); no capacity scaling (ADR 0017). Nothing is left open here.

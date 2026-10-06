@@ -41,7 +41,7 @@ ship-to PII enters this context at all.
 | **Gateway / Anti-Corruption Layer** | **Yes, primary** | The network vocabulary stops at `internal/adapters/outbound/network/`. `ports.NetworkGateway` and `contract.*` are expressed in our terms, and `NetworkOrder.SKUQuantities()` is the only shape sent to `order-management`. |
 | **Execution (protocol)** | **Yes, narrow** | Owns the answer, the 24h clock (`acknowledgeBy`, the sweep, `RejectOverdueOrders`) and reconciliation. It does not own the fulfillment work, which belongs to `order-management`. |
 | **Analysis** | **Yes, opt-in** | `RecomputeCapabilityOffers` derives advertised availability from inventory, the CPT schedule and path capacity (`CAPABILITY_OFFER_ENABLED`). |
-| **Published Language / Open Host** | **Partly** | Publishes 5 CloudEvents types on `warehouse.network-fulfillment.events` (documented in `apis/asyncapi.yaml`). No other fleet context was found consuming them. Read-only REST and MCP are exposed for operators and agents. |
+| **Published Language / Open Host** | **Partly** | Publishes 6 CloudEvents types on `warehouse.network-fulfillment.events` (documented in `apis/asyncapi.yaml`). No other fleet context was found consuming them. Read-only REST and MCP are exposed for operators and agents. |
 
 ## Inbound Communication
 
@@ -60,7 +60,7 @@ ship-to PII enters this context at all.
 | Report consumers | Acknowledgement & Translation report | Query | REST (`cmd/netfulfil-reports`) `GET /reports/acknowledgement`, `GET /reports/acknowledgement/freshness` | Open Host |
 | `process-path-management` | Path catalogue + CPT schedule | Event | Kafka `warehouse.process-path-management.events`: `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`, `...processpath.ProcessPathUpdated`, `...processpath.ProcessPathDeactivated`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | Conformist (opt-in cache) |
 | `wes-work-planning` | Remaining path capacity | Event | Kafka `warehouse.work-planning.events`: `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | Conformist (opt-in cache) |
-| Itself (analytics projector) | Own events, for the report | Event | Kafka `warehouse.network-fulfillment.analytics`: `...networkorder.NetworkOrderReceived`, `...NetworkOrderAcknowledged`, `...NetworkOrderRejected` | Internal |
+| Itself (analytics projector) | Own events, for the report | Event | Kafka `warehouse.network-fulfillment.analytics`: `...networkorder.NetworkOrderReceived`, `...NetworkOrderSubmitted`, `...NetworkOrderAcknowledged.v2` (and the historic `...NetworkOrderAcknowledged` v1), `...NetworkOrderRejected` | Internal |
 
 ## Outbound Communication
 
@@ -74,8 +74,8 @@ ship-to PII enters this context at all.
 | External network | Transaction status | Query | `ports.NetworkGateway.SubmissionStatus(ref)` (stub) | Conformist |
 | External network | Shipment confirmation | Command | `ports.NetworkGateway.SubmitShipmentConfirmation(ref)` (stub) | Conformist |
 | External network | Availability, capability declaration, label | Command / Query | `SubmitAvailability`, `DeclareCapability`, `RequestLabel`: **on the port and in the stub, called by no use case** | Conformist (wired, unused) |
-| Any subscriber | `NetworkOrderReceived`, `NetworkOrderAcknowledged`, `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (with `EVENT_PUBLISHER=kafka`) | Open Host / Published Language |
-| Analytics projector | The same 5 events | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
+| Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (with `EVENT_PUBLISHER=kafka`) | Open Host / Published Language |
+| Analytics projector | The same 6 events | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
 
 Full message details: [domain-events.md](domain-events.md). Relationship
 evidence: [context-map.md](context-map.md).
@@ -154,20 +154,19 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 - **When does a live `retail-network` adapter land**, and when does
   `CapabilityOffer` get submitted outward (`SubmitAvailability` has no
   caller)?
-- **Acknowledged-before-settled event.** `NetworkOrderAcknowledged` is
-  published when the order goes `SUBMITTED`, before reconciliation, and no
-  event marks `SUBMITTED -> ACKNOWLEDGED`. Is that the intended contract
-  for subscribers? ADR 0001 §5 and ADR 0009 do not say when the event
-  fires, so this stays open (ADR 0015 "Not decided here"); the AsyncAPI now
-  documents the actual timing.
+- **Decided 2026-10-06: Submitted at SUBMITTED, Acknowledged only on settle
+  (ADR 0016).** `NetworkOrderSubmitted` is raised when the order goes
+  `SUBMITTED`; `NetworkOrderAcknowledged` is raised only when
+  reconciliation settles it `ACKNOWLEDGED`, published as the `.v2` type and
+  dataschema. No fleet consumer exists, and the projector still replays
+  historic v1 messages with the same report numbers.
 - **Orphaned hold after a crash.** If the process dies after
   `RaiseHeldOrder` but before the answer is saved, the order stays `NEW`
   with no `localOrderId`. `RejectOverdueOrders` then cannot cancel the hold
   in `order-management`. ADR 0001 names the orphaned hold as an open gap.
-- **Cycle time is not yet used.** `contract.EligiblePath.CycleTimeP95` is
-  cached, but `throughputFeasible` sums only remaining capacity. ADR 0001
-  names `cycleTimeP95` as an input to `throughputFeasibleBefore` but does
-  not say how it combines with capacity, so this needs a product decision.
+- **Decided 2026-10-06: cycle time gates eligibility (ADR 0017).** A path is
+  eligible for a cutoff only if `CycleTimeP95 <= cutoff - now`; a missing or
+  zero cycle time stays eligible (fail-open); capacity is not scaled.
 - **Contract drift (fixed 2026-10-06, ADR 0015).** CORS now allows
   `GET/POST/OPTIONS`, `ErrConfirmBeforeAcknowledge` maps to a 409,
   `apis/openapi.yaml` documents `GET /capability-offers` and the

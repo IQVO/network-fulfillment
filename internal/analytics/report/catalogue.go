@@ -37,7 +37,9 @@ type Row struct {
 	// order intake, answered or not (yet).
 	OrdersReceived int
 	// OrdersAcknowledged is the number of NetworkOrderAcknowledged events:
-	// demand this context committed to fulfilling in full.
+	// orders that settled ACKNOWLEDGED (v2, ADR 0016). Historic v1 events
+	// (published at SUBMITTED before ADR 0016) still count once each, so a
+	// replay of the topic keeps its earlier numbers.
 	OrdersAcknowledged int
 	// OrdersRejectedUntranslatableSKU is the number of NetworkOrderRejected
 	// events whose Reason is UNTRANSLATABLE_SKU — a catalogue gap: the
