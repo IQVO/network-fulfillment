@@ -21,8 +21,8 @@ import (
 // cannot drift onto two different query paths.
 //
 // This surface is entirely read-only (the one write affordance this
-// context has, ADR 0009's shipment-confirmation endpoint, is REST-only
-// today). Every dependency here is a read dependency.
+// context has, the shipment-confirmation endpoint of ADR 0014, is
+// REST-only today). Every dependency here is a read dependency.
 type Deps struct {
 	// Orders is the same ports.NetworkOrderRepo the HTTP adapter reads,
 	// backing get_network_order and list_network_orders.
@@ -139,7 +139,7 @@ func (d Deps) registerTools(server *mcp.Server) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "list_network_orders",
-		Description: "List network orders, optionally filtered by state (NEW, ACKNOWLEDGED, REJECTED, or CONFIRMED). Omit state to list every order. NEW is the unanswered working set the acknowledgement sweep acts on; use this to see how much demand is currently awaiting an answer, or to audit what has already been acknowledged, rejected, or confirmed shipped.",
+		Description: "List network orders, optionally filtered by state (NEW, SUBMITTED, ACKNOWLEDGED, REJECTED, or CONFIRMED). Omit state to list every order. NEW is the unanswered working set the acknowledgement sweep acts on; SUBMITTED is an acknowledgement told to the network but not yet reconciled against its transaction status; use this to see how much demand is currently awaiting an answer, or to audit what has already been acknowledged, rejected, or confirmed shipped.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
 	}, d.listNetworkOrders)
 

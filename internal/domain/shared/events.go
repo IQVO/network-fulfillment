@@ -37,8 +37,15 @@ func (e NetworkOrderReceived) EventName() string     { return "NetworkOrderRecei
 func (e NetworkOrderReceived) OccurredAt() time.Time { return e.At }
 
 // NetworkOrderAcknowledged is raised once we have committed to fulfilling
-// an order in full: the network has been told yes, and a local order has
-// been raised (and is about to be released) in order-management.
+// an order in full: the network has been told yes (the order is
+// SUBMITTED), and a local order has been raised in order-management.
+//
+// It is published at SUBMITTED, i.e. BEFORE ReconcileSubmittedOrders
+// settles the submission against the network's transaction status
+// (ADR 0001 §5); the later SUBMITTED -> ACKNOWLEDGED settlement raises no
+// event, and a failed reconciliation raises NetworkOrderRejected with
+// reason SUBMISSION_FAILED. Consumers must not read this event as a
+// settled commitment.
 type NetworkOrderAcknowledged struct {
 	NetworkRef   NetworkRef
 	SiteId       SiteId
@@ -58,7 +65,7 @@ func (e NetworkOrderAcknowledged) OccurredAt() time.Time { return e.At }
 // cause rather than treat every "no" the same way — an untranslatable
 // product is a catalogue gap, an infeasible deadline is a capacity
 // signal, and a missed acknowledgement window is an operational failure.
-// These three are exhaustive over every path that calls
+// These four are exhaustive over every path that calls
 // NetworkOrder.Reject() in this codebase today.
 type RejectionReason string
 
@@ -99,13 +106,10 @@ func (e NetworkOrderRejected) OccurredAt() time.Time { return e.At }
 // NetworkOrderShipmentConfirmed is raised once a shipment has been
 // confirmed back to the network, closing the order.
 //
-// NOTE: NetworkOrder.ConfirmShipment() exists on the aggregate but no use
-// case in this codebase calls it yet — the inbound leg that observes a
-// real shipment (e.g. a fulfillment-execution PackageManifested consumer)
-// is not yet built. This event is modelled now, alongside the other three,
-// so the domain's event vocabulary and the outbound Kafka/analytics wiring
-// are already correct the day that leg is added; it is exercised here only
-// at the domain level (EventName/OccurredAt) until then.
+// It is raised by ConfirmNetworkOrderShipment, which is driven by the
+// explicit POST /network-orders/{networkRef}/shipment-confirmation
+// endpoint (ADR 0014) rather than by a PackageManifested consumer: no
+// persisted WorkUnitId -> NetworkRef mapping exists yet to correlate one.
 type NetworkOrderShipmentConfirmed struct {
 	NetworkRef   NetworkRef
 	SiteId       SiteId
