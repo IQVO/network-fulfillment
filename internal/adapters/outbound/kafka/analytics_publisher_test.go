@@ -26,7 +26,7 @@ func TestAnalyticsPublisher_GoldenCloudEventPerEventType(t *testing.T) {
 			if len(w.msgs) != 1 {
 				t.Fatalf("expected 1 message, got %d", len(w.msgs))
 			}
-			assertGoldenMessage(t, w.msgs[0], outboundkafka.AnalyticsTopic, wantCloudEvent(tt.name, "analytics", tt.data))
+			assertGoldenMessage(t, w.msgs[0], outboundkafka.AnalyticsTopic, wantCloudEvent(tt.name, tt.typeSuffix, "analytics", tt.version, tt.data))
 		})
 	}
 }

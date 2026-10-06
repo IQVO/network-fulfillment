@@ -33,8 +33,24 @@ const Topic = "warehouse.network-fulfillment.events"
 const Entity = "networkorder"
 
 // dataSchemaVersion is the dataschema version of every payload this
-// service publishes today (on both streams).
+// service publishes, except where dataSchemaVersionFor says otherwise.
 const dataSchemaVersion = 1
+
+// acknowledgedVersion is the wire version of NetworkOrderAcknowledged
+// (ADR 0016): its MEANING changed (published at SUBMITTED -> published
+// when the order settles ACKNOWLEDGED), which the fleet CloudEvents
+// standard (§4) treats as breaking: a new `.v2` type AND a `:v2`
+// dataschema, on both streams. NetworkOrderSubmitted is new, hence v1.
+const acknowledgedVersion = 2
+
+// dataSchemaVersionFor returns the dataschema/type version an event is
+// published under.
+func dataSchemaVersionFor(event shared.DomainEvent) int {
+	if _, ok := event.(shared.NetworkOrderAcknowledged); ok {
+		return acknowledgedVersion
+	}
+	return dataSchemaVersion
+}
 
 // Writer is the subset of *kafkago.Writer the Publisher needs, so tests can
 // substitute a fake without a live broker.
@@ -124,6 +140,7 @@ func encodeAll(topic, stream string, newId func() string, events []shared.Domain
 		if err != nil {
 			return nil, fmt.Errorf("kafka: encode %s for %s: %w", event.EventName(), topic, err)
 		}
+		version := dataSchemaVersionFor(event)
 		value, err := cloudevents.New(cloudevents.Spec{
 			ID:        newId(),
 			Entity:    Entity,
@@ -131,7 +148,7 @@ func encodeAll(topic, stream string, newId func() string, events []shared.Domain
 			Subject:   key,
 			Time:      event.OccurredAt(),
 			Stream:    stream,
-			Version:   dataSchemaVersion,
+			Version:   version,
 			Data:      payload,
 		})
 		if err != nil {
@@ -139,7 +156,7 @@ func encodeAll(topic, stream string, newId func() string, events []shared.Domain
 		}
 		out = append(out, Encoded{
 			Topic:     topic,
-			EventType: cloudevents.Type(Entity, event.EventName()),
+			EventType: cloudevents.TypeVersioned(Entity, event.EventName(), version),
 			Key:       []byte(key),
 			Value:     value,
 			Headers:   []kafkago.Header{cloudevents.ContentTypeHeader()},
@@ -188,6 +205,8 @@ func (p *Publisher) Send(ctx context.Context, encoded ...Encoded) error {
 func aggregateKey(event shared.DomainEvent) string {
 	switch e := event.(type) {
 	case shared.NetworkOrderReceived:
+		return string(e.NetworkRef)
+	case shared.NetworkOrderSubmitted:
 		return string(e.NetworkRef)
 	case shared.NetworkOrderAcknowledged:
 		return string(e.NetworkRef)

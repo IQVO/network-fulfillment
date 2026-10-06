@@ -74,15 +74,28 @@ func (uc *ReconcileSubmittedOrders) Execute(ctx context.Context) (ReconcileResul
 }
 
 // confirm settles a submission the network has confirmed: the aggregate
-// is saved ACKNOWLEDGED before the held order is released, so a crash
+// is saved ACKNOWLEDGED, and NetworkOrderAcknowledged published, in one
+// atomic scope (ADR 0016) BEFORE the held order is released, so a crash
 // between the two leaves a recoverable record (the order already reads
-// ACKNOWLEDGED) rather than an ambiguous one.
+// ACKNOWLEDGED, its event already enqueued) rather than an ambiguous one.
 func (uc *ReconcileSubmittedOrders) confirm(ctx context.Context, o *networkorder.NetworkOrder) error {
 	if err := o.ConfirmAcknowledgement(); err != nil {
 		return err
 	}
 	if err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
-		return uc.Orders.Save(ctx, o)
+		if err := uc.Orders.Save(ctx, o); err != nil {
+			return err
+		}
+		ack := shared.NetworkOrderAcknowledged{
+			NetworkRef: o.NetworkRef(),
+			SiteId:     o.SiteId(),
+			ReceivedAt: o.ReceivedAt(),
+			At:         uc.Clock.Now(),
+		}
+		if local := o.LocalOrderId(); local != nil {
+			ack.LocalOrderId = *local
+		}
+		return uc.Events.Publish(ctx, ack)
 	}); err != nil {
 		return err
 	}

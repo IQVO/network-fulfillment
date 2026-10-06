@@ -43,6 +43,18 @@ func Type(entity, eventName string) string {
 	return fmt.Sprintf("com.warehouse.%s.%s.%s.%s", Subdomain, Context, entity, eventName)
 }
 
+// TypeVersioned is Type for a given dataschema version. Per the fleet
+// CloudEvents standard (§4) a BREAKING change is published as a new type
+// with a `.v2` suffix (`.v3`, ...) AND a new dataschema version; v1 keeps
+// the unsuffixed type.
+func TypeVersioned(entity, eventName string, version int) string {
+	t := Type(entity, eventName)
+	if version > 1 {
+		t = fmt.Sprintf("%s.v%d", t, version)
+	}
+	return t
+}
+
 // DataSchema builds urn:warehouse:<repo>:<stream>:<EventName>:v<version>.
 func DataSchema(stream, eventName string, version int) string {
 	return fmt.Sprintf("urn:warehouse:%s:%s:%s:v%d", Repo, stream, eventName, version)
@@ -56,7 +68,7 @@ type Spec struct {
 	Subject   string    // aggregate instance id
 	Time      time.Time // domain occurred-at
 	Stream    string    // StreamEvents | StreamAnalytics
-	Version   int       // dataschema version, >= 1
+	Version   int       // dataschema version, >= 1; >= 2 also suffixes `type` with `.v<N>` (breaking change, fleet standard §4)
 	Data      any       // payload, marshalled as JSON
 }
 
@@ -72,7 +84,7 @@ func New(s Spec) ([]byte, error) {
 	e := ce.New(SpecVersion)
 	e.SetID(s.ID)
 	e.SetSource(Source)
-	e.SetType(Type(s.Entity, s.EventName))
+	e.SetType(TypeVersioned(s.Entity, s.EventName, s.Version))
 	e.SetSubject(s.Subject)
 	e.SetTime(s.Time.UTC())
 	e.SetDataSchema(DataSchema(s.Stream, s.EventName, s.Version))
