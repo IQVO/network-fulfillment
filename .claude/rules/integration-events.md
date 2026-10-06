@@ -60,7 +60,11 @@ packages and never hand-roll an envelope struct.
   dataschema version, never mutate an existing one.
 - Published types: `com.warehouse.wes.network-fulfillment.networkorder.`
   + `NetworkOrderReceived` | `NetworkOrderAcknowledged` |
-  `NetworkOrderRejected` | `NetworkOrderShipmentConfirmed`.
+  `NetworkOrderRejected` | `NetworkOrderShipmentConfirmed`, and
+  `networkorder.AcknowledgementDeadlineAtRisk` — five events, all on BOTH
+  topics (ADR 0015). `NetworkOrderAcknowledged` fires at SUBMITTED, before
+  reconciliation; the analytics projector handles only Received/Acknowledged/
+  Rejected and ignores the other two.
 
 ## Consumer rules
 
