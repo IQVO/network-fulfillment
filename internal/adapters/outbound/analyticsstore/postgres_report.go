@@ -33,7 +33,7 @@ func (r *PostgresReport) Query(ctx context.Context, q report.ReportQuery) (repor
 		`SELECT day_bucket, orders_received, orders_acknowledged,
 			sum_acknowledgement_latency_seconds, acknowledgement_latency_count,
 			orders_rejected_untranslatable_sku, orders_rejected_domain,
-			acknowledgement_deadlines_missed
+			acknowledgement_deadlines_missed, orders_rejected_submission_failed
 		 FROM acknowledgement_rollup
 		 WHERE day_bucket >= $1 AND day_bucket < $2
 		 ORDER BY day_bucket`,
@@ -53,7 +53,7 @@ func (r *PostgresReport) Query(ctx context.Context, q report.ReportQuery) (repor
 			&bucket, &row.OrdersReceived, &row.OrdersAcknowledged,
 			&row.SumAcknowledgementLatencySeconds, &row.AcknowledgementLatencyCount,
 			&row.OrdersRejectedUntranslatableSKU, &row.OrdersRejectedDomain,
-			&row.AcknowledgementDeadlinesMissed,
+			&row.AcknowledgementDeadlinesMissed, &row.OrdersRejectedSubmissionFailed,
 		); err != nil {
 			return report.AcknowledgementReport{}, fmt.Errorf("analyticsstore: scan row: %w", err)
 		}

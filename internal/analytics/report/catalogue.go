@@ -52,6 +52,12 @@ type Row struct {
 	// operational failure distinct from either rejection above: the 24h
 	// window closed with no answer ever sent.
 	AcknowledgementDeadlinesMissed int
+	// OrdersRejectedSubmissionFailed is the number of NetworkOrderRejected
+	// events whose Reason is SUBMISSION_FAILED — reconciliation found that
+	// the network itself refused (FAILURE) an acknowledgement we had
+	// submitted. Distinct from a domain refusal: we said yes, the network
+	// did not accept it.
+	OrdersRejectedSubmissionFailed int
 
 	// sumAcknowledgementLatencySeconds and acknowledgementLatencyCount
 	// back AvgAcknowledgementLatencySeconds. Kept as a running sum/count

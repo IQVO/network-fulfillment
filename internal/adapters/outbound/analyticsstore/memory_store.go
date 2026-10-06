@@ -103,6 +103,8 @@ func (s *MemoryStore) ApplyNetworkOrderRejected(_ context.Context, eventId strin
 			r.OrdersRejectedDomain++
 		case "ACKNOWLEDGEMENT_DEADLINE_MISSED":
 			r.AcknowledgementDeadlinesMissed++
+		case "SUBMISSION_FAILED":
+			r.OrdersRejectedSubmissionFailed++
 		}
 	})
 }

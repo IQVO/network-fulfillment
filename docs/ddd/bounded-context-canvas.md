@@ -141,7 +141,8 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 - The `AcknowledgementDeadlineAtRisk` rate, and rejections split by
   `RejectionReason`.
 - Acknowledgement report: average acknowledgement latency, received vs
-  acknowledged, and rejections by cause (`acknowledgement_rollup`).
+  acknowledged, and rejections by cause (`acknowledgement_rollup`, including
+  `ordersRejectedSubmissionFailed`).
 - Share of `THROUGHPUT_CONSTRAINED` offers per recompute pass (logged as
   `throughput_constrained`).
 - `circuit_breaker_state` gauge for the `order-management` dependency.
@@ -156,13 +157,19 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 - **Acknowledged-before-settled event.** `NetworkOrderAcknowledged` is
   published when the order goes `SUBMITTED`, before reconciliation, and no
   event marks `SUBMITTED -> ACKNOWLEDGED`. Is that the intended contract
-  for subscribers?
+  for subscribers? ADR 0001 §5 and ADR 0009 do not say when the event
+  fires, so this stays open (ADR 0015 "Not decided here"); the AsyncAPI now
+  documents the actual timing.
 - **Orphaned hold after a crash.** If the process dies after
   `RaiseHeldOrder` but before the answer is saved, the order stays `NEW`
   with no `localOrderId`. `RejectOverdueOrders` then cannot cancel the hold
   in `order-management`. ADR 0001 names the orphaned hold as an open gap.
 - **Cycle time is not yet used.** `contract.EligiblePath.CycleTimeP95` is
-  cached, but `throughputFeasible` sums only remaining capacity.
-- **Contract drift.** `apis/openapi.yaml` does not document
-  `GET /capability-offers` or the shipment-confirmation `POST`. CORS allows
-  only `GET/OPTIONS`. `ErrConfirmBeforeAcknowledge` maps to a 500.
+  cached, but `throughputFeasible` sums only remaining capacity. ADR 0001
+  names `cycleTimeP95` as an input to `throughputFeasibleBefore` but does
+  not say how it combines with capacity, so this needs a product decision.
+- **Contract drift (fixed 2026-10-06, ADR 0015).** CORS now allows
+  `GET/POST/OPTIONS`, `ErrConfirmBeforeAcknowledge` maps to a 409,
+  `apis/openapi.yaml` documents `GET /capability-offers` and the
+  shipment-confirmation `POST`, and the acknowledgement report counts
+  `SUBMISSION_FAILED` rejections.

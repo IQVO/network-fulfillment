@@ -193,7 +193,7 @@ sequenceDiagram
         UC->>A: ConfirmShipment()
         alt state is not ACKNOWLEDGED
             A-->>UC: ErrConfirmBeforeAcknowledge
-            H-->>C: 500 problem+json internal-error
+            H-->>C: 409 problem+json confirm-before-acknowledge
         else ACKNOWLEDGED
             UC->>U: Execute: Save CONFIRMED + Publish NetworkOrderShipmentConfirmed
             UC->>GW: SubmitShipmentConfirmation(ref)
@@ -209,11 +209,12 @@ Source: `internal/application/usecases/confirm_network_order_shipment.go`,
 
 Omitted: an empty `networkRef` returns 422 (`ErrEmptyNetworkRef`). A failed
 `SubmitShipmentConfirmation` returns 500 after the record has committed;
-a retry is then a no-op that returns 204 without re-submitting. The 500
-for `ErrConfirmBeforeAcknowledge` happens because `statusFor` has no case
-for it. The route is registered only when `ConfirmShipment` is wired,
-which `cmd/netfulfil` always does. CORS allows only `GET/OPTIONS`, so a
-browser cannot call this route cross-origin.
+a retry is then a no-op that returns 204 without re-submitting. The 409
+for `ErrConfirmBeforeAcknowledge` is a case in `statusFor`/`problemFor`
+(`errors.go`), pinned by `TestHandleConfirmShipment_BeforeAcknowledgeReturns409`.
+The route is registered only when `ConfirmShipment` is wired,
+which `cmd/netfulfil` always does. CORS allows `GET/POST/OPTIONS`, so a
+browser can call this route cross-origin.
 
 ## 5. RecomputeCapabilityOffers (ticker, RECOMPUTE_INTERVAL)
 

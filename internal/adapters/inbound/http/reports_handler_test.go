@@ -45,6 +45,7 @@ func TestReportsAcknowledgement_OK(t *testing.T) {
 				OrdersRejectedUntranslatableSKU:  1,
 				OrdersRejectedDomain:             1,
 				AcknowledgementDeadlinesMissed:   1,
+				OrdersRejectedSubmissionFailed:   2,
 				SumAcknowledgementLatencySeconds: 700,
 				AcknowledgementLatencyCount:      7,
 			},
@@ -72,6 +73,7 @@ func TestReportsAcknowledgement_OK(t *testing.T) {
 			OrdersRejectedUntranslatableSKU  int     `json:"ordersRejectedUntranslatableSku"`
 			OrdersRejectedDomain             int     `json:"ordersRejectedDomain"`
 			AcknowledgementDeadlinesMissed   int     `json:"acknowledgementDeadlinesMissed"`
+			OrdersRejectedSubmissionFailed   int     `json:"ordersRejectedSubmissionFailed"`
 			AvgAcknowledgementLatencySeconds float64 `json:"avgAcknowledgementLatencySeconds"`
 		} `json:"rows"`
 	}
@@ -93,6 +95,9 @@ func TestReportsAcknowledgement_OK(t *testing.T) {
 	}
 	if row.AvgAcknowledgementLatencySeconds != 100 {
 		t.Errorf("avgAcknowledgementLatencySeconds = %v, want 100", row.AvgAcknowledgementLatencySeconds)
+	}
+	if row.OrdersRejectedSubmissionFailed != 2 {
+		t.Errorf("ordersRejectedSubmissionFailed = %d, want 2", row.OrdersRejectedSubmissionFailed)
 	}
 	if row.DayBucket != "2026-06-01T00:00:00Z" {
 		t.Errorf("dayBucket = %q", row.DayBucket)

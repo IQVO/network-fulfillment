@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -13,6 +14,13 @@ func statusFor(err error) int {
 	switch {
 	case errors.Is(err, usecases.ErrOrderNotFound):
 		return http.StatusNotFound
+
+	// The order exists but is in the wrong lifecycle state for this
+	// request: confirming shipment before the acknowledgement settled.
+	// A conflict with current resource state, which the caller can
+	// resolve, not a server bug.
+	case errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge):
+		return http.StatusConflict
 
 	// A product the Anti-Corruption Layer cannot translate is a business
 	// fact about OUR catalogue, not a malformed request: the network
@@ -59,6 +67,9 @@ func problemFor(err error) problemInfo {
 	switch {
 	case errors.Is(err, usecases.ErrOrderNotFound):
 		return problemInfo{"network-order-not-found", "Network order not found"}
+
+	case errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge):
+		return problemInfo{"confirm-before-acknowledge", "Shipment cannot be confirmed before the order is acknowledged"}
 
 	case errors.Is(err, shared.ErrUnknownProduct):
 		return problemInfo{"unknown-product", "No SKU is mapped to that network product id"}

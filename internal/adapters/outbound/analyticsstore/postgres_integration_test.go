@@ -91,6 +91,7 @@ func TestPostgresProjectionAndReport_RoundTrip(t *testing.T) {
 		must(proj.ApplyNetworkOrderRejected(ctx, prefix+"-j1", base, "UNTRANSLATABLE_SKU"))
 		must(proj.ApplyNetworkOrderRejected(ctx, prefix+"-j2", base, "INFEASIBLE_DEADLINE"))
 		must(proj.ApplyNetworkOrderRejected(ctx, prefix+"-j3", base, "ACKNOWLEDGEMENT_DEADLINE_MISSED"))
+		must(proj.ApplyNetworkOrderRejected(ctx, prefix+"-j4", base, "SUBMISSION_FAILED"))
 	}
 	apply()
 	apply() // idempotent re-application must not double the counters
@@ -122,6 +123,10 @@ func TestPostgresProjectionAndReport_RoundTrip(t *testing.T) {
 	}
 	if row.AcknowledgementDeadlinesMissed < 1 {
 		t.Errorf("AcknowledgementDeadlinesMissed = %d, want >= 1", row.AcknowledgementDeadlinesMissed)
+	}
+	// Exactly 1 (not >=): the second apply() pass must be idempotent.
+	if row.OrdersRejectedSubmissionFailed != 1 {
+		t.Errorf("OrdersRejectedSubmissionFailed = %d, want exactly 1", row.OrdersRejectedSubmissionFailed)
 	}
 
 	lag, err := rdr.FreshnessLag(ctx)

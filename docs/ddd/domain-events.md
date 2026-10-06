@@ -42,7 +42,7 @@ same transaction as the aggregate (ADR 0003), and the relay drains them.
 | --- | --- | --- | --- | --- |
 | `NetworkOrderReceived` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived` | `networkRef`, `siteId`, `requiredShipBy`, `acknowledgeBy`, `lineCount` (0 for untranslatable demand), `at` | `ReceiveNetworkDemand` (both paths) | own analytics projector (`orders_received`) |
 | `NetworkOrderAcknowledged` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` | `networkRef`, `siteId`, `localOrderId`, `receivedAt`, `at` | `ReceiveNetworkDemand.acknowledge`, at **submission** (state `SUBMITTED`) | own analytics projector (`orders_acknowledged`, latency `at - receivedAt`) |
-| `NetworkOrderRejected` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` | `networkRef`, `siteId`, `reason` (`UNTRANSLATABLE_SKU` \| `INFEASIBLE_DEADLINE` \| `ACKNOWLEDGEMENT_DEADLINE_MISSED` \| `SUBMISSION_FAILED`), `at` | `ReceiveNetworkDemand.reject` (first two reasons), `RejectOverdueOrders`, `ReconcileSubmittedOrders.fail` | own analytics projector (counters by reason; `SUBMISSION_FAILED` is claimed but counted nowhere) |
+| `NetworkOrderRejected` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` | `networkRef`, `siteId`, `reason` (`UNTRANSLATABLE_SKU` \| `INFEASIBLE_DEADLINE` \| `ACKNOWLEDGEMENT_DEADLINE_MISSED` \| `SUBMISSION_FAILED`), `at` | `ReceiveNetworkDemand.reject` (first two reasons), `RejectOverdueOrders`, `ReconcileSubmittedOrders.fail` | own analytics projector (counters by reason, including `SUBMISSION_FAILED` -> `orders_rejected_submission_failed`) |
 | `NetworkOrderShipmentConfirmed` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` | `networkRef`, `siteId`, `localOrderId`, `at` | `ConfirmNetworkOrderShipment` | none (the projector ignores it) |
 | `AcknowledgementDeadlineAtRisk` | `com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk` | `networkRef`, `siteId`, `acknowledgeBy`, `at` | `SweepAcknowledgementDeadlines`, re-fired every pass while the order is overdue | none (the projector ignores it) |
 
@@ -76,19 +76,29 @@ Consumer behaviour:
   per-process group and gate boot on `WaitReady` (60s each). A
   non-CloudEvent or a handling error is **logged and skipped**: no DLQ.
 
-## Discrepancies found (spec vs code, reported not fixed)
+## Discrepancies found (spec vs code)
 
-1. `apis/asyncapi.yaml`'s analytics channel lists only four messages and
-   omits `AcknowledgementDeadlineAtRisk`. `fanOutPublisher` publishes it to
-   the analytics topic as well.
-2. `apis/asyncapi.yaml` `info.description` says the aggregate raises four
-   events. The integration channel lists five, which matches the code.
-3. `apis/asyncapi.yaml` `info.contact.url` still points at
-   `github.com/claudioed/network-fulfillment`. The org is `IQVO`, and the
-   Go module path is unchanged.
-4. The `NetworkOrderShipmentConfirmed` doc comment in
-   `internal/domain/shared/events.go` says "no use case in this codebase
-   calls [ConfirmShipment] yet". `ConfirmNetworkOrderShipment` (ADR 0014)
-   now does.
-5. `PostgresProjection.ApplyNetworkOrderRejected` has no counter for
-   `SUBMISSION_FAILED`, so those rejections disappear from the report.
+Fixed on 2026-10-06 (docs-audit PR, [ADR 0015](../adr/0015-docs-audit-contract-corrections.md)):
+
+1. ~~`apis/asyncapi.yaml`'s analytics channel lists only four messages~~:
+   `AcknowledgementDeadlineAtRisk` is now on the analytics channel
+   (`AcknowledgementDeadlineAtRiskAnalytics`; the projector still ignores it).
+2. ~~`info.description` says four events~~: now lists all five.
+3. ~~`info.contact.url` points at `github.com/claudioed/network-fulfillment`~~:
+   now `github.com/IQVO/network-fulfillment`. The Go module path is
+   unchanged.
+4. ~~The `NetworkOrderShipmentConfirmed` doc comment says no use case calls
+   `ConfirmShipment`~~: corrected (it is `ConfirmNetworkOrderShipment`, ADR
+   0014), here, in `events.go` and in the AsyncAPI message descriptions.
+5. ~~`ApplyNetworkOrderRejected` has no `SUBMISSION_FAILED` counter~~: the
+   rollup now has `orders_rejected_submission_failed`, surfaced as
+   `ordersRejectedSubmissionFailed` in the report (history before the
+   migration reads 0).
+
+Still open (needs a product decision, see ADR 0015 "Not decided here"):
+
+- `NetworkOrderAcknowledged` is published at `SUBMITTED`, before
+  reconciliation, and `SUBMITTED -> ACKNOWLEDGED` raises no event. The
+  AsyncAPI now states this timing explicitly.
+- `contract.EligiblePath.CycleTimeP95` is cached but unused by
+  `throughputFeasible`.

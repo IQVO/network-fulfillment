@@ -20,6 +20,7 @@ to update when a record is added or its Status line changes.
 | [0012](0012-network-seed-file-stub-demand-seeding.md) | NETWORK_SEED_FILE seeds demand into the stub gateway only | Accepted |
 | [0013](0013-product-translation-file-acl-dictionary.md) | PRODUCT_TRANSLATION_FILE loads the ACL's product dictionary | Accepted |
 | [0014](0014-explicit-shipment-confirmation-endpoint.md) | Shipment confirmation is an explicit endpoint, not a PackageManifested correlation | Accepted (2026-10); amends 0001 Rollout step 6 |
+| [0015](0015-docs-audit-contract-corrections.md) | Contract corrections from the 2026-10-05 docs audit: 409 for confirm-before-acknowledge, CORS POST, SUBMISSION_FAILED report counter | Accepted (2026-10-06); additive to 0001 and 0014 |
 
 [`0002-retail-network-not-amazon-counterpart.md`](0002-retail-network-not-amazon-counterpart.md)
 is a redirect stub ("Moved to ADR 0009"), kept so old links resolve; it is
