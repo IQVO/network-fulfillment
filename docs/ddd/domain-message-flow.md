@@ -26,11 +26,12 @@ sequenceDiagram
     NF->>K: evt: networkorder.NetworkOrderReceived
     NF->>OM: cmd: POST /orders releaseOnAllocation false, allowPartialShipment false, requiredShipBy
     OM-->>NF: cmd: reply order id + promiseDate present = feasible
-    NF->>K: evt: networkorder.NetworkOrderAcknowledged
+    NF->>K: evt: networkorder.NetworkOrderSubmitted
     NF->>RN: cmd: SubmitAcknowledgement accepted true
     Note over NF: order is SUBMITTED, hold not released
     NF->>RN: qry: SubmissionStatus networkRef
     RN-->>NF: qry: reply SUCCESS
+    NF->>K: evt: networkorder.NetworkOrderAcknowledged.v2
     NF->>OM: cmd: POST /orders/id/release
     Note over NF: order is ACKNOWLEDGED
     OP->>NF: cmd: POST /network-orders/networkRef/shipment-confirmation

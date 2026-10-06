@@ -24,6 +24,8 @@ func TestPayload_FieldNamesPerEvent(t *testing.T) {
 	}{
 		{shared.NetworkOrderReceived{NetworkRef: "n", At: at},
 			[]string{"networkRef", "siteId", "requiredShipBy", "acknowledgeBy", "lineCount", "at"}},
+		{shared.NetworkOrderSubmitted{NetworkRef: "n", At: at},
+			[]string{"networkRef", "siteId", "localOrderId", "receivedAt", "at"}},
 		{shared.NetworkOrderAcknowledged{NetworkRef: "n", At: at},
 			[]string{"networkRef", "siteId", "localOrderId", "receivedAt", "at"}},
 		{shared.NetworkOrderRejected{NetworkRef: "n", At: at},

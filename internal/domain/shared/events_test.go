@@ -23,6 +23,14 @@ func TestDomainEvents_EventNameAndOccurredAt(t *testing.T) {
 			want: "NetworkOrderReceived",
 		},
 		{
+			name: "NetworkOrderSubmitted",
+			event: NetworkOrderSubmitted{
+				NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1",
+				ReceivedAt: now.Add(-time.Hour), At: now,
+			},
+			want: "NetworkOrderSubmitted",
+		},
+		{
 			name: "NetworkOrderAcknowledged",
 			event: NetworkOrderAcknowledged{
 				NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1",

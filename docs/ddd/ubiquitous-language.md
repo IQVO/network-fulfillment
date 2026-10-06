@@ -56,7 +56,7 @@ difference is flagged in the last section. Code wins over this page.
 | Business term | Code name | Note |
 | --- | --- | --- |
 | "Acknowledge" (business) | `Submit` then `ConfirmAcknowledgement`; `Acknowledge()` does both | `Acknowledge()` exists for tests and fixtures. The real flow splits it across `ReceiveNetworkDemand` and `ReconcileSubmittedOrders`. |
-| "Acknowledged" event | `NetworkOrderAcknowledged` | Raised at **submission** time (state `SUBMITTED`), not when the order reaches `ACKNOWLEDGED`. |
+| "Acknowledged" event | `NetworkOrderAcknowledged` (v2) | Decided 2026-10-06 (ADR 0016): raised only when the order **settles** `ACKNOWLEDGED` (`ReconcileSubmittedOrders`). The earlier fact, the move to `SUBMITTED`, is `NetworkOrderSubmitted`. |
 | "Not acknowledged" error | `ErrNotAcknowledged` | Returned by `LinkLocalOrder` when the state is not `SUBMITTED`/`ACKNOWLEDGED`. The name predates the `SUBMITTED` state. |
 | "Deadline at risk" | `AcknowledgementDeadlineAtRisk` | ADR 0001 §6 says "approaching" the deadline. The code fires only once it is already **past** (`AcknowledgementOverdue`). |
 | Purchase order / ASIN / `poNumber` | `NetworkRef` / `NetworkProductId` | By design (Hard rule 1). The counterpart's names never appear outside `adapters/outbound/network/`. |

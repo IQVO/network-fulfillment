@@ -91,10 +91,17 @@ type ProcessedEvents interface {
 // Built from the shared cloudevents helper (not imported from the outbound
 // publisher, so this inbound adapter never depends on an outbound adapter
 // — arch-go enforced).
+//
+// ADR 0016: NetworkOrderAcknowledged changed meaning and is published as
+// the `.v2` type (the settle). The unsuffixed type is the HISTORIC v1
+// (published at SUBMITTED) that still sits on the analytics topic: it is
+// recognised forever so a replay keeps producing the same report numbers.
 var (
-	TypeNetworkOrderReceived     = cloudevents.Type("networkorder", "NetworkOrderReceived")
-	TypeNetworkOrderAcknowledged = cloudevents.Type("networkorder", "NetworkOrderAcknowledged")
-	TypeNetworkOrderRejected     = cloudevents.Type("networkorder", "NetworkOrderRejected")
+	TypeNetworkOrderReceived       = cloudevents.Type("networkorder", "NetworkOrderReceived")
+	TypeNetworkOrderSubmitted      = cloudevents.Type("networkorder", "NetworkOrderSubmitted")
+	TypeNetworkOrderAcknowledged   = cloudevents.TypeVersioned("networkorder", "NetworkOrderAcknowledged", 2)
+	TypeNetworkOrderAcknowledgedV1 = cloudevents.Type("networkorder", "NetworkOrderAcknowledged")
+	TypeNetworkOrderRejected       = cloudevents.Type("networkorder", "NetworkOrderRejected")
 )
 
 // analyticsEventData is the subset of every event's own JSON this consumer
@@ -336,7 +343,9 @@ func decodeAnalyticsEvent(raw []byte) (ce.Event, bool, error) {
 		return ce.Event{}, false, fmt.Errorf("analytics: decode event: %w", err)
 	}
 	switch env.Type() {
-	case TypeNetworkOrderReceived, TypeNetworkOrderAcknowledged, TypeNetworkOrderRejected:
+	case TypeNetworkOrderReceived, TypeNetworkOrderSubmitted,
+		TypeNetworkOrderAcknowledged, TypeNetworkOrderAcknowledgedV1,
+		TypeNetworkOrderRejected:
 		return env, true, nil
 	default:
 		return env, false, nil
@@ -357,7 +366,15 @@ func (c *AnalyticsConsumer) applyProjection(ctx context.Context, env ce.Event) e
 	switch env.Type() {
 	case TypeNetworkOrderReceived:
 		return c.Projection.ApplyNetworkOrderReceived(ctx, env.ID(), at)
-	case TypeNetworkOrderAcknowledged:
+	case TypeNetworkOrderSubmitted:
+		// A recognised, claimed fact with no report effect: the
+		// acknowledgement report counts SETTLED acknowledgements
+		// (ADR 0016). Claiming it keeps redelivery a skip.
+		return nil
+	case TypeNetworkOrderAcknowledged, TypeNetworkOrderAcknowledgedV1:
+		// v1 (historic, published at SUBMITTED) and v2 (the settle) feed
+		// the same counter with the same payload fields, so replaying
+		// the topic keeps the pre-ADR-0016 report numbers.
 		latency := at.Sub(data.ReceivedAt).Seconds()
 		if latency < 0 {
 			latency = 0

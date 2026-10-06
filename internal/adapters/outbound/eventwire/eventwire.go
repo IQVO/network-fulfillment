@@ -5,9 +5,10 @@
 // the log publisher) maps it through Payload first.
 //
 // The field names, order and encodings here are the Published Language's
-// `data` schema (dataschema ...:v1) and MUST NOT change without a new
-// dataschema version; byte-identical goldens in the outbound kafka and
-// events packages pin them.
+// `data` schema (dataschema ...:v1, or ...:v2 for NetworkOrderAcknowledged,
+// ADR 0016) and MUST NOT change without a new dataschema version;
+// byte-identical goldens in the outbound kafka and events packages pin
+// them.
 package eventwire
 
 import (
@@ -26,6 +27,18 @@ type networkOrderReceived struct {
 	At             time.Time         `json:"at"`
 }
 
+type networkOrderSubmitted struct {
+	NetworkRef   shared.NetworkRef   `json:"networkRef"`
+	SiteId       shared.SiteId       `json:"siteId"`
+	LocalOrderId shared.LocalOrderId `json:"localOrderId"`
+	ReceivedAt   time.Time           `json:"receivedAt"`
+	At           time.Time           `json:"at"`
+}
+
+// networkOrderAcknowledged is the payload of NetworkOrderAcknowledged
+// v2 (dataschema ...:v2, ADR 0016). Its field set equals v1's; only the
+// meaning changed (the settle, not the submission), which is why it is
+// versioned.
 type networkOrderAcknowledged struct {
 	NetworkRef   shared.NetworkRef   `json:"networkRef"`
 	SiteId       shared.SiteId       `json:"siteId"`
@@ -66,6 +79,11 @@ func Payload(event shared.DomainEvent) (any, error) {
 			NetworkRef: e.NetworkRef, SiteId: e.SiteId,
 			RequiredShipBy: e.RequiredShipBy, AcknowledgeBy: e.AcknowledgeBy,
 			LineCount: e.LineCount, At: e.At,
+		}, nil
+	case shared.NetworkOrderSubmitted:
+		return networkOrderSubmitted{
+			NetworkRef: e.NetworkRef, SiteId: e.SiteId, LocalOrderId: e.LocalOrderId,
+			ReceivedAt: e.ReceivedAt, At: e.At,
 		}, nil
 	case shared.NetworkOrderAcknowledged:
 		return networkOrderAcknowledged{

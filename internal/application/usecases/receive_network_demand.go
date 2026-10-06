@@ -212,7 +212,8 @@ func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.Netw
 
 // acknowledge commits us to the order and puts the work on the floor.
 //
-// The state transition, its Save and its Publish commit together in one
+// The state transition, its Save and its Publish (NetworkOrderSubmitted —
+// the order moves to SUBMITTED, ADR 0016) commit together in one
 // atomic scope BEFORE the network is told or the hold released: a crash
 // before that scope commits leaves nothing behind for a re-poll to answer
 // twice, and the network is never told yes for a fact that is not yet
@@ -231,7 +232,7 @@ func (uc *ReceiveNetworkDemand) acknowledge(ctx context.Context, o *networkorder
 		if err := uc.Orders.Save(ctx, o); err != nil {
 			return err
 		}
-		return uc.Events.Publish(ctx, shared.NetworkOrderAcknowledged{
+		return uc.Events.Publish(ctx, shared.NetworkOrderSubmitted{
 			NetworkRef:   o.NetworkRef(),
 			SiteId:       o.SiteId(),
 			LocalOrderId: result.LocalOrderId,
