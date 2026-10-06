@@ -14,6 +14,7 @@ not a real retailer's SP-API) before writing network-facing code. That ADR
 was renumbered from 0002 to 0009 on 2026-10-05 to resolve a duplicate
 ADR-0002 (`0002-mcp-and-analytics-data-product.md` keeps 0002); a stub at
 the old `0002-retail-network-not-amazon-counterpart.md` path redirects here.
+ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/ddd/`.
 
 ## Current state
 
@@ -28,11 +29,14 @@ declares the live-mode methods — `DeclareCapability`/`SubmitAvailability`/
 `NETWORK_MODE=live` errors clearly until one is built), poller (inbound
 leg), READ-ONLY REST plus the one explicit write endpoint above, CloudEvents
 Kafka publishers + outbox, analytics projector, MCP adapter, `web/` remote,
-Helm chart. Also built (ADR 0001 §8): the `CapabilityOffer` aggregate, its
-three Kafka-fed caches (process-path cycle time, path capacity, and a
-synchronous inventory-storage read — see that ADR for why inventory is REST,
-not a cache), and the `GET /capability-offers` / `list_capability_offers`
-read surface, opt-in via `CAPABILITY_OFFER_ENABLED`.
+Helm chart. Also built (ADR 0001 §8): the `CapabilityOffer` aggregate and
+`RecomputeCapabilityOffers`, its two Kafka-fed caches (process-path-management
+paths + CPT schedule, wes-work-planning path capacity) plus a synchronous
+inventory-storage REST read (see the `ports.InventoryAvailability` doc
+comment for why inventory is REST, not a cache), and the
+`GET /capability-offers` / `list_capability_offers` read surface, opt-in via
+`CAPABILITY_OFFER_ENABLED`. The offer is persisted, not yet submitted to
+the network (`SubmitAvailability` has no caller).
 Not built: a live `retail-network` HTTP adapter, and the
 `adapters/outbound/network/` -> `outbound/retailnetwork/` package rename
 (still deferred).
@@ -53,9 +57,9 @@ depend on application/domain.**
 
 ```
 cmd/netfulfil (composition root; also cmd/mcp, cmd/netfulfil-projector, cmd/netfulfil-reports)
-internal/domain/{networkorder,shared}  internal/application/{contract,ports,usecases}
+internal/domain/{networkorder,capabilityoffer,shared}  internal/application/{contract,ports,usecases}
 internal/adapters/inbound/{http,poller,kafka,mcp}
-internal/adapters/outbound/{network,ordermanagement,postgres,memory,kafka,events,...}
+internal/adapters/outbound/{network,ordermanagement,inventoryclient,processpathcache,pathcapacitycache,postgres,memory,kafka,events,...}
 ```
 
 ## Hard rules
@@ -97,8 +101,11 @@ internal/adapters/outbound/{network,ordermanagement,postgres,memory,kafka,events
 
 ## Events: CloudEvents 1.0 is MANDATORY
 
-Every Kafka message produced or consumed (`warehouse.network-fulfillment.events`
-and `.analytics`) is a CloudEvents 1.0 structured-mode event: no flat
+Every Kafka message produced (`warehouse.network-fulfillment.events` and
+`.analytics`) or consumed (our own `.analytics`, plus
+`warehouse.process-path-management.events` and
+`warehouse.work-planning.events` for the opt-in capability caches) is a
+CloudEvents 1.0 structured-mode event: no flat
 envelope, no dual-write/read, no toggle. Use `github.com/cloudevents/sdk-go/v2/event`
 via `internal/adapters/kafka/cloudevents/`; header `content-type:
 application/cloudevents+json; charset=UTF-8`. Required: `specversion=1.0`,
@@ -115,7 +122,7 @@ fails validation (ADR 0008: `docs/adr/0008-cloudevents-mandatory-event-envelope.
 ```bash
 make check-fast   # fmt-check + vet + arch-test: run before saying "done"
 make check-all    # check + coverage (90% gate) + arch-test + bdd (no features/ yet)
-make integration  # Postgres via testcontainers, never skip-gated
+make integration  # Postgres and Kafka via testcontainers, never skip-gated
 make mutation     # gremlins on ./internal/domain/networkorder (CI: mutation-fast)
 make guide-lint   # these agent guides: references resolve, context budget
 ```
