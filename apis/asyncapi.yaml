@@ -699,8 +699,8 @@ components:
           description: The producing service.
         type:
           type: string
-          pattern: "^com\\.warehouse\\.wes\\.network-fulfillment\\.networkorder\\.[A-Z][A-Za-z]+$"
-          description: "`com.warehouse.wes.network-fulfillment.networkorder.<EventName>`."
+          pattern: "^com\\.warehouse\\.wes\\.network-fulfillment\\.networkorder\\.[A-Z][A-Za-z]+(\\.v[0-9]+)?$"
+          description: "`com.warehouse.wes.network-fulfillment.networkorder.<EventName>`, with a `.v<N>` suffix for a breaking version (e.g. `NetworkOrderAcknowledged.v2`, ADR 0016)."
         subject:
           type: string
           minLength: 1
