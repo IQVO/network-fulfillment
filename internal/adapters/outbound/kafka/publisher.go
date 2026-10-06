@@ -19,6 +19,7 @@ import (
 	kafkago "github.com/segmentio/kafka-go"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/kafka/cloudevents"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/eventwire"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -119,6 +120,10 @@ func encodeAll(topic, stream string, newId func() string, events []shared.Domain
 	out := make([]Encoded, 0, len(events))
 	for _, event := range events {
 		key := aggregateKey(event)
+		payload, err := eventwire.Payload(event)
+		if err != nil {
+			return nil, fmt.Errorf("kafka: encode %s for %s: %w", event.EventName(), topic, err)
+		}
 		value, err := cloudevents.New(cloudevents.Spec{
 			ID:        newId(),
 			Entity:    Entity,
@@ -127,7 +132,7 @@ func encodeAll(topic, stream string, newId func() string, events []shared.Domain
 			Time:      event.OccurredAt(),
 			Stream:    stream,
 			Version:   dataSchemaVersion,
-			Data:      event,
+			Data:      payload,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("kafka: encode %s for %s: %w", event.EventName(), topic, err)

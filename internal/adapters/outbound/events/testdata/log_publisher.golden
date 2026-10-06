@@ -1,0 +1,5 @@
+{"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","requiredShipBy":"2026-09-25T08:00:00Z","acknowledgeBy":"2026-09-24T08:00:00Z","lineCount":2,"at":"2026-09-23T08:00:00Z"}}
+{"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","localOrderId":"ord-1","receivedAt":"2026-09-23T07:59:00Z","at":"2026-09-23T08:00:00Z"}}
+{"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","reason":"SUBMISSION_FAILED","at":"2026-09-23T08:00:00Z"}}
+{"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","localOrderId":"ord-1","at":"2026-09-23T08:00:00Z"}}
+{"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","acknowledgeBy":"2026-09-23T07:00:00Z","at":"2026-09-23T08:00:00Z"}}
