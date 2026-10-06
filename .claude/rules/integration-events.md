@@ -59,12 +59,17 @@ packages and never hand-roll an envelope struct.
   or `analytics`. Breaking payload change => new `.v2` type + new
   dataschema version, never mutate an existing one.
 - Published types: `com.warehouse.wes.network-fulfillment.networkorder.`
-  + `NetworkOrderReceived` | `NetworkOrderAcknowledged` |
-  `NetworkOrderRejected` | `NetworkOrderShipmentConfirmed`, and
-  `networkorder.AcknowledgementDeadlineAtRisk` — five events, all on BOTH
-  topics (ADR 0015). `NetworkOrderAcknowledged` fires at SUBMITTED, before
-  reconciliation; the analytics projector handles only Received/Acknowledged/
-  Rejected and ignores the other two.
+  + `NetworkOrderReceived` | `NetworkOrderSubmitted` |
+  `NetworkOrderAcknowledged.v2` | `NetworkOrderRejected` |
+  `NetworkOrderShipmentConfirmed` | `AcknowledgementDeadlineAtRisk` — six
+  events, all on BOTH topics (ADR 0015, 0016). `NetworkOrderSubmitted` fires
+  when the order moves to SUBMITTED (what `NetworkOrderAcknowledged` v1 used
+  to announce); `NetworkOrderAcknowledged` (v2 type + `:v2` dataschema) fires
+  only when reconciliation settles the order ACKNOWLEDGED. Both are raised in
+  the same atomic save as the state change. The analytics projector handles
+  Received/Acknowledged/Rejected, claims Submitted with no report effect, and
+  still recognises the historic unsuffixed Acknowledged v1 forever (a replay
+  must keep the same report numbers); it ignores the other two.
 
 ## Consumer rules
 
