@@ -24,10 +24,18 @@ fail-closed: after the budget it still refuses to boot.
 ## Inbound leg and curated files
 
 A poller (`internal/adapters/inbound/poller`) drives `ReceiveNetworkDemand`
-on an interval; the read-only REST surface (`internal/adapters/inbound/http`,
+on an interval; the REST surface (`internal/adapters/inbound/http`,
 contract `apis/openapi.yaml`) exposes what we told the network and whether
 the poller is alive. Demand arrives by polling and nothing else (ADR 0001
-section 5); do not add a write endpoint without changing that record.
+section 5). The one write route,
+`POST /network-orders/{networkRef}/shipment-confirmation`, exists because
+ADR 0014 records it; any further write endpoint needs its own new ADR.
+
+Background tickers in `cmd/netfulfil`: `ReconcileSubmittedOrders` (every
+`POLL_INTERVAL`), `SweepAcknowledgementDeadlines` and `RejectOverdueOrders`
+(each every `SWEEP_INTERVAL`), and `RecomputeCapabilityOffers` (every
+`RECOMPUTE_INTERVAL`, only with `CAPABILITY_OFFER_ENABLED=true`, in which
+case boot also blocks until the two Kafka caches have replayed).
 
 Two curated files, following the fleet's `PATH_CATALOGUE_FILE` precedent:
 `PRODUCT_TRANSLATION_FILE` (the ACL dictionary: without it every order is
@@ -52,10 +60,10 @@ plus `charts/network-fulfillment/tests/`), then `trivy-scan`,
   fails because a directory is missing is noise, not signal.
 - `trivy-scan` builds the image (no push) and blocks on CRITICAL/HIGH with
   a known fix, only for PRs targeting `main`.
-- `docker-publish` (push to `main`) pushes `ghcr.io/claudioed/network-fulfillment`,
+- `docker-publish` (push to `main`) pushes `ghcr.io/iqvo/network-fulfillment`,
   cosign-signs it keylessly and attests an SPDX SBOM. `release` runs after
   it: bumps semver from the latest `vX.Y.Z` tag, re-tags the image,
-  pushes the Helm chart to `oci://ghcr.io/claudioed`, cuts the git tag and
+  pushes the Helm chart to `oci://ghcr.io/iqvo`, cuts the git tag and
   a GitHub Release with the chart `.tgz`.
 - `guide-lint` (harness v3) runs `scripts/harness/guide_lint.py` and
   `scripts/harness/test_hook.py`; it is blocking as a job but is not in
@@ -77,7 +85,9 @@ plus `charts/network-fulfillment/tests/`), then `trivy-scan`,
 run of this repo's own code (100.00% efficacy, 93.33% mutant coverage,
 14 killed / 0 lived / 1 not covered). Re-measure when the domain grows;
 never copy a sibling's numbers. `MUTATION_FAST_PKG` is
-`./internal/domain/networkorder`, the only aggregate.
+`./internal/domain/networkorder`. Since `internal/domain/capabilityoffer`
+landed it is no longer the only aggregate, and the measurement above
+predates it: re-measure before widening the fast subset.
 
 ## Deployment
 
@@ -93,4 +103,6 @@ database Secret (`network-fulfillment-db`) and a Kong route at
 `order-management` 0020 (companion: `FeasibleBy`), 0014, 0004 (release is
 the cancellation boundary), 0017; `process-path-management` 0010 (the
 capability contract advertised against); `fulfillment-execution` 0025 (the
-sweep pattern); `retail-network` 0001 (draft in `docs/planning/`).
+sweep pattern); `retail-network` 0001 (draft in `docs/planning/`). This
+repo's own ADRs are indexed in [`docs/adr/README.md`](adr/README.md); the
+DDD artifact pack is in [`docs/ddd/`](ddd/README.md).
