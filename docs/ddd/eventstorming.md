@@ -111,7 +111,6 @@ flowchart LR
     POL3["Policy: overdue NEW order<br/>is refused, never answered late"]:::policy
     OM["order-management"]:::external
     H3["Hotspot: no event for<br/>SUBMITTED to ACKNOWLEDGED"]:::hotspot
-    H4["Hotspot: SUBMISSION_FAILED<br/>not counted in the report"]:::hotspot
     H5["Hotspot: at-risk fires only after<br/>the deadline, ADR says approaching"]:::hotspot
 
     T1 --> RM1
@@ -132,7 +131,6 @@ flowchart LR
     RM2 --> POL3
     POL3 --> C3
     C1 --- H3
-    E3 --- H4
     E4 --- H5
 
     classDef actor fill:#fff59d,stroke:#b59f00,color:#000,font-size:11px
@@ -279,7 +277,7 @@ event, so there is no orange sticky.
 | Acknowledged at SUBMITTED | Hotspot | `ReceiveNetworkDemand.acknowledge` publishes before `ReconcileSubmittedOrders` settles |
 | Orphaned hold after crash | Hotspot | `ReceiveNetworkDemand` saves `NEW` before `RaiseHeldOrder`; `RejectOverdueOrders` cancels only a linked hold; ADR 0001 Consequences ("orphaned-hold sweep as an open gap") |
 | No event on settle | Hotspot | `ReconcileSubmittedOrders.confirm` saves without publishing |
-| SUBMISSION_FAILED not counted | Hotspot | `PostgresProjection.ApplyNetworkOrderRejected` |
+| SUBMISSION_FAILED counted | Policy | `PostgresProjection.ApplyNetworkOrderRejected` increments `orders_rejected_submission_failed` (analytics migration 0002, ADR 0015; resolved 2026-10-06) |
 | At-risk only after the deadline | Hotspot | `AcknowledgementOverdue` vs ADR 0001 §6 "approaching" |
 | No WorkUnitId → NetworkRef mapping | Hotspot | ADR 0014 |
 | Confirm-before-acknowledge → 409 | Policy | `errors.go` maps `ErrConfirmBeforeAcknowledge` to 409 `confirm-before-acknowledge` (resolved 2026-10-06) |

@@ -32,12 +32,13 @@ from these paths on `develop`:
   `internal/adapters/outbound/*/`, `internal/adapters/kafka/cloudevents/`.
 - Composition roots: `cmd/netfulfil`, `cmd/mcp`, `cmd/netfulfil-projector`,
   `cmd/netfulfil-reports`.
-- Schema: `migrations/0001`–`0004` (OLTP) and `migrations/analytics/0001`.
-- Contracts: `apis/openapi.yaml`, `apis/asyncapi.yaml` (both lag the code in
-  places; see the discrepancy notes on [domain-events.md](domain-events.md)
-  and [bounded-context-canvas.md](bounded-context-canvas.md)).
+- Schema: `migrations/0001`–`0004` (OLTP) and `migrations/analytics/0001`–`0002`.
+- Contracts: `apis/openapi.yaml`, `apis/asyncapi.yaml` (aligned with the code
+  on 2026-10-06, ADR 0015; open design notes are listed on
+  [domain-events.md](domain-events.md) and
+  [bounded-context-canvas.md](bounded-context-canvas.md)).
 - Decisions: [`docs/adr/`](../adr/README.md), chiefly ADR 0001 (with 0009
-  and 0014 amending it).
+  and 0014 amending it; 0015 records the audit's contract corrections).
 
 Strategic classification (**Supporting Subdomain**, Conformist upstream,
 ACL downstream) comes from ADR 0001 and is not re-decided here.

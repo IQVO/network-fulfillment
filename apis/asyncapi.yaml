@@ -13,7 +13,9 @@ info:
     - `NetworkOrder` (package `internal/domain/networkorder`) — one network
       purchase order and its acknowledgement lifecycle. Raises
       `NetworkOrderReceived`, `NetworkOrderAcknowledged`,
-      `NetworkOrderRejected` and `NetworkOrderShipmentConfirmed`.
+      `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed` and (from the
+      acknowledgement sweep, without a state transition)
+      `AcknowledgementDeadlineAtRisk`.
 
     **Envelope (mandatory, ADR 0008).** Every message on every channel of
     this service is a CloudEvents 1.0 event in *structured content mode*
@@ -44,8 +46,8 @@ info:
     skip — never parse as a legacy shape — anything that fails CloudEvents
     validation.
   contact:
-    name: Network Fulfillment — claudioed
-    url: https://github.com/claudioed/network-fulfillment
+    name: Network Fulfillment — IQVO
+    url: https://github.com/IQVO/network-fulfillment
     email: claudioed.oliveira@gmail.com
   license:
     name: MIT
@@ -99,13 +101,14 @@ channels:
     description: |
       The internal analytics topic (the `AnalyticsTopic` constant in
       `internal/adapters/outbound/kafka/analytics_publisher.go`). Carries the
-      same occurrences with the same `type` and payload, but a distinct
+      same five occurrences with the same `type` and payload, but a distinct
       `id` per occurrence and dataschema
       `urn:warehouse:network-fulfillment:analytics:<EventName>:v1`. There is
       no `schema_version` field. Consumed by this service's own analytics
       projector (`internal/adapters/inbound/kafka/analytics_consumer.go`),
       which handles `NetworkOrderReceived`, `NetworkOrderAcknowledged` and
-      `NetworkOrderRejected`, ignores other types, and dead-letters to
+      `NetworkOrderRejected`, ignores other types (`NetworkOrderShipmentConfirmed`
+      and `AcknowledgementDeadlineAtRisk` today), and dead-letters to
       `warehouse.network-fulfillment.analytics.dlq` anything that is not a
       valid CloudEvent.
     subscribe:
@@ -122,6 +125,7 @@ channels:
           - $ref: "#/components/messages/NetworkOrderAcknowledgedAnalytics"
           - $ref: "#/components/messages/NetworkOrderRejectedAnalytics"
           - $ref: "#/components/messages/NetworkOrderShipmentConfirmedAnalytics"
+          - $ref: "#/components/messages/AcknowledgementDeadlineAtRiskAnalytics"
 
 components:
   messages:
@@ -174,6 +178,8 @@ components:
       summary: "We committed to fulfilling the network order in full and raised a local order in order-management."
       description: |
         Raised by the `NetworkOrder` aggregate once the network has been told yes and a held order exists in order-management (`localOrderId`). `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that.
+
+        **Timing.** This event is published when the order moves to `SUBMITTED` — the acknowledgement has been submitted to the network but NOT yet reconciled against its transaction-status record (ADR 0001 §5). The later `SUBMITTED -> ACKNOWLEDGED` settlement raises no event, and a failed reconciliation is signalled by `NetworkOrderRejected` with `reason=SUBMISSION_FAILED`. A consumer must therefore not treat this event as a settled commitment.
 
         `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderAcknowledged:v1`.
       contentType: application/cloudevents+json
@@ -256,7 +262,7 @@ components:
       title: Network order shipment confirmed
       summary: "A shipment was confirmed back to the network, closing the order."
       description: |
-        Raised by the `NetworkOrder` aggregate when its shipment is confirmed to the network. The publisher is wired for it; no use case calls `ConfirmShipment()` yet (the inbound leg observing a real shipment is not built), so this message does not appear on the wire today.
+        Raised by the `NetworkOrder` aggregate when its shipment is confirmed to the network, by `ConfirmNetworkOrderShipment` (`POST /network-orders/{networkRef}/shipment-confirmation`, ADR 0014). The use case saves the order as `CONFIRMED` and publishes this event in one atomic scope, then submits the confirmation to the network.
 
         `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` — `dataschema`: `urn:warehouse:network-fulfillment:events:NetworkOrderShipmentConfirmed:v1`.
       contentType: application/cloudevents+json
@@ -381,7 +387,7 @@ components:
       title: Network order acknowledged (analytics)
       summary: "We committed to fulfilling the network order in full and raised a local order in order-management."
       description: |
-        Raised by the `NetworkOrder` aggregate once the network has been told yes and a held order exists in order-management (`localOrderId`). `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that. Consumed by the analytics projector.
+        Raised by the `NetworkOrder` aggregate once the network has been told yes and a held order exists in order-management (`localOrderId`). `receivedAt` is carried so consumers can compute acknowledgement latency (`at - receivedAt`) without a second lookup — the analytics projection does exactly that. Consumed by the analytics projector. Published at `SUBMITTED`, before reconciliation; `SUBMITTED -> ACKNOWLEDGED` raises no event (see the integration-channel message for the full timing note).
 
         `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v1`.
       contentType: application/cloudevents+json
@@ -464,7 +470,7 @@ components:
       title: Network order shipment confirmed (analytics)
       summary: "A shipment was confirmed back to the network, closing the order."
       description: |
-        Raised by the `NetworkOrder` aggregate when its shipment is confirmed to the network. The publisher is wired for it; no use case calls `ConfirmShipment()` yet (the inbound leg observing a real shipment is not built), so this message does not appear on the wire today. Not used by the analytics projector today (ignored as an unknown type).
+        Raised by the `NetworkOrder` aggregate when its shipment is confirmed to the network, by `ConfirmNetworkOrderShipment` (`POST /network-orders/{networkRef}/shipment-confirmation`, ADR 0014). Not used by the analytics projector today (ignored as an unknown type).
 
         `type`: `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:NetworkOrderShipmentConfirmed:v1`.
       contentType: application/cloudevents+json
@@ -499,6 +505,47 @@ components:
               siteId: "site-1"
               localOrderId: "ord-1"
               at: "2026-09-23T08:00:00Z"
+
+    AcknowledgementDeadlineAtRiskAnalytics:
+      name: AcknowledgementDeadlineAtRiskAnalytics
+      title: Acknowledgement deadline at risk (analytics)
+      summary: "An order's 24h acknowledgement window has closed with no answer — a reported fact, not a state transition."
+      description: |
+        Raised by `SweepAcknowledgementDeadlines` for every order found still `NEW` past its `acknowledgeBy` instant (ADR 0001 §6), and published on the analytics topic like every other event (the composition root's fan-out publishes each event to both topics). Re-fires on every sweep pass while the condition holds — not edge-triggered. Not used by the analytics projector today (ignored as an unknown type).
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:AcknowledgementDeadlineAtRisk:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/AcknowledgementDeadlineAtRiskAnalyticsEvent"
+      examples:
+        - name: acknowledgementDeadlineAtRiskAnalytics
+          summary: "Network order po-1's acknowledgement window has closed unanswered."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk"
+            subject: "po-1"
+            time: "2026-09-24T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:analytics:AcknowledgementDeadlineAtRisk:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              acknowledgeBy: "2026-09-24T08:00:00Z"
+              at: "2026-09-24T08:00:00Z"
 
   schemas:
     KafkaHeaders:
@@ -841,3 +888,18 @@ components:
               const: "urn:warehouse:network-fulfillment:analytics:NetworkOrderShipmentConfirmed:v1"
             data:
               $ref: "#/components/schemas/NetworkOrderShipmentConfirmedData"
+
+    AcknowledgementDeadlineAtRiskAnalyticsEvent:
+      title: AcknowledgementDeadlineAtRisk CloudEvent (analytics)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:analytics:AcknowledgementDeadlineAtRisk:v1"
+            data:
+              $ref: "#/components/schemas/AcknowledgementDeadlineAtRiskData"

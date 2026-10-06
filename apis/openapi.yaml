@@ -10,14 +10,17 @@ info:
     the network by a deadline the network set.
 
 
-    **This surface is READ-ONLY, and that is a design decision rather than
-    an omission.** Demand enters this context by POLLING the network and
-    by nothing else: the network offers us no push, so an HTTP intake
-    endpoint would be a second, fictional inbound path with no counterpart
-    in production. The only thing such an endpoint could honestly be used
-    for is injecting test demand, and the stub gateway's file-seeded mode
-    (`NETWORK_SEED_FILE`) already does that without pretending to be a
-    protocol.
+    **This surface is READ-ONLY apart from ONE explicit write endpoint, and
+    that is a design decision rather than an omission.** Demand enters this
+    context by POLLING the network and by nothing else: the network offers
+    us no push, so an HTTP intake endpoint would be a second, fictional
+    inbound path with no counterpart in production. The only thing such an
+    endpoint could honestly be used for is injecting test demand, and the
+    stub gateway's file-seeded mode (`NETWORK_SEED_FILE`) already does that
+    without pretending to be a protocol. The one write is
+    `POST /network-orders/{networkRef}/shipment-confirmation` (ADR 0014):
+    a fact this context is TOLD (an order shipped), not demand it decides
+    on.
 
 
     So what is exposed here is OBSERVATION, answering the two questions an
@@ -59,6 +62,11 @@ tags:
     description: >
       Demand received from the external network, and the answer we gave
       it.
+  - name: capability-offers
+    description: >
+      What this context would advertise to the network it can ship for each
+      (SKU, site): physical availability capped by throughput feasibility
+      (ADR 0001 §8). Served only when `CAPABILITY_OFFER_ENABLED` is set.
   - name: operations
     description: >
       Liveness, and whether the inbound polling leg is actually working.
@@ -252,6 +260,101 @@ paths:
         "500":
           $ref: "#/components/responses/Problem"
 
+  /network-orders/{networkRef}/shipment-confirmation:
+    post:
+      operationId: confirmNetworkOrderShipment
+      tags: [network-orders]
+      summary: Confirm shipment of one network order
+      description: >
+        The one write endpoint of this context (ADR 0014). Tells the
+        network that the order has shipped (`submitShipmentConfirmations`),
+        moves the order to `CONFIRMED` and publishes
+        `NetworkOrderShipmentConfirmed`. Takes no request body.
+
+
+        The trigger is an explicit call naming the `networkRef` rather than
+        a `PackageManifested` correlation, because no persisted mapping
+        from a work unit back to a `networkRef` exists (ADR 0014).
+
+
+        Idempotent: an order already `CONFIRMED` is returned unchanged with
+        204, without re-submitting to the network or re-publishing the
+        event. The route is registered only when the shipment-confirmation
+        use case is wired.
+      parameters:
+        - name: networkRef
+          in: path
+          required: true
+          description: The network's own reference for the demand.
+          schema:
+            type: string
+          example: po-4711
+      responses:
+        "204":
+          description: >
+            Shipment confirmed (or the order was already `CONFIRMED`).
+        "404":
+          description: No network order with that `networkRef` (`network-order-not-found`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: >
+            The order is not `ACKNOWLEDGED`, so shipment cannot be confirmed
+            yet (`confirm-before-acknowledge`). A shipment may not be
+            confirmed for an order we never committed to.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: The `networkRef` is empty (`empty-network-ref`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          description: >
+            Unexpected error, including a failed submission to the network
+            AFTER the order was already saved as `CONFIRMED`; a retry then
+            returns 204 without re-submitting.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /capability-offers:
+    get:
+      operationId: listCapabilityOffers
+      tags: [capability-offers]
+      summary: List every currently-advertised capability offer
+      description: >
+        The figure this context would tell the network it can ship for each
+        (SKU, site) it knows about: `min(physicalAvailable,
+        throughputFeasibleBefore(nextCutoff))` (ADR 0001 §8). Offers are
+        persisted by the recompute loop; they are not yet submitted to the
+        network.
+
+
+        Registered only when `CAPABILITY_OFFER_ENABLED` is set; otherwise
+        the route does not exist and the API answers 404.
+      responses:
+        "200":
+          description: All current capability offers (empty array when none).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capabilityOffers]
+                properties:
+                  capabilityOffers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CapabilityOffer"
+        "500":
+          $ref: "#/components/responses/Problem"
+
   /reports/acknowledgement:
     get:
       operationId: getAcknowledgementReport
@@ -340,6 +443,41 @@ components:
             $ref: "#/components/schemas/Problem"
 
   schemas:
+    CapabilityOffer:
+      type: object
+      description: >
+        What this context would advertise to the network it can ship for one
+        (SKU, site) (ADR 0001 §8).
+      required: [sku, siteId, advertisedQuantity, basis, computedAt]
+      properties:
+        sku:
+          type: string
+          description: Our product identity.
+          example: sku-1
+        siteId:
+          type: string
+          description: The fulfillment site the offer is for.
+          example: site-1
+        advertisedQuantity:
+          type: integer
+          minimum: 0
+          description: >
+            The quantity we would advertise: `min(physicalAvailable,
+            throughputFeasibleBefore(nextCutoff))`.
+          example: 40
+        basis:
+          type: string
+          description: >
+            Which rule produced `advertisedQuantity`. `PHYSICAL` means
+            physical stock on hand was the binding constraint (or
+            throughput was unknown). `THROUGHPUT_CONSTRAINED` means the
+            eligible paths' remaining capacity before the next cutoff was.
+          enum: [PHYSICAL, THROUGHPUT_CONSTRAINED]
+        computedAt:
+          type: string
+          format: date-time
+          description: When the recompute loop last computed this offer.
+
     NetworkOrder:
       type: object
       required:
@@ -502,6 +640,7 @@ components:
         - ordersRejectedUntranslatableSku
         - ordersRejectedDomain
         - acknowledgementDeadlinesMissed
+        - ordersRejectedSubmissionFailed
         - avgAcknowledgementLatencySeconds
       properties:
         dayBucket:
@@ -531,6 +670,15 @@ components:
             The 24-hour acknowledgement window closed with no answer ever
             sent (the sweep's own rejection). An operational failure, not
             a business decision.
+        ordersRejectedSubmissionFailed:
+          type: integer
+          description: >
+            Rejected with reason `SUBMISSION_FAILED`: we submitted an
+            acknowledgement, but the network's own transaction-status
+            reconciliation reported failure, so the order was refused. Not
+            a catalogue gap or a promise refusal: we said yes and the
+            network did not accept it. Added additively (ADR 0015);
+            history before this counter existed reads 0.
         avgAcknowledgementLatencySeconds:
           type: number
           format: double
