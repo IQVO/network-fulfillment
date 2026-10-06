@@ -65,6 +65,7 @@ type rollupDelta struct {
 	ordersRejectedUntranslatableSKU  int
 	ordersRejectedDomain             int
 	acknowledgementDeadlinesMissed   int
+	ordersRejectedSubmissionFailed   int
 }
 
 // apply claims eventId and, when the claim is new, upserts delta into the
@@ -109,6 +110,8 @@ func (p *PostgresProjection) ApplyNetworkOrderRejected(ctx context.Context, even
 		delta.ordersRejectedDomain = 1
 	case "ACKNOWLEDGEMENT_DEADLINE_MISSED":
 		delta.acknowledgementDeadlinesMissed = 1
+	case "SUBMISSION_FAILED":
+		delta.ordersRejectedSubmissionFailed = 1
 	}
 	return p.apply(ctx, eventId, at, delta)
 }
@@ -122,8 +125,8 @@ func upsertRollup(ctx context.Context, tx pgx.Tx, at time.Time, delta rollupDelt
 			day_bucket, orders_received, orders_acknowledged,
 			sum_acknowledgement_latency_seconds, acknowledgement_latency_count,
 			orders_rejected_untranslatable_sku, orders_rejected_domain,
-			acknowledgement_deadlines_missed)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			acknowledgement_deadlines_missed, orders_rejected_submission_failed)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (day_bucket) DO UPDATE SET
 			orders_received                     = acknowledgement_rollup.orders_received + EXCLUDED.orders_received,
 			orders_acknowledged                 = acknowledgement_rollup.orders_acknowledged + EXCLUDED.orders_acknowledged,
@@ -131,11 +134,12 @@ func upsertRollup(ctx context.Context, tx pgx.Tx, at time.Time, delta rollupDelt
 			acknowledgement_latency_count        = acknowledgement_rollup.acknowledgement_latency_count + EXCLUDED.acknowledgement_latency_count,
 			orders_rejected_untranslatable_sku   = acknowledgement_rollup.orders_rejected_untranslatable_sku + EXCLUDED.orders_rejected_untranslatable_sku,
 			orders_rejected_domain               = acknowledgement_rollup.orders_rejected_domain + EXCLUDED.orders_rejected_domain,
-			acknowledgement_deadlines_missed     = acknowledgement_rollup.acknowledgement_deadlines_missed + EXCLUDED.acknowledgement_deadlines_missed`,
+			acknowledgement_deadlines_missed     = acknowledgement_rollup.acknowledgement_deadlines_missed + EXCLUDED.acknowledgement_deadlines_missed,
+			orders_rejected_submission_failed    = acknowledgement_rollup.orders_rejected_submission_failed + EXCLUDED.orders_rejected_submission_failed`,
 		bucket, delta.ordersReceived, delta.ordersAcknowledged,
 		delta.sumAcknowledgementLatencySeconds, delta.acknowledgementLatencyCount,
 		delta.ordersRejectedUntranslatableSKU, delta.ordersRejectedDomain,
-		delta.acknowledgementDeadlinesMissed)
+		delta.acknowledgementDeadlinesMissed, delta.ordersRejectedSubmissionFailed)
 	if err != nil {
 		return fmt.Errorf("analyticsstore: upsert rollup: %w", err)
 	}

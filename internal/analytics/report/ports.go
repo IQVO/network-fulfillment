@@ -28,8 +28,9 @@ type ProjectionStore interface {
 	// bucket's running average.
 	ApplyNetworkOrderAcknowledged(ctx context.Context, eventId string, at time.Time, latencySeconds float64) error
 	// ApplyNetworkOrderRejected records a refusal, bucketed by reason:
-	// "UNTRANSLATABLE_SKU", "INFEASIBLE_DEADLINE", or
-	// "ACKNOWLEDGEMENT_DEADLINE_MISSED". A reason outside this set is
+	// "UNTRANSLATABLE_SKU", "INFEASIBLE_DEADLINE",
+	// "ACKNOWLEDGEMENT_DEADLINE_MISSED", or "SUBMISSION_FAILED". A reason
+	// outside this set is
 	// recorded as a no-op counter-wise (there is nothing else to bucket
 	// it into) but the event id is still claimed, so it is never retried
 	// forever.

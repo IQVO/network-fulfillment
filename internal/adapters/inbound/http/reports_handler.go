@@ -30,6 +30,7 @@ type acknowledgementRowDTO struct {
 	OrdersRejectedUntranslatableSKU  int     `json:"ordersRejectedUntranslatableSku"`
 	OrdersRejectedDomain             int     `json:"ordersRejectedDomain"`
 	AcknowledgementDeadlinesMissed   int     `json:"acknowledgementDeadlinesMissed"`
+	OrdersRejectedSubmissionFailed   int     `json:"ordersRejectedSubmissionFailed"`
 	AvgAcknowledgementLatencySeconds float64 `json:"avgAcknowledgementLatencySeconds"`
 }
 
@@ -92,6 +93,7 @@ func toAcknowledgementReportDTO(rep report.AcknowledgementReport) acknowledgemen
 			OrdersRejectedUntranslatableSKU:  row.OrdersRejectedUntranslatableSKU,
 			OrdersRejectedDomain:             row.OrdersRejectedDomain,
 			AcknowledgementDeadlinesMissed:   row.AcknowledgementDeadlinesMissed,
+			OrdersRejectedSubmissionFailed:   row.OrdersRejectedSubmissionFailed,
 			AvgAcknowledgementLatencySeconds: row.AvgAcknowledgementLatencySeconds(),
 		})
 	}

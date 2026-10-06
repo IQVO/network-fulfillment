@@ -29,6 +29,9 @@ func TestMemoryStore_ProjectsAndDedupes(t *testing.T) {
 	must(s.ApplyNetworkOrderRejected(ctx, "e4", base, "UNTRANSLATABLE_SKU"))
 	must(s.ApplyNetworkOrderRejected(ctx, "e5", base, "INFEASIBLE_DEADLINE"))
 	must(s.ApplyNetworkOrderRejected(ctx, "e6", base, "ACKNOWLEDGEMENT_DEADLINE_MISSED"))
+	must(s.ApplyNetworkOrderRejected(ctx, "e7", base, "SUBMISSION_FAILED"))
+	// duplicate event id -> counts once
+	must(s.ApplyNetworkOrderRejected(ctx, "e7", base, "SUBMISSION_FAILED"))
 
 	rep, err := s.Query(ctx, report.ReportQuery{
 		From:        base.Add(-24 * time.Hour),
@@ -59,6 +62,30 @@ func TestMemoryStore_ProjectsAndDedupes(t *testing.T) {
 	}
 	if row.AcknowledgementDeadlinesMissed != 1 {
 		t.Errorf("AcknowledgementDeadlinesMissed = %d, want 1", row.AcknowledgementDeadlinesMissed)
+	}
+	// SUBMISSION_FAILED rejections (reconciliation reported FAILURE) used
+	// to vanish from the report: every other reason had a counter.
+	if row.OrdersRejectedSubmissionFailed != 1 {
+		t.Errorf("OrdersRejectedSubmissionFailed = %d, want 1 (deduped)", row.OrdersRejectedSubmissionFailed)
+	}
+}
+
+func TestMemoryStore_UnknownRejectionReasonIsClaimedButNotCounted(t *testing.T) {
+	base := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	s := analyticsstore.NewMemoryStore()
+	if err := s.ApplyNetworkOrderRejected(ctx, "x1", base, "SOMETHING_NEW"); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	rep, err := s.Query(ctx, report.ReportQuery{From: base.Add(-24 * time.Hour), To: base.Add(24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, row := range rep.Rows {
+		if row.OrdersRejectedUntranslatableSKU+row.OrdersRejectedDomain+
+			row.AcknowledgementDeadlinesMissed+row.OrdersRejectedSubmissionFailed != 0 {
+			t.Fatalf("unknown reason was counted: %+v", row)
+		}
 	}
 }
 

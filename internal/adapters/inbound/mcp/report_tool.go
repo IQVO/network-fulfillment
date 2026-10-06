@@ -24,6 +24,7 @@ type AcknowledgementRowView struct {
 	OrdersRejectedUntranslatableSKU  int     `json:"ordersRejectedUntranslatableSku"`
 	OrdersRejectedDomain             int     `json:"ordersRejectedDomain"`
 	AcknowledgementDeadlinesMissed   int     `json:"acknowledgementDeadlinesMissed"`
+	OrdersRejectedSubmissionFailed   int     `json:"ordersRejectedSubmissionFailed"`
 	AvgAcknowledgementLatencySeconds float64 `json:"avgAcknowledgementLatencySeconds"`
 }
 
@@ -166,7 +167,7 @@ func (d Deps) registerReportTool(server *mcp.Server) {
 	readOnly := true
 	addTool(server, &mcp.Tool{
 		Name:        "get_acknowledgement_report",
-		Description: "Return the network-fulfillment 'Network Order Acknowledgement & Translation' report for a time window, bucketed by day: orders received, orders acknowledged, orders rejected (split by untranslatable-SKU catalogue gap vs. genuine domain refusal), acknowledgement deadlines missed, and the average acknowledgement latency in seconds. Reads via the netfulfil-reports REST service, never the analytical database directly.",
+		Description: "Return the network-fulfillment 'Network Order Acknowledgement & Translation' report for a time window, bucketed by day: orders received, orders acknowledged, orders rejected (split by untranslatable-SKU catalogue gap vs. genuine domain refusal vs. a submission the network itself refused), acknowledgement deadlines missed, and the average acknowledgement latency in seconds. Reads via the netfulfil-reports REST service, never the analytical database directly.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
 	}, d.getAcknowledgementReport)
 }
