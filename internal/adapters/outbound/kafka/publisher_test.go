@@ -60,6 +60,11 @@ func goldenCases(at time.Time) []goldenCase {
 			event: shared.NetworkOrderShipmentConfirmed{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1", At: at},
 			data:  `{"networkRef":"po-1","siteId":"site-1","localOrderId":"ord-1","at":"2026-09-23T08:00:00Z"}`,
 		},
+		{
+			name:  "AcknowledgementDeadlineAtRisk",
+			event: shared.AcknowledgementDeadlineAtRisk{NetworkRef: "po-1", SiteId: "site-1", AcknowledgeBy: at.Add(-time.Hour), At: at},
+			data:  `{"networkRef":"po-1","siteId":"site-1","acknowledgeBy":"2026-09-23T07:00:00Z","at":"2026-09-23T08:00:00Z"}`,
+		},
 	}
 }
 

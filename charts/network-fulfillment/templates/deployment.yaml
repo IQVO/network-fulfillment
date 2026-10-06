@@ -105,8 +105,8 @@ spec:
             {{- end }}
             # Only mounted outside stub mode. This is what keeps the kind
             # cluster and e2e-tests credential-free: the default install
-            # needs no Secret to exist at all, and asking for sandbox or
-            # live is an explicit, visible act.
+            # needs no Secret to exist at all, and asking for live mode
+            # is an explicit, visible act.
             - name: NETWORK_CLIENT_ID
               valueFrom:
                 secretKeyRef:

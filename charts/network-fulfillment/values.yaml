@@ -3,7 +3,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/claudioed/network-fulfillment
+  repository: ghcr.io/iqvo/network-fulfillment
   pullPolicy: IfNotPresent
   tag: ""
 
@@ -143,18 +143,25 @@ config:
   # poller spends a deadline somebody else set.
   pollInterval: "1m"
 
-  # stub | sandbox | live.
+  # stub | live.
   #
   # stub is the default ON PURPOSE. It makes no external calls and needs
   # no credentials, so a default `helm install`, the kind cluster, and
   # the e2e suite all work with nothing configured -- and none of them
   # can accidentally acknowledge a real retailer's order.
   #
-  # sandbox and live REQUIRE credentials below and the pod refuses to
-  # start without them. That refusal is deliberate: silently degrading to
-  # stub would leave a pod that looks healthy while quietly acknowledging
-  # nothing the network sent.
+  # live REQUIRES credentials below AND networkBaseUrl, and the pod
+  # refuses to start without them. That refusal is deliberate: silently
+  # degrading to stub would leave a pod that looks healthy while quietly
+  # acknowledging nothing the network sent. (ADR 0009 §4 removed the
+  # earlier sandbox tier: the network has no separate sandbox environment
+  # of its own to target.)
   networkMode: "stub"
+
+  # The live-mode target (ADR 0009 §4). Only read when config.networkMode
+  # is "live" -- ignored, and not required, in stub mode. No default: a
+  # live deployment must name its own target explicitly.
+  networkBaseUrl: ""
 
   # order-management's in-cluster REST base URL. The one upstream this
   # context calls; the default matches the fleet's service naming.
@@ -173,8 +180,8 @@ config:
   corsAllowedOrigins: "http://localhost:5173,http://localhost:5188"
 
 # External-network credentials. Used ONLY when config.networkMode is
-# "sandbox" or "live" -- in stub mode nothing here is read and no Secret
-# is created, which is what keeps local installs credential-free.
+# "live" -- in stub mode nothing here is read and no Secret is created,
+# which is what keeps local installs credential-free.
 #
 # Set existingSecret to point at a Secret you manage yourself (its keys
 # must be named NETWORK_CLIENT_ID / NETWORK_CLIENT_SECRET /
@@ -303,7 +310,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /healthz
+    path: /readyz
     port: http
   initialDelaySeconds: 3
   periodSeconds: 5

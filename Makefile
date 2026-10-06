@@ -96,14 +96,10 @@ coverage:
 		exit 1; \
 	fi
 
-# Needs a running Postgres and DATABASE_URL, e.g.
-#   docker compose up -d postgres
-#   DATABASE_URL='postgres://networkfulfillment@localhost:5432/networkfulfillment?sslmode=disable' PGPASSWORD='networkfulfillment' make integration
+# Needs only Docker: every integration test boots its own Postgres/Kafka via
+# testcontainers (no DATABASE_URL; a fitness test fails CI if a Postgres
+# integration test reintroduces an env-gated skip).
 # Deliberately NOT part of `check` / `check-all`.
-# NOTE: never embed a real password in a postgres://user:pass@host URL in
-# committed files -- some environments' own tooling treats that shape as a
-# credential leak and will silently strip it. Use a separate PGPASSWORD (or
-# your driver's password-injection API) instead. See HARNESS.md.
 integration:
 	$(GO) test -tags=integration ./... -race -count=1
 
@@ -146,3 +142,17 @@ check: fmt-check vet build lint test
 # The fuller gate a human runs before pushing. Still excludes `integration`
 # (needs a DB) and `mutation` (slow).
 check-all: check coverage arch-test bdd
+
+# --- agent harness (harness-template v3) -----------------------------------
+.PHONY: check-fast guide-lint harness-test
+# Fast local gate used by the agent Stop hook: format, vet, fitness tests, and the tests of
+# the packages changed vs HEAD. The full gate stays `make check` / `make check-all`.
+check-fast: fmt-check vet arch-test
+	@pkgs="$$(python3 scripts/harness/hook.py changed-pkgs)"; \
+	if [ -n "$$pkgs" ]; then go test $$pkgs; else echo "check-fast: no changed Go packages"; fi
+
+guide-lint: ## lint agent guides: skills load, references resolve, context budget
+	python3 scripts/harness/guide_lint.py
+
+harness-test: ## unit-test the agent hooks (pre/post/stop)
+	python3 scripts/harness/test_hook.py

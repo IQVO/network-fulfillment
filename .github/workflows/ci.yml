@@ -34,6 +34,19 @@ jobs:
           version: v2.13.1
           args: --timeout=5m
 
+  # Agent-guide sensor (harness-template v3): skills load, references resolve, context budget.
+  # BLOCKING: the guides are clean (0 errors); keep them that way.
+  guide-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: python3 scripts/harness/guide_lint.py
+      - run: python3 scripts/harness/repo_lint.py
+      - run: python3 scripts/harness/test_hook.py
+      - run: python3 scripts/harness/test_repo_lint.py
+
+
   # Complexity gate as its own named check: cyclomatic (gocyclo, cyclop),
   # cognitive (gocognit), nesting (nestif) and function size (funlen).
   # Thresholds live in .golangci.yml; --enable-only runs just these five
@@ -268,7 +281,7 @@ jobs:
           severity: 'CRITICAL,HIGH,MEDIUM'
           ignore-unfixed: true
       - name: Upload Trivy SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
@@ -313,8 +326,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/claudioed/network-fulfillment:latest
-            ghcr.io/claudioed/network-fulfillment:${{ env.SHORT_SHA }}
+            ghcr.io/iqvo/network-fulfillment:latest
+            ghcr.io/iqvo/network-fulfillment:${{ env.SHORT_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Install cosign
@@ -322,11 +335,11 @@ jobs:
       - name: Sign the published image (keyless, GitHub OIDC identity)
         run: |
           cosign sign --yes \
-            ghcr.io/claudioed/network-fulfillment@${{ steps.build.outputs.digest }}
+            ghcr.io/iqvo/network-fulfillment@${{ steps.build.outputs.digest }}
       - name: Generate SBOM (SPDX) for the published image
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          image: ghcr.io/claudioed/network-fulfillment@${{ steps.build.outputs.digest }}
+          image: ghcr.io/iqvo/network-fulfillment@${{ steps.build.outputs.digest }}
           format: spdx-json
           output-file: sbom.spdx.json
       - name: Attest the image with its SBOM (keyless)
@@ -334,7 +347,7 @@ jobs:
           cosign attest --yes \
             --predicate sbom.spdx.json \
             --type spdxjson \
-            ghcr.io/claudioed/network-fulfillment@${{ steps.build.outputs.digest }}
+            ghcr.io/iqvo/network-fulfillment@${{ steps.build.outputs.digest }}
       - name: Upload SBOM as a workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -387,8 +400,8 @@ jobs:
       - name: Tag the already-published image with the release version
         run: |
           docker buildx imagetools create \
-            -t ghcr.io/claudioed/network-fulfillment:${{ steps.version.outputs.version }} \
-            ghcr.io/claudioed/network-fulfillment:${{ env.SHORT_SHA }}
+            -t ghcr.io/iqvo/network-fulfillment:${{ steps.version.outputs.version }} \
+            ghcr.io/iqvo/network-fulfillment:${{ env.SHORT_SHA }}
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with:
           version: v3.16.4
@@ -405,7 +418,7 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
             -u "${{ github.actor }}" --password-stdin
           helm push "/tmp/chart-out/network-fulfillment-${CHART_VERSION}.tgz" \
-            oci://ghcr.io/claudioed
+            oci://ghcr.io/iqvo
       - name: Create and push the git tag
         run: |
           git config user.name "github-actions[bot]"
@@ -419,8 +432,8 @@ jobs:
           generate_release_notes: true
           files: ${{ env.CHART_TGZ }}
           body: |
-            Docker image: `ghcr.io/claudioed/network-fulfillment:${{ steps.version.outputs.version }}`
+            Docker image: `ghcr.io/iqvo/network-fulfillment:${{ steps.version.outputs.version }}`
             (also tagged `latest` and `${{ env.SHORT_SHA }}`)
 
-            Helm chart: `oci://ghcr.io/claudioed/network-fulfillment:${{ steps.version.outputs.version }}`
+            Helm chart: `oci://ghcr.io/iqvo/network-fulfillment:${{ steps.version.outputs.version }}`
             (also attached below as a `.tgz`)

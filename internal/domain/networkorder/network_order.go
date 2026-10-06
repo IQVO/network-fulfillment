@@ -12,8 +12,8 @@ import (
 // protocol, and delegates everything about the WORK to order-management
 // and the contexts downstream of it.
 //
-//	NEW -> ACKNOWLEDGED -> CONFIRMED
-//	    -> REJECTED
+//	NEW -> SUBMITTED -> ACKNOWLEDGED -> CONFIRMED
+//	    -> REJECTED (from NEW or SUBMITTED)
 type State string
 
 const (
@@ -21,8 +21,22 @@ const (
 	// The acknowledgement clock is already running.
 	StateNew State = "NEW"
 
-	// StateAcknowledged means we told the network we will fulfil this
-	// order in full. It is a commitment, not an intention.
+	// StateSubmitted means we decided to accept the order in full and
+	// told the network so, but that submission has not yet been
+	// reconciled against the network's own transaction-status record
+	// (ADR 0001 §5: outbound submissions are asynchronous, and a 200 on
+	// the original call is accepted-for-processing, never itself a
+	// completed commitment). Reached via Submit(); resolved to
+	// ACKNOWLEDGED by ConfirmAcknowledgement() once reconciliation
+	// reports success, or back to REJECTED via Reject() if it reports
+	// failure. A ReceiveNetworkDemand caller that has no real
+	// asynchronous submission to reconcile may use Acknowledge(), which
+	// performs both steps at once.
+	StateSubmitted State = "SUBMITTED"
+
+	// StateAcknowledged means the network has confirmed it received and
+	// accepted our acknowledgement of this order in full. It is a
+	// settled commitment, not an intention or an in-flight submission.
 	StateAcknowledged State = "ACKNOWLEDGED"
 
 	// StateRejected means we told the network we will not fulfil it.
@@ -36,7 +50,24 @@ const (
 	StateConfirmed State = "CONFIRMED"
 )
 
+// ParseState validates a persisted state string and returns the matching
+// State. A repository MUST rehydrate through it rather than casting
+// State(raw): a corrupt or unrecognised value would otherwise become an
+// aggregate in an invalid lifecycle position. Matching is exact — no
+// trimming, no case folding — because the stored vocabulary is closed.
+func ParseState(value string) (State, error) {
+	switch s := State(value); s {
+	case StateNew, StateSubmitted, StateAcknowledged, StateRejected, StateConfirmed:
+		return s, nil
+	default:
+		return "", ErrUnknownState
+	}
+}
+
 var (
+	// ErrUnknownState rejects a state string outside the lifecycle above.
+	ErrUnknownState = errors.New("unknown network order state")
+
 	// ErrAlreadyAnswered rejects a second acknowledgement or rejection.
 	// The network's protocol allows exactly one answer per order, and a
 	// duplicate is a bug in us, not a retry: a retry of a LOST
@@ -49,10 +80,16 @@ var (
 	ErrConfirmBeforeAcknowledge = errors.New("cannot confirm shipment before acknowledgement")
 
 	// ErrNotAcknowledged rejects attaching a local order to an order we
-	// have not committed to. Raising local work for unacknowledged
-	// demand is the mirror of the hold that order-management ADR 0020
-	// introduced, and the same failure it prevents.
+	// have not at least submitted an answer for. Raising local work for
+	// demand we have not committed to is the mirror of the hold that
+	// order-management ADR 0020 introduced, and the same failure it
+	// prevents.
 	ErrNotAcknowledged = errors.New("network order is not acknowledged")
+
+	// ErrNotSubmitted rejects confirming an acknowledgement that was
+	// never submitted: reconciliation has nothing to confirm for an
+	// order still NEW, already settled, or already rejected.
+	ErrNotSubmitted = errors.New("network order has not been submitted")
 
 	// ErrLocalOrderAlreadyLinked rejects re-linking. The mapping is
 	// one-to-one and permanent; overwriting it would orphan real
@@ -182,24 +219,52 @@ func ReceiveUntranslatable(
 	}, nil
 }
 
-// Acknowledge commits us to fulfilling this order IN FULL. The network's
-// protocol has no partial acknowledgement (ADR 0001 §1), which is why
-// there is no quantity argument here: acknowledging part of a line is
-// not something this domain can express.
-func (o *NetworkOrder) Acknowledge() error {
+// Submit records our DECISION to accept the order in full and tells the
+// network — a commitment-in-flight, not yet a settled one. ADR 0001 §5
+// models outbound submissions as pending until a later transaction-status
+// reconciliation confirms them; call ConfirmAcknowledgement once that
+// reconciliation reports success, or Reject if it reports failure.
+func (o *NetworkOrder) Submit() error {
 	if o.state != StateNew {
 		return ErrAlreadyAnswered
+	}
+	o.state = StateSubmitted
+	return nil
+}
+
+// ConfirmAcknowledgement settles a submitted order once the network's own
+// transaction-status record confirms it (ReconcileSubmittedOrders). It is
+// the only route from SUBMITTED to ACKNOWLEDGED — the network's protocol
+// has no partial acknowledgement, which is why there is no quantity
+// argument here, same as Submit.
+func (o *NetworkOrder) ConfirmAcknowledgement() error {
+	if o.state != StateSubmitted {
+		return ErrNotSubmitted
 	}
 	o.state = StateAcknowledged
 	return nil
 }
 
+// Acknowledge commits us to fulfilling this order IN FULL in one step,
+// skipping the SUBMITTED interim state. It exists for callers with no
+// real asynchronous submission to reconcile (tests, and fixtures seeding
+// an already-settled order); ReceiveNetworkDemand itself calls Submit and
+// ConfirmAcknowledgement separately so a real reconciliation pass can
+// land between them (ADR 0001 §5).
+func (o *NetworkOrder) Acknowledge() error {
+	if err := o.Submit(); err != nil {
+		return err
+	}
+	return o.ConfirmAcknowledgement()
+}
+
 // Reject refuses the order. Called when the deadline is infeasible, a
-// product cannot be translated, or the acknowledgement window is about
-// to close with no answer — a refusal inside the window is a far better
-// outcome for both parties than a miss after it.
+// product cannot be translated, the acknowledgement window is about to
+// close with no answer, or a submitted acknowledgement's reconciliation
+// reports failure — a refusal is a far better outcome for both parties
+// than silence.
 func (o *NetworkOrder) Reject() error {
-	if o.state != StateNew {
+	if o.state != StateNew && o.state != StateSubmitted {
 		return ErrAlreadyAnswered
 	}
 	o.state = StateRejected
@@ -207,10 +272,12 @@ func (o *NetworkOrder) Reject() error {
 }
 
 // LinkLocalOrder records order-management's OrderId for the work raised
-// from this demand. Only valid once acknowledged: local work must never
-// exist for demand we have not committed to.
+// from this demand. Valid once we have at least SUBMITTED an answer:
+// local work must never exist for demand we have not committed to, but it
+// must be linkable before reconciliation settles the submission, because
+// ReconcileSubmittedOrders needs it to release or cancel the hold.
 func (o *NetworkOrder) LinkLocalOrder(id shared.LocalOrderId) error {
-	if o.state != StateAcknowledged {
+	if o.state != StateSubmitted && o.state != StateAcknowledged {
 		return ErrNotAcknowledged
 	}
 	if o.localOrderId != nil {

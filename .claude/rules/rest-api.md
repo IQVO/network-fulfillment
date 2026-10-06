@@ -1,3 +1,10 @@
+---
+paths:
+  - "internal/adapters/inbound/http/**"
+  - "apis/openapi*.yaml"
+  - "apis/openapi/**"
+---
+
 # REST API (inbound adapter)
 
 `internal/adapters/inbound/http`, contract in `apis/openapi.yaml` (linted by
