@@ -163,6 +163,7 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
   in `order-management`. ADR 0001 names the orphaned hold as an open gap.
 - **Cycle time is not yet used.** `contract.EligiblePath.CycleTimeP95` is
   cached, but `throughputFeasible` sums only remaining capacity.
-- **Contract drift.** `apis/openapi.yaml` does not document
-  `GET /capability-offers` or the shipment-confirmation `POST`. CORS allows
-  only `GET/OPTIONS`. `ErrConfirmBeforeAcknowledge` maps to a 500.
+- **Contract drift.** CORS now allows `GET/POST/OPTIONS` and
+  `ErrConfirmBeforeAcknowledge` maps to a 409 (fixed 2026-10-06).
+  `apis/openapi.yaml` documents `GET /capability-offers` and the
+  shipment-confirmation `POST`.

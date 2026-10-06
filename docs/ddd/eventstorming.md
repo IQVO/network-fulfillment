@@ -166,7 +166,6 @@ flowchart LR
     NW["retail-network<br/>SubmitShipmentConfirmation"]:::external
     FE["fulfillment-execution<br/>PackageManifested"]:::external
     H1["Hotspot: no persisted WorkUnitId to<br/>NetworkRef mapping, ADR 0014"]:::hotspot
-    H2["Hotspot: confirm before acknowledge<br/>surfaces as HTTP 500"]:::hotspot
 
     OP --> C1
     C1 --> POL1
@@ -175,7 +174,6 @@ flowchart LR
     E1 --> NW
     FE -.- H1
     H1 -.- C1
-    G1 --- H2
 
     classDef actor fill:#fff59d,stroke:#b59f00,color:#000,font-size:11px
     classDef command fill:#4aa3df,stroke:#1f6f9f,color:#fff
@@ -188,8 +186,8 @@ flowchart LR
 
 Source: `internal/application/usecases/confirm_network_order_shipment.go`,
 `internal/adapters/inbound/http/server.go` (`handleConfirmShipment`),
-`internal/adapters/inbound/http/errors.go` (`statusFor` has no case for
-`ErrConfirmBeforeAcknowledge`), `docs/adr/0014-explicit-shipment-confirmation-endpoint.md`.
+`internal/adapters/inbound/http/errors.go` (`ErrConfirmBeforeAcknowledge`
+maps to 409 `confirm-before-acknowledge`), `docs/adr/0014-explicit-shipment-confirmation-endpoint.md`.
 
 Omitted: the 404 branch for an unknown `networkRef`.
 
@@ -284,7 +282,7 @@ event, so there is no orange sticky.
 | SUBMISSION_FAILED not counted | Hotspot | `PostgresProjection.ApplyNetworkOrderRejected` |
 | At-risk only after the deadline | Hotspot | `AcknowledgementOverdue` vs ADR 0001 §6 "approaching" |
 | No WorkUnitId → NetworkRef mapping | Hotspot | ADR 0014 |
-| Confirm-before-acknowledge → 500 | Hotspot | `errors.go` has no mapping for `ErrConfirmBeforeAcknowledge` |
+| Confirm-before-acknowledge → 409 | Policy | `errors.go` maps `ErrConfirmBeforeAcknowledge` to 409 `confirm-before-acknowledge` (resolved 2026-10-06) |
 | Offer never submitted outward | Hotspot | `RecomputeCapabilityOffers` doc comment; ADR 0001 §8 "published outward on a schedule" |
 | CycleTimeP95 unused | Hotspot | `RecomputeCapabilityOffers.throughputFeasible` sums capacity only |
 | Single SITE_ID | Hotspot | `RecomputeCapabilityOffers.SiteId`; ADR 0001 Consequences (single-site inherited) |

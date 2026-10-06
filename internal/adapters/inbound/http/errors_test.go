@@ -9,6 +9,7 @@ import (
 
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -38,6 +39,7 @@ func TestEveryMappedErrorHasItsOwnProblemType(t *testing.T) {
 		shared.ErrEmptyNetworkProductId,
 		shared.ErrNonPositiveQuantity,
 		shared.ErrNoLines,
+		networkorder.ErrConfirmBeforeAcknowledge,
 	}
 
 	for _, err := range mapped {

@@ -72,8 +72,8 @@ type Server struct {
 
 // Routes returns this adapter's handler.
 //
-// Only GETs, and that is a design statement rather than an omission —
-// see the package comment.
+// GETs, plus the one ADR'd POST (shipment-confirmation); that is a design
+// statement rather than an omission — see the package comment.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -95,11 +95,12 @@ func (s *Server) Routes() http.Handler {
 
 // corsMiddleware allows the warehouse-console browser SPA (and this
 // service's own netfulfil_mfe remote dev origin, :5188) to call this
-// read-only API directly from the browser. CORS_ALLOWED_ORIGINS overrides
+// API directly from the browser. CORS_ALLOWED_ORIGINS overrides
 // the local-dev default (comma-separated) for staging/prod deployments.
 // Same shape as every sibling context's inbound HTTP adapter (see e.g.
-// facility-layout's corsMiddleware) -- only GET/OPTIONS are allowed here,
-// matching this context's read-only REST surface.
+// facility-layout's corsMiddleware) -- GET/OPTIONS for the read surface,
+// plus POST for the one explicit write endpoint (shipment-confirmation,
+// ADR 0014).
 func corsMiddleware() func(http.Handler) http.Handler {
 	origins := []string{"http://localhost:5173", "http://localhost:5188"}
 	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
@@ -107,7 +108,7 @@ func corsMiddleware() func(http.Handler) http.Handler {
 	}
 	return cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
-		AllowedMethods:   []string{http.MethodGet, http.MethodOptions},
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions},
 		AllowedHeaders:   []string{"Content-Type", "Authorization"},
 		AllowCredentials: false,
 		MaxAge:           300,
