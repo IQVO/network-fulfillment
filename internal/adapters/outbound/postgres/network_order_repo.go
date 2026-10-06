@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -251,12 +252,17 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		siteId          string
 		requiredShipBy  time.Time
 		acknowledgeBy   time.Time
-		state           string
+		stateRaw        string
 		localOrderIdRaw *string
 		receivedAt      time.Time
 	)
-	if err := row.Scan(&siteId, &requiredShipBy, &acknowledgeBy, &state, &localOrderIdRaw, &receivedAt); err != nil {
+	if err := row.Scan(&siteId, &requiredShipBy, &acknowledgeBy, &stateRaw, &localOrderIdRaw, &receivedAt); err != nil {
 		return nil, err
+	}
+
+	state, err := networkorder.ParseState(stateRaw)
+	if err != nil {
+		return nil, fmt.Errorf("rehydrate network order %q: %w", ref, err)
 	}
 
 	lines, err := r.findLines(ctx, ref)
@@ -275,7 +281,7 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		shared.SiteId(siteId),
 		requiredShipBy, acknowledgeBy, receivedAt,
 		lines,
-		networkorder.State(state),
+		state,
 		localOrderId,
 	), nil
 }

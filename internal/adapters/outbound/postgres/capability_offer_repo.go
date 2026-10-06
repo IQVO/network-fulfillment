@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -53,11 +54,15 @@ func (r *CapabilityOfferRepo) ListAll(ctx context.Context) ([]capabilityoffer.Ca
 			sku        string
 			siteId     string
 			qty        int
-			basis      string
+			basisRaw   string
 			computedAt time.Time
 		)
-		if err := rows.Scan(&sku, &siteId, &qty, &basis, &computedAt); err != nil {
+		if err := rows.Scan(&sku, &siteId, &qty, &basisRaw, &computedAt); err != nil {
 			return nil, err
+		}
+		basis, err := capabilityoffer.ParseBasis(basisRaw)
+		if err != nil {
+			return nil, fmt.Errorf("rehydrate capability offer %q at site %q: %w", sku, siteId, err)
 		}
 		// New's own physicalAvailable check is satisfied trivially:
 		// a persisted row was already a valid offer when saved, and
@@ -65,9 +70,9 @@ func (r *CapabilityOfferRepo) ListAll(ctx context.Context) ([]capabilityoffer.Ca
 		// back as the SAME stored quantity for a row that never
 		// recorded physical separately. This repo intentionally
 		// trusts a stored row rather than re-validating it.
-		o, err := capabilityoffer.New(shared.SKU(sku), shared.SiteId(siteId), qty, qty, capabilityoffer.Basis(basis), computedAt)
+		o, err := capabilityoffer.New(shared.SKU(sku), shared.SiteId(siteId), qty, qty, basis, computedAt)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("rehydrate capability offer %q at site %q: %w", sku, siteId, err)
 		}
 		out = append(out, o)
 	}

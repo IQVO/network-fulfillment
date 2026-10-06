@@ -50,7 +50,24 @@ const (
 	StateConfirmed State = "CONFIRMED"
 )
 
+// ParseState validates a persisted state string and returns the matching
+// State. A repository MUST rehydrate through it rather than casting
+// State(raw): a corrupt or unrecognised value would otherwise become an
+// aggregate in an invalid lifecycle position. Matching is exact — no
+// trimming, no case folding — because the stored vocabulary is closed.
+func ParseState(value string) (State, error) {
+	switch s := State(value); s {
+	case StateNew, StateSubmitted, StateAcknowledged, StateRejected, StateConfirmed:
+		return s, nil
+	default:
+		return "", ErrUnknownState
+	}
+}
+
 var (
+	// ErrUnknownState rejects a state string outside the lifecycle above.
+	ErrUnknownState = errors.New("unknown network order state")
+
 	// ErrAlreadyAnswered rejects a second acknowledgement or rejection.
 	// The network's protocol allows exactly one answer per order, and a
 	// duplicate is a bug in us, not a retry: a retry of a LOST
