@@ -58,9 +58,9 @@ sequenceDiagram
                 else feasible
                     UC->>A: Submit()
                     UC->>A: LinkLocalOrder(localOrderId)
-                    UC->>U: Execute: Save SUBMITTED + Publish NetworkOrderAcknowledged
+                    UC->>U: Execute: Save SUBMITTED + Publish NetworkOrderSubmitted
                     UC->>GW: SubmitAcknowledgement(ref, true)
-                    Note over UC,OM: no release here, ReconcileSubmittedOrders releases
+                    Note over UC,OM: no Acknowledged event and no release here, ReconcileSubmittedOrders does both on settle
                 end
             end
             UC-->>P: order or error
@@ -101,7 +101,7 @@ sequenceDiagram
             Note over UC: skip, retry next pass
         else SUCCESS
             UC->>A: ConfirmAcknowledgement()
-            UC->>U: Execute: Save ACKNOWLEDGED, no event
+            UC->>U: Execute: Save ACKNOWLEDGED + Publish NetworkOrderAcknowledged v2 (ADR 0016)
             UC->>OM: ReleaseHeldOrder(localOrderId)
         else FAILURE
             UC->>OM: CancelHeldOrder(localOrderId)
@@ -284,7 +284,7 @@ sequenceDiagram
     else known type
         AC->>CE: MarkProcessed(id)
         alt first time
-            AC->>PR: Apply Received / Acknowledged / Rejected
+            AC->>PR: Apply Received / Acknowledged (v1 or v2) / Rejected, Submitted claimed with no effect
         else duplicate
             Note over AC: skip
         end

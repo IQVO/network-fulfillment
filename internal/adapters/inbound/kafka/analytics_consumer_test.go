@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -143,11 +145,18 @@ func TestAnalyticsConsumer_RoutesEachEventType(t *testing.T) {
 			wantMethod: "received",
 		},
 		{
-			name:       "NetworkOrderAcknowledged",
+			name:       "NetworkOrderAcknowledged v1 (historic, meant submitted)",
 			eventType:  ceType("NetworkOrderAcknowledged"),
 			data:       map[string]any{"networkRef": "po-1", "receivedAt": at.Add(-90 * time.Second).Format(time.RFC3339Nano)},
 			wantMethod: "acknowledged",
 			wantLat:    90,
+		},
+		{
+			name:       "NetworkOrderAcknowledged v2 (settle)",
+			eventType:  ceType("NetworkOrderAcknowledged.v2"),
+			data:       map[string]any{"networkRef": "po-1", "receivedAt": at.Add(-120 * time.Second).Format(time.RFC3339Nano)},
+			wantMethod: "acknowledged",
+			wantLat:    120,
 		},
 		{
 			name:       "NetworkOrderRejected",
@@ -265,13 +274,88 @@ func TestAnalyticsConsumer_IgnoresShortNameType(t *testing.T) {
 
 func TestAnalyticsConsumer_TypeConstantsAreFullTypes(t *testing.T) {
 	for got, want := range map[string]string{
-		inboundkafka.TypeNetworkOrderReceived:     ceType("NetworkOrderReceived"),
-		inboundkafka.TypeNetworkOrderAcknowledged: ceType("NetworkOrderAcknowledged"),
-		inboundkafka.TypeNetworkOrderRejected:     ceType("NetworkOrderRejected"),
+		inboundkafka.TypeNetworkOrderReceived:       ceType("NetworkOrderReceived"),
+		inboundkafka.TypeNetworkOrderSubmitted:      ceType("NetworkOrderSubmitted"),
+		inboundkafka.TypeNetworkOrderAcknowledged:   ceType("NetworkOrderAcknowledged.v2"),
+		inboundkafka.TypeNetworkOrderAcknowledgedV1: ceType("NetworkOrderAcknowledged"),
+		inboundkafka.TypeNetworkOrderRejected:       ceType("NetworkOrderRejected"),
 	} {
 		if got != want {
 			t.Errorf("type = %q, want %q", got, want)
 		}
+	}
+}
+
+// TestAnalyticsConsumer_Submitted_IsClaimedButHasNoReportEffect: the
+// Submitted fact (ADR 0016) is a recognised type — claimed on its id so a
+// redelivery is skipped — but the acknowledgement report counts
+// settled acknowledgements, so it must not move any counter.
+func TestAnalyticsConsumer_Submitted_IsClaimedButHasNoReportEffect(t *testing.T) {
+	at := time.Date(2026, 10, 6, 8, 0, 0, 0, time.UTC)
+	proj := &fakeProjection{}
+	processed := newFakeProcessed()
+	c := &inboundkafka.AnalyticsConsumer{Projection: proj, Processed: processed}
+
+	raw := envelope(t, "evt-sub", ceType("NetworkOrderSubmitted"), at, map[string]any{
+		"networkRef": "po-1", "receivedAt": at.Add(-time.Minute).Format(time.RFC3339Nano),
+	})
+	if err := c.HandleMessage(context.Background(), raw); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	if len(proj.calls) != 0 {
+		t.Fatalf("Submitted moved the report: %+v", proj.calls)
+	}
+	if !processed.seen["evt-sub"] {
+		t.Fatal("Submitted must be claimed on its CloudEvents id")
+	}
+}
+
+// TestAnalyticsConsumer_HistoricAcknowledgedV1_ProjectsAsBefore replays
+// the exact v1 bytes captured from the analytics topic BEFORE ADR 0016
+// (fixture testdata/historic-v1): v1 meant "submitted", and the report
+// numbers it fed must not change on replay — one acknowledgement, with
+// latency = At - ReceivedAt (60s in the fixture).
+func TestAnalyticsConsumer_HistoricAcknowledgedV1_ProjectsAsBefore(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "historic-v1", "NetworkOrderAcknowledged.analytics.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	proj := &fakeProjection{}
+	c := &inboundkafka.AnalyticsConsumer{Projection: proj, Processed: newFakeProcessed()}
+
+	if err := c.HandleMessage(context.Background(), raw); err != nil {
+		t.Fatalf("HandleMessage(v1): %v", err)
+	}
+	if len(proj.calls) != 1 || proj.calls[0].method != "acknowledged" {
+		t.Fatalf("calls = %+v, want one acknowledged", proj.calls)
+	}
+	if proj.calls[0].latency != 60 {
+		t.Errorf("latency = %v, want 60 (At - ReceivedAt of the fixture)", proj.calls[0].latency)
+	}
+}
+
+// TestAnalyticsConsumer_SubmittedThenV2Acknowledged_CountsOneAcknowledgement
+// walks the new two-step lifecycle of ONE order: only the settle counts
+// as an acknowledgement, with latency receipt -> settle.
+func TestAnalyticsConsumer_SubmittedThenV2Acknowledged_CountsOneAcknowledgement(t *testing.T) {
+	received := time.Date(2026, 10, 6, 8, 0, 0, 0, time.UTC)
+	proj := &fakeProjection{}
+	c := &inboundkafka.AnalyticsConsumer{Projection: proj, Processed: newFakeProcessed()}
+
+	submitted := envelope(t, "evt-sub", ceType("NetworkOrderSubmitted"), received.Add(time.Minute), map[string]any{
+		"networkRef": "po-1", "receivedAt": received.Format(time.RFC3339Nano)})
+	settled := envelope(t, "evt-ack", ceType("NetworkOrderAcknowledged.v2"), received.Add(5*time.Minute), map[string]any{
+		"networkRef": "po-1", "receivedAt": received.Format(time.RFC3339Nano)})
+	for _, raw := range [][]byte{submitted, settled} {
+		if err := c.HandleMessage(context.Background(), raw); err != nil {
+			t.Fatalf("HandleMessage: %v", err)
+		}
+	}
+	if len(proj.calls) != 1 || proj.calls[0].method != "acknowledged" || proj.calls[0].eventId != "evt-ack" {
+		t.Fatalf("calls = %+v, want exactly the v2 settle as the acknowledgement", proj.calls)
+	}
+	if proj.calls[0].latency != 300 {
+		t.Errorf("latency = %v, want 300 (receipt -> settle)", proj.calls[0].latency)
 	}
 }
 

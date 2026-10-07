@@ -102,12 +102,16 @@ from `internal/domain/shared/events.go`. Each is published as
 | Event | Raised when | Full CloudEvents type |
 | --- | --- | --- |
 | `NetworkOrderReceived` | after `Receive`/`ReceiveUntranslatable` is saved | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderReceived` |
-| `NetworkOrderAcknowledged` | after `Submit` + `LinkLocalOrder` is saved (state `SUBMITTED`) | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged` |
+| `NetworkOrderSubmitted` | after `Submit` + `LinkLocalOrder` is saved (state `SUBMITTED`) | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderSubmitted` |
+| `NetworkOrderAcknowledged` | after `ConfirmAcknowledgement` is saved (state `ACKNOWLEDGED`, the settle; ADR 0016) | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2` |
 | `NetworkOrderRejected` | after every `Reject` (carries `reason`) | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` |
 | `NetworkOrderShipmentConfirmed` | after `ConfirmShipment` is saved | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` |
 | `AcknowledgementDeadlineAtRisk` | sweep, overdue `NEW` order (no transition) | `com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk` |
 
-`SUBMITTED -> ACKNOWLEDGED` (`ConfirmAcknowledgement`) raises **no** event.
+Every state transition that answers the network raises an event: `Submit`
+raises `NetworkOrderSubmitted`, `ConfirmAcknowledgement` raises
+`NetworkOrderAcknowledged` (v2), `Reject` raises `NetworkOrderRejected`
+(decided 2026-10-06, ADR 0016; before it, the settle raised nothing).
 
 ### 8. Throughput
 
@@ -123,9 +127,9 @@ upsert on `network_ref`.
 *Estimate.* A handful of lines per order (one row per network line in
 `network_order_lines`). Lifetime: from receipt, it is answered within 24h,
 then lives until shipment confirmation (days) and stays as a terminal
-record. Event count per instance: **2–4** domain events (Received, then
-Acknowledged or Rejected, possibly Rejected after a failed reconciliation,
-then ShipmentConfirmed), plus one `AcknowledgementDeadlineAtRisk` per sweep
+record. Event count per instance: **3–5** domain events (Received, then
+Submitted and Acknowledged (v2) on the happy path, or Rejected, possibly
+Rejected after a failed reconciliation, then ShipmentConfirmed), plus one `AcknowledgementDeadlineAtRisk` per sweep
 pass while the order is overdue.
 
 ## CapabilityOffer

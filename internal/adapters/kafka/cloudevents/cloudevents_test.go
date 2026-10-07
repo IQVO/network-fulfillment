@@ -17,6 +17,34 @@ func TestType_BuildsFleetConvention(t *testing.T) {
 	}
 }
 
+func TestType_VersionedAddsSuffixOnlyFromV2(t *testing.T) {
+	const base = "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged"
+	if got := cloudevents.TypeVersioned("networkorder", "NetworkOrderAcknowledged", 1); got != base {
+		t.Fatalf("v1 type = %q, want the unsuffixed %q", got, base)
+	}
+	if got := cloudevents.TypeVersioned("networkorder", "NetworkOrderAcknowledged", 2); got != base+".v2" {
+		t.Fatalf("v2 type = %q, want %q", got, base+".v2")
+	}
+}
+
+func TestNew_V2CarriesDotV2TypeAndV2Dataschema(t *testing.T) {
+	raw, err := cloudevents.New(cloudevents.Spec{ID: "id-1", Entity: "networkorder", EventName: "NetworkOrderAcknowledged",
+		Subject: "po-1", Time: time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC), Stream: cloudevents.StreamAnalytics, Version: 2, Data: map[string]any{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	e, err := cloudevents.Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if e.Type() != "com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderAcknowledged.v2" {
+		t.Fatalf("type = %q", e.Type())
+	}
+	if e.DataSchema() != "urn:warehouse:network-fulfillment:analytics:NetworkOrderAcknowledged:v2" {
+		t.Fatalf("dataschema = %q", e.DataSchema())
+	}
+}
+
 func TestDataSchema_BuildsURN(t *testing.T) {
 	got := cloudevents.DataSchema(cloudevents.StreamAnalytics, "NetworkOrderRejected", 1)
 	want := "urn:warehouse:network-fulfillment:analytics:NetworkOrderRejected:v1"

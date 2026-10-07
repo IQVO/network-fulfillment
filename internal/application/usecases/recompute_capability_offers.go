@@ -5,6 +5,7 @@ package usecases
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
@@ -82,7 +83,7 @@ func (u *RecomputeCapabilityOffers) Execute(ctx context.Context) (Result, error)
 			continue
 		}
 
-		feasible, known := u.throughputFeasible(next, hasSchedule)
+		feasible, known := u.throughputFeasible(next, hasSchedule, now)
 
 		offer, err := capabilityoffer.Compute(sku, u.SiteId, physical, feasible, known, now)
 		if err != nil {
@@ -112,13 +113,26 @@ func (u *RecomputeCapabilityOffers) Execute(ctx context.Context) (Result, error)
 // not one path's capacity has ever been observed -- meaning capacity is
 // not a PROVEN constraint, so the caller falls back to physical rather
 // than throttling on a number that was never actually measured.
-func (u *RecomputeCapabilityOffers) throughputFeasible(next contract.NextCutoff, hasSchedule bool) (int, bool) {
+//
+// Eligibility (ADR 0017): a path counts only if its CycleTimeP95 fits
+// the time left to the cutoff (CycleTimeP95 <= cutoff - now). A path with
+// no cycle-time data (unknown, or zero) stays eligible -- no data is not
+// evidence -- and capacity is never scaled by cycle time. If every path
+// is ruled out by cycle time, nothing can make the cutoff: that is a
+// proven zero (known=true), not the "capacity never observed" fallback.
+func (u *RecomputeCapabilityOffers) throughputFeasible(next contract.NextCutoff, hasSchedule bool, now time.Time) (int, bool) {
 	if !hasSchedule {
 		return 0, false
 	}
+	window := next.CutoffAt.Sub(now)
 	total := 0
 	anyKnown := false
+	excluded := 0
 	for _, p := range next.Paths {
+		if !cycleTimeFits(p, window) {
+			excluded++
+			continue
+		}
 		units, known := u.Capacity.RemainingCapacity(p.PathId, next.CutoffAt)
 		if !known {
 			continue
@@ -126,5 +140,17 @@ func (u *RecomputeCapabilityOffers) throughputFeasible(next contract.NextCutoff,
 		anyKnown = true
 		total += units
 	}
+	if excluded > 0 && excluded == len(next.Paths) {
+		return 0, true
+	}
 	return total, anyKnown
+}
+
+// cycleTimeFits reports whether p can complete work inside window. Missing
+// or zero cycle time fails open (true).
+func cycleTimeFits(p contract.EligiblePath, window time.Duration) bool {
+	if !p.CycleTimeKnown || p.CycleTimeP95 <= 0 {
+		return true
+	}
+	return p.CycleTimeP95 <= window
 }

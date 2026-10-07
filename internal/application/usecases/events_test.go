@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
@@ -25,12 +26,14 @@ func (p *recordingPublisher) Publish(_ context.Context, event any) error {
 	return nil
 }
 
-// TestReceive_FeasibleDemand_PublishesReceivedThenAcknowledged asserts the
+// TestReceive_FeasibleDemand_PublishesReceivedThenSubmitted asserts the
 // event sequence and payload for the happy path: a NetworkOrderReceived
-// (the fact demand arrived) followed by a NetworkOrderAcknowledged (the
-// fact we committed) — in that order, since we cannot have committed to
-// demand we never recorded receiving.
-func TestReceive_FeasibleDemand_PublishesReceivedThenAcknowledged(t *testing.T) {
+// (the fact demand arrived) followed by a NetworkOrderSubmitted (the
+// fact we told the network yes, still unreconciled) — in that order,
+// since we cannot have committed to demand we never recorded receiving.
+// NetworkOrderAcknowledged is NOT raised here: it is raised only when
+// reconciliation settles the order ACKNOWLEDGED (ADR 0016).
+func TestReceive_FeasibleDemand_PublishesReceivedThenSubmitted(t *testing.T) {
 	f := newFixture(true)
 	pub := &recordingPublisher{}
 	uc := f.receive()
@@ -42,7 +45,7 @@ func TestReceive_FeasibleDemand_PublishesReceivedThenAcknowledged(t *testing.T) 
 	}
 
 	if len(pub.events) != 2 {
-		t.Fatalf("events = %d, want 2 (Received, Acknowledged): %+v", len(pub.events), pub.events)
+		t.Fatalf("events = %d, want 2 (Received, Submitted): %+v", len(pub.events), pub.events)
 	}
 
 	received, ok := pub.events[0].(shared.NetworkOrderReceived)
@@ -59,18 +62,113 @@ func TestReceive_FeasibleDemand_PublishesReceivedThenAcknowledged(t *testing.T) 
 		t.Errorf("NetworkOrderReceived.AcknowledgeBy = %v, want %v", received.AcknowledgeBy, o.AcknowledgeBy())
 	}
 
-	acked, ok := pub.events[1].(shared.NetworkOrderAcknowledged)
+	submitted, ok := pub.events[1].(shared.NetworkOrderSubmitted)
 	if !ok {
-		t.Fatalf("events[1] = %T, want NetworkOrderAcknowledged", pub.events[1])
+		t.Fatalf("events[1] = %T, want NetworkOrderSubmitted", pub.events[1])
 	}
-	if acked.NetworkRef != "po-1" {
-		t.Errorf("NetworkOrderAcknowledged.NetworkRef = %q, want po-1", acked.NetworkRef)
+	if submitted.NetworkRef != "po-1" {
+		t.Errorf("NetworkOrderSubmitted.NetworkRef = %q, want po-1", submitted.NetworkRef)
+	}
+	if submitted.LocalOrderId != *o.LocalOrderId() {
+		t.Errorf("NetworkOrderSubmitted.LocalOrderId = %q, want %q", submitted.LocalOrderId, *o.LocalOrderId())
+	}
+	if !submitted.ReceivedAt.Equal(o.ReceivedAt()) {
+		t.Errorf("NetworkOrderSubmitted.ReceivedAt = %v, want %v", submitted.ReceivedAt, o.ReceivedAt())
+	}
+}
+
+// reconcileFixture seeds one order through ReceiveNetworkDemand with a
+// recording publisher, then returns a reconcile use case sharing a
+// FRESH recording publisher (so a test sees only what reconciliation
+// raised).
+func reconcileFixture(t *testing.T, status contract.SubmissionStatusValue) (*usecases.ReconcileSubmittedOrders, *recordingPublisher, *networkorder.NetworkOrder) {
+	t.Helper()
+	f := newFixture(true)
+	o, err := f.receive().Execute(context.Background(), demand("po-1", "ASIN-1"))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	pub := &recordingPublisher{}
+	rc := f.reconcile()
+	rc.Events = pub
+	rc.Gateway = &fakeReconcileGateway{StubGateway: f.gateway, status: status}
+	return rc, pub, o
+}
+
+// TestReconcile_Success_PublishesNetworkOrderAcknowledged: the settle
+// SUBMITTED -> ACKNOWLEDGED is the moment the Acknowledged fact becomes
+// true, so reconciliation raises it (ADR 0016) carrying the local order
+// and the original receipt time.
+func TestReconcile_Success_PublishesNetworkOrderAcknowledged(t *testing.T) {
+	rc, pub, o := reconcileFixture(t, contract.SubmissionSuccess)
+
+	if _, err := rc.Execute(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(pub.events) != 1 {
+		t.Fatalf("events = %d, want 1 (Acknowledged): %+v", len(pub.events), pub.events)
+	}
+	acked, ok := pub.events[0].(shared.NetworkOrderAcknowledged)
+	if !ok {
+		t.Fatalf("events[0] = %T, want NetworkOrderAcknowledged", pub.events[0])
+	}
+	if acked.NetworkRef != "po-1" || acked.SiteId != o.SiteId() {
+		t.Errorf("Acknowledged ref/site = %q/%q, want po-1/%q", acked.NetworkRef, acked.SiteId, o.SiteId())
 	}
 	if acked.LocalOrderId != *o.LocalOrderId() {
-		t.Errorf("NetworkOrderAcknowledged.LocalOrderId = %q, want %q", acked.LocalOrderId, *o.LocalOrderId())
+		t.Errorf("Acknowledged.LocalOrderId = %q, want %q", acked.LocalOrderId, *o.LocalOrderId())
 	}
 	if !acked.ReceivedAt.Equal(o.ReceivedAt()) {
-		t.Errorf("NetworkOrderAcknowledged.ReceivedAt = %v, want %v", acked.ReceivedAt, o.ReceivedAt())
+		t.Errorf("Acknowledged.ReceivedAt = %v, want %v", acked.ReceivedAt, o.ReceivedAt())
+	}
+	if !acked.At.Equal(now()) {
+		t.Errorf("Acknowledged.At = %v, want the settle time %v", acked.At, now())
+	}
+}
+
+// TestReconcile_PendingAndFailure_NeverPublishAcknowledged: a pending
+// submission is not yet acknowledged and a refused one never will be —
+// the failure path raises Rejected(SUBMISSION_FAILED) and nothing else.
+func TestReconcile_PendingAndFailure_NeverPublishAcknowledged(t *testing.T) {
+	rc, pub, _ := reconcileFixture(t, contract.SubmissionPending)
+	if _, err := rc.Execute(context.Background()); err != nil {
+		t.Fatalf("reconcile pending: %v", err)
+	}
+	if len(pub.events) != 0 {
+		t.Fatalf("pending raised %+v, want no events", pub.events)
+	}
+
+	rc, pub, _ = reconcileFixture(t, contract.SubmissionFailure)
+	if _, err := rc.Execute(context.Background()); err != nil {
+		t.Fatalf("reconcile failure: %v", err)
+	}
+	if len(pub.events) != 1 {
+		t.Fatalf("failure raised %d events, want exactly 1 Rejected: %+v", len(pub.events), pub.events)
+	}
+	if _, ok := pub.events[0].(shared.NetworkOrderRejected); !ok {
+		t.Fatalf("events[0] = %T, want NetworkOrderRejected", pub.events[0])
+	}
+}
+
+// TestReconcile_SettlePublishFailure_DoesNotReleaseOrPersist: if the
+// Acknowledged event cannot be enqueued, Save + Publish fail together
+// (ADR 0003) and the hold must NOT be released — the failure is left
+// for the next pass, never swallowed into a release for a settle that
+// has no durable event.
+func TestReconcile_SettlePublishFailure_DoesNotReleaseOrPersist(t *testing.T) {
+	f := newFixture(true)
+	if _, err := f.receive().Execute(context.Background(), demand("po-1", "ASIN-1")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	f.planner.calls = nil
+	rc := f.reconcile()
+	rc.Events = &recordingPublisher{err: errBoom}
+
+	if _, err := rc.Execute(context.Background()); err != nil {
+		t.Fatalf("reconcile must not abort the pass: %v", err)
+	}
+	if len(f.planner.calls) != 0 {
+		t.Fatalf("planner calls = %v, want none (event not durable)", f.planner.calls)
 	}
 }
 

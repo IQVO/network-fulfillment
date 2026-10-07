@@ -36,16 +36,40 @@ type NetworkOrderReceived struct {
 func (e NetworkOrderReceived) EventName() string     { return "NetworkOrderReceived" }
 func (e NetworkOrderReceived) OccurredAt() time.Time { return e.At }
 
-// NetworkOrderAcknowledged is raised once we have committed to fulfilling
-// an order in full: the network has been told yes (the order is
-// SUBMITTED), and a local order has been raised in order-management.
+// NetworkOrderSubmitted is raised the moment the order moves to
+// SUBMITTED: we decided to fulfil it in full, a local held order exists
+// in order-management, and the network has been told yes — but that
+// submission is only accepted-for-processing, not yet reconciled against
+// the network's transaction status (ADR 0001 §5).
 //
-// It is published at SUBMITTED, i.e. BEFORE ReconcileSubmittedOrders
-// settles the submission against the network's transaction status
-// (ADR 0001 §5); the later SUBMITTED -> ACKNOWLEDGED settlement raises no
-// event, and a failed reconciliation raises NetworkOrderRejected with
-// reason SUBMISSION_FAILED. Consumers must not read this event as a
-// settled commitment.
+// It is exactly what NetworkOrderAcknowledged v1 announced (ADR 0016);
+// the fact keeps its truthful name. Consumers must not read it as a
+// settled commitment: the settle is NetworkOrderAcknowledged (v2).
+type NetworkOrderSubmitted struct {
+	NetworkRef   NetworkRef
+	SiteId       SiteId
+	LocalOrderId LocalOrderId
+	// ReceivedAt is carried alongside At so a consumer can compute
+	// receipt -> submission latency (At - ReceivedAt) without a second
+	// lookup.
+	ReceivedAt time.Time
+	At         time.Time
+}
+
+func (e NetworkOrderSubmitted) EventName() string     { return "NetworkOrderSubmitted" }
+func (e NetworkOrderSubmitted) OccurredAt() time.Time { return e.At }
+
+// NetworkOrderAcknowledged is raised when the order SETTLES ACKNOWLEDGED:
+// ReconcileSubmittedOrders saw the network's own transaction-status
+// record report SUCCESS for the submission (ADR 0001 §5). It is a settled
+// commitment, never an in-flight one.
+//
+// Before ADR 0016 this event was published at SUBMITTED (what
+// NetworkOrderSubmitted now announces) and the settle raised nothing; the
+// changed meaning is published as the v2 wire type/dataschema (the domain
+// type keeps its name — versioning is an adapter concern). A failed
+// reconciliation raises NetworkOrderRejected with reason
+// SUBMISSION_FAILED instead and never this event.
 type NetworkOrderAcknowledged struct {
 	NetworkRef   NetworkRef
 	SiteId       SiteId

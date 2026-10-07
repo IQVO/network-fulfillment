@@ -43,10 +43,9 @@ flowchart LR
     POL2["Policy: null promiseDate<br/>means infeasible"]:::policy
     C3["Submit acceptance"]:::command
     C4["Reject"]:::command
-    E2["NetworkOrderAcknowledged"]:::event
+    E2["NetworkOrderSubmitted"]:::event
     E3["NetworkOrderRejected"]:::event
     C5["Cancel held order"]:::command
-    H1["Hotspot: Acknowledged event fires<br/>at SUBMITTED, before reconciliation"]:::hotspot
     H2["Hotspot: crash after raising hold<br/>leaves NEW order with no localOrderId"]:::hotspot
 
     T --> C1
@@ -68,7 +67,6 @@ flowchart LR
     C4 --> G1
     G1 --> E2
     G1 --> E3
-    E2 --- H1
     C2 --- H2
 
     classDef actor fill:#fff59d,stroke:#b59f00,color:#000,font-size:11px
@@ -106,11 +104,11 @@ flowchart LR
     C4["Reject"]:::command
     G1["NetworkOrder"]:::aggregate
     E3["NetworkOrderRejected"]:::event
+    E5["NetworkOrderAcknowledged v2<br/>(decided 2026-10-06, ADR 0016)"]:::event
     POL2["Policy: overdue NEW order<br/>is reported, never mutated"]:::policy
     E4["AcknowledgementDeadlineAtRisk"]:::event
     POL3["Policy: overdue NEW order<br/>is refused, never answered late"]:::policy
     OM["order-management"]:::external
-    H3["Hotspot: no event for<br/>SUBMITTED to ACKNOWLEDGED"]:::hotspot
     H5["Hotspot: at-risk fires only after<br/>the deadline, ADR says approaching"]:::hotspot
 
     T1 --> RM1
@@ -118,6 +116,7 @@ flowchart LR
     NW --> POL1
     POL1 -->|SUCCESS| C1
     C1 --> G1
+    G1 --> E5
     C1 --> C2
     C2 --> OM
     POL1 -->|FAILURE| C3
@@ -130,7 +129,6 @@ flowchart LR
     POL2 --> E4
     RM2 --> POL3
     POL3 --> C3
-    C1 --- H3
     E4 --- H5
 
     classDef actor fill:#fff59d,stroke:#b59f00,color:#000,font-size:11px
@@ -202,10 +200,10 @@ flowchart LR
     RM2["Path capacity cache<br/>RemainingCapacity"]:::readmodel
     C1["Compute capability offer"]:::command
     POL1["Policy: unknown capacity<br/>falls back to physical"]:::policy
+    POL2["Policy: path eligible only if CycleTimeP95<br/>≤ cutoff − now; no data stays eligible<br/>(decided 2026-10-06, ADR 0017)"]:::policy
     G1["CapabilityOffer"]:::aggregate
     RM3["Capability offers<br/>GET /capability-offers"]:::readmodel
     H1["Hotspot: offer never submitted<br/>outward, SubmitAvailability unused"]:::hotspot
-    H2["Hotspot: CycleTimeP95 cached<br/>but unused in the sum"]:::hotspot
     H3["Hotspot: single SITE_ID only"]:::hotspot
 
     PPM --> RM1
@@ -213,13 +211,13 @@ flowchart LR
     T --> C1
     PT --> C1
     INV --> C1
-    RM1 --> C1
+    RM1 --> POL2
+    POL2 --> C1
     RM2 --> C1
     C1 --> POL1
     POL1 --> G1
     G1 --> RM3
     RM3 --- H1
-    RM1 --- H2
     C1 --- H3
 
     classDef actor fill:#fff59d,stroke:#b59f00,color:#000,font-size:11px
@@ -255,7 +253,7 @@ event, so there is no orange sticky.
 | Compute capability offer | Command | `capabilityoffer.Compute` |
 | NetworkOrder | Aggregate | `internal/domain/networkorder` |
 | CapabilityOffer | Aggregate | `internal/domain/capabilityoffer` |
-| NetworkOrderReceived / Acknowledged / Rejected / ShipmentConfirmed / AcknowledgementDeadlineAtRisk | Domain Event | `internal/domain/shared/events.go` |
+| NetworkOrderReceived / Submitted / Acknowledged / Rejected / ShipmentConfirmed / AcknowledgementDeadlineAtRisk | Domain Event | `internal/domain/shared/events.go` |
 | Already-known NetworkRef | Policy | `ReceiveNetworkDemand.Execute` (`FindByRef`) |
 | Unknown product rejects whole order | Policy | `ReceiveNetworkDemand.translate` → `rejectUntranslatable` |
 | Null promiseDate means infeasible | Policy | `ordermanagement.Planner.RaiseHeldOrder` |
@@ -274,13 +272,12 @@ event, so there is no orange sticky.
 | inventory-storage | External System | `internal/adapters/outbound/inventoryclient` |
 | process-path-management, wes-work-planning | External System | the two Kafka caches |
 | fulfillment-execution | External System | named in ADR 0014 as the deliberately unused trigger |
-| Acknowledged at SUBMITTED | Hotspot | `ReceiveNetworkDemand.acknowledge` publishes before `ReconcileSubmittedOrders` settles |
+| Decided 2026-10-06: Submitted at SUBMITTED, Acknowledged only on settle (ADR 0016) | Policy | `ReceiveNetworkDemand.acknowledge` publishes `NetworkOrderSubmitted`; `ReconcileSubmittedOrders.confirm` publishes `NetworkOrderAcknowledged` (v2) with the save (ex-hotspots "Acknowledged at SUBMITTED" and "No event on settle") |
 | Orphaned hold after crash | Hotspot | `ReceiveNetworkDemand` saves `NEW` before `RaiseHeldOrder`; `RejectOverdueOrders` cancels only a linked hold; ADR 0001 Consequences ("orphaned-hold sweep as an open gap") |
-| No event on settle | Hotspot | `ReconcileSubmittedOrders.confirm` saves without publishing |
 | SUBMISSION_FAILED counted | Policy | `PostgresProjection.ApplyNetworkOrderRejected` increments `orders_rejected_submission_failed` (analytics migration 0002, ADR 0015; resolved 2026-10-06) |
 | At-risk only after the deadline | Hotspot | `AcknowledgementOverdue` vs ADR 0001 §6 "approaching" |
 | No WorkUnitId → NetworkRef mapping | Hotspot | ADR 0014 |
 | Confirm-before-acknowledge → 409 | Policy | `errors.go` maps `ErrConfirmBeforeAcknowledge` to 409 `confirm-before-acknowledge` (resolved 2026-10-06) |
 | Offer never submitted outward | Hotspot | `RecomputeCapabilityOffers` doc comment; ADR 0001 §8 "published outward on a schedule" |
-| CycleTimeP95 unused | Hotspot | `RecomputeCapabilityOffers.throughputFeasible` sums capacity only |
+| Decided 2026-10-06: path eligible only if CycleTimeP95 ≤ cutoff − now, missing/zero stays eligible (ADR 0017) | Policy | `RecomputeCapabilityOffers.throughputFeasible` / `cycleTimeFits` (ex-hotspot "CycleTimeP95 unused") |
 | Single SITE_ID | Hotspot | `RecomputeCapabilityOffers.SiteId`; ADR 0001 Consequences (single-site inherited) |

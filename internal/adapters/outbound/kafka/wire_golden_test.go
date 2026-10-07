@@ -29,6 +29,12 @@ func wireCases() []wireCase {
 			RequiredShipBy: at.Add(48 * time.Hour), AcknowledgeBy: at.Add(24 * time.Hour), LineCount: 2, At: at}},
 		{"NetworkOrderReceived_untranslatable.json", shared.NetworkOrderReceived{NetworkRef: "po-1", SiteId: "site-1",
 			RequiredShipBy: at.Add(48 * time.Hour), AcknowledgeBy: at.Add(24 * time.Hour), LineCount: 0, At: at}},
+		{"NetworkOrderSubmitted.json", shared.NetworkOrderSubmitted{NetworkRef: "po-1", SiteId: "site-1",
+			LocalOrderId: "ord-1", ReceivedAt: at.Add(-time.Minute), At: at}},
+		// NetworkOrderAcknowledged is the v2 wire type (ADR 0016): the
+		// settle. The historic v1 bytes (what was on the analytics topic
+		// before) are kept as the replay fixture in
+		// internal/adapters/inbound/kafka/testdata/historic-v1/.
 		{"NetworkOrderAcknowledged.json", shared.NetworkOrderAcknowledged{NetworkRef: "po-1", SiteId: "site-1",
 			LocalOrderId: "ord-1", ReceivedAt: at.Add(-time.Minute), At: at}},
 		{"NetworkOrderShipmentConfirmed.json", shared.NetworkOrderShipmentConfirmed{NetworkRef: "po-1", SiteId: "site-1",
@@ -38,6 +44,7 @@ func wireCases() []wireCase {
 		// Zero-valued optional members must keep serialising as they did
 		// (empty strings, 0001-01-01T00:00:00Z) — no omitempty crept in.
 		{"NetworkOrderReceived_zero.json", shared.NetworkOrderReceived{NetworkRef: "po-1"}},
+		{"NetworkOrderSubmitted_zero.json", shared.NetworkOrderSubmitted{NetworkRef: "po-1"}},
 		{"NetworkOrderAcknowledged_zero.json", shared.NetworkOrderAcknowledged{NetworkRef: "po-1"}},
 		{"NetworkOrderRejected_zero.json", shared.NetworkOrderRejected{NetworkRef: "po-1"}},
 		{"NetworkOrderShipmentConfirmed_zero.json", shared.NetworkOrderShipmentConfirmed{NetworkRef: "po-1"}},
