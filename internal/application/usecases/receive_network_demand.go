@@ -99,6 +99,7 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 	}
 
 	result, err := uc.Planner.RaiseHeldOrder(ctx, contract.HeldOrderRequest{
+		NetworkRef:     o.NetworkRef(),
 		SiteId:         o.SiteId(),
 		RequiredShipBy: o.RequiredShipBy(),
 		Lines:          o.SKUQuantities(),

@@ -105,6 +105,11 @@ const (
 // boundary ADR 0001 §2 draws and the reason the Amazon vocabulary cannot
 // leak inward.
 type HeldOrderRequest struct {
+	// NetworkRef identifies the network order this hold is raised for. It is
+	// the source of the Idempotency-Key order-management requires on
+	// POST /orders (its idempotency middleware), so a retried raise replays
+	// the same local order instead of creating a duplicate. Required.
+	NetworkRef     shared.NetworkRef
 	SiteId         shared.SiteId
 	RequiredShipBy time.Time
 	Lines          map[shared.SKU]int

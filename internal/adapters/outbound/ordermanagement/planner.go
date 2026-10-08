@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -74,6 +75,19 @@ type orderResponse struct {
 // ordinary order a null promise means "not computed yet", but for an
 // order carrying a deadline it means "we cannot meet it".
 func (p *Planner) RaiseHeldOrder(ctx context.Context, req contract.HeldOrderRequest) (contract.HeldOrderResult, error) {
+	// order-management's POST /orders is wrapped in a transactional
+	// Idempotency-Key middleware and answers 400 idempotency-key-required
+	// without the header (its #105). The key is derived from the NETWORK
+	// ref, not generated: this call is retried by NF's poll loop (and after a
+	// crash between saving the order and raising the hold), and a stable key
+	// makes every retry replay the same local order instead of creating a
+	// second held order that would reserve stock twice. An empty ref would
+	// make every order share one key and silently dedupe unrelated orders,
+	// so it is refused before any call is made.
+	if req.NetworkRef == "" {
+		return contract.HeldOrderResult{}, errors.New("raise held order: network ref is required (it is the idempotency key)")
+	}
+
 	lines := make([]orderLineRequest, 0, len(req.Lines))
 	for sku, qty := range req.Lines {
 		lines = append(lines, orderLineRequest{SKU: string(sku), Quantity: qty})
@@ -87,7 +101,8 @@ func (p *Planner) RaiseHeldOrder(ctx context.Context, req contract.HeldOrderRequ
 	}
 
 	var out orderResponse
-	if err := p.do(ctx, http.MethodPost, "/orders", body, &out); err != nil {
+	headers := map[string]string{idempotencyKeyHeader: raiseIdempotencyKey(req.NetworkRef)}
+	if err := p.doWithHeaders(ctx, http.MethodPost, "/orders", headers, body, &out); err != nil {
 		return contract.HeldOrderResult{}, err
 	}
 
@@ -127,7 +142,21 @@ func (p *Planner) CancelHeldOrder(ctx context.Context, id shared.LocalOrderId) e
 	return p.do(ctx, http.MethodDelete, fmt.Sprintf("/orders/%s", id), nil, nil)
 }
 
+// idempotencyKeyHeader is the request header order-management's create
+// endpoint requires.
+const idempotencyKeyHeader = "Idempotency-Key"
+
+// raiseIdempotencyKey is the stable key for raising the hold of one network
+// order: the same network order always maps to the same key.
+func raiseIdempotencyKey(ref shared.NetworkRef) string {
+	return "netful-raise-" + string(ref)
+}
+
 func (p *Planner) do(ctx context.Context, method, path string, in, out any) error {
+	return p.doWithHeaders(ctx, method, path, nil, in, out)
+}
+
+func (p *Planner) doWithHeaders(ctx context.Context, method, path string, headers map[string]string, in, out any) error {
 	var buf *bytes.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -144,6 +173,9 @@ func (p *Planner) do(ctx context.Context, method, path string, in, out any) erro
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := p.HTTP.Do(req)
 	if err != nil {
