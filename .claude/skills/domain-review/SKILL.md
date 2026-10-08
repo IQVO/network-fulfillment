@@ -39,19 +39,16 @@ readers can no longer map code to domain conversation.
    invisible to the next person who touches that aggregate and may
    accidentally remove it thinking it's dead code.
 4. **A value object that should be closed but was implemented open (or
-   vice versa).** This repo's own domain-model doc calls out
-   `HandlingTag` as a deliberately CLOSED enum (unlike facility-layout's
-   open `LocationType`) because it carries real regulatory meaning —
-   check any new categorical field against whether the domain actually
-   wants an open or closed set, and flag a mismatch either direction.
+   vice versa).** Check any new categorical field against whether the domain
+   actually wants an open or closed set (a regulatory or contractual vocabulary
+   is closed; an operator-configured one is open), and flag a mismatch either
+   direction.
 5. **A cross-aggregate rule implemented as a cross-aggregate call instead
    of an explicit local check, or vice versa**, per whatever this repo's
    own domain-model doc says about which invariants are local vs. which
-   legitimately need external state (e.g. this repo's DOT segregation
-   check is explicitly documented as "purely LOCAL... no cross-context
-   call" — a change that quietly makes it call out to another service
-   would be a real regression worth flagging even if functionally it
-   still "works").
+   legitimately need external state — a change that quietly turns a documented
+   local check into a call to another service is a real regression worth
+   flagging even if functionally it still "works".
 6. **New terminology introduced without updating the domain-model doc.**
    If new code introduces a genuinely new domain concept the doc doesn't
    yet name, that's not necessarily wrong — but the doc needs a new entry

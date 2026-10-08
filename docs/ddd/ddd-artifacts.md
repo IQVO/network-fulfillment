@@ -45,5 +45,6 @@ ACL downstream) comes from ADR 0001 and is not re-decided here.
 Neighbour classifications follow the fleet's: `order-management`
 Generic/Supporting; `inventory-storage`, `wes-work-planning`,
 `fulfillment-execution`, `warehouse-planning` Core; `workforce-management`,
-`labor-performance`, `warehouse-ops-agent`, `network-fulfillment`
-Supporting; `facility-layout`, `process-path-management` Generic.
+`labor-performance`, `warehouse-ops-agent`, `network-fulfillment`,
+`product-master` Supporting; `facility-layout`, `process-path-management`
+Generic.
