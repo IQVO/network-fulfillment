@@ -49,8 +49,11 @@ Omitted: the analytics loop (this context's own projector consuming its own
 analytics topic, an internal relationship); Postgres, Kafka and Kong as
 infrastructure; and every fleet context with no relationship to this one.
 Those are effectively Separate Ways: `facility-layout`,
-`workforce-management`, `labor-performance`, `warehouse-planning`,
-`warehouse-ops-agent`.
+`product-master`, `workforce-management`, `labor-performance`,
+`warehouse-planning`, `network-inventory-planning`, `warehouse-ops-agent`.
+`product-master` (the owner of SKU handling classification and physical
+profile since 2026-10-07) has no edge here: this context advertises
+quantities per SKU and never reads a SKU's classification or dimensions.
 
 ## Relationships and evidence
 
