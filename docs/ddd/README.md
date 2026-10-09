@@ -25,4 +25,4 @@ which ddd-crew tool each page follows, and the sources of truth.
 | [subdomain-classification.md](subdomain-classification.md) | Supporting, `wes` tier, with the neighbours' fleet classifications |
 
 ADRs: [../adr/README.md](../adr/README.md). Operations: [../operations/runbook.md](../operations/runbook.md).
-All documentation: [../README.md](../README.md).
+All documentation: [../overview/introduction.md](../overview/introduction.md#documentation-map).

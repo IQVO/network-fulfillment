@@ -36,10 +36,11 @@ projector's consumer feeds the analytics store, not a use case.
 ## How Save and Publish commit
 
 Every use case that changes a `NetworkOrder` saves it and publishes its event
-inside `atomically(...)` (`unit_of_work.go`). With `DATABASE_URL` and
-`EVENT_PUBLISHER=kafka` that is one Postgres transaction that writes the
-aggregate row and the `outbox_events` rows (ADR 0003). In every other
-configuration the unit of work is nil and the two calls run back to back.
+inside `atomically(...)` (`unit_of_work.go`). With `DATABASE_URL` set the unit
+of work is one Postgres transaction (`cmd/netfulfil/wiring.go`); with
+`EVENT_PUBLISHER=kafka` as well, the publisher writes the `outbox_events`
+rows inside that same transaction (ADR 0003). Without `DATABASE_URL` the unit
+of work is nil and the two calls run back to back.
 External calls (order-management, the network) are made **outside** that
 scope, in a fixed order explained per use case below.
 
