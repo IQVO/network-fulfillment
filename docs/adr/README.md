@@ -23,6 +23,7 @@ to update when a record is added or its Status line changes.
 | [0015](0015-docs-audit-contract-corrections.md) | Contract corrections from the 2026-10-05 docs audit: 409 for confirm-before-acknowledge, CORS POST, SUBMISSION_FAILED report counter | Accepted (2026-10-06); additive to 0001 and 0014 |
 | [0016](0016-cloudevents-submitted-and-settle-time-acknowledged.md) | `NetworkOrderSubmitted` at SUBMITTED; `NetworkOrderAcknowledged` only when the order settles (v2) | Accepted (2026-10-06); resolves a design note of 0015, versions the event per 0008 |
 | [0017](0017-cycle-time-p95-path-eligibility.md) | A path is eligible for a cutoff only if its `CycleTimeP95` fits the time left | Accepted (2026-10-06); resolves a design note of 0015, implements 0001 §8 |
+| [0018](0018-godog-bdd-acceptance-tests.md) | godog/Gherkin acceptance tests as executable specification | Accepted (2026-10-08); mirrors inventory-storage ADR 0007 |
 
 [`0002-retail-network-not-amazon-counterpart.md`](0002-retail-network-not-amazon-counterpart.md)
 is a redirect stub ("Moved to ADR 0009"), kept so old links resolve; it is
