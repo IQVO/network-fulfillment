@@ -21,5 +21,8 @@ which ddd-crew tool each page follows, and the sources of truth.
 | [entity-relationship.md](entity-relationship.md) | ER diagrams (OLTP + analytics) |
 | [sequence-diagrams.md](sequence-diagrams.md) | UML sequence diagrams per use case |
 | [domain-events.md](domain-events.md) | Every event published and consumed |
+| [use-cases.md](use-cases.md) | Every application use case: trigger, inputs, invariants, events |
+| [subdomain-classification.md](subdomain-classification.md) | Supporting, `wes` tier, with the neighbours' fleet classifications |
 
-ADRs: [../adr/README.md](../adr/README.md). Operations: [../operations-notes.md](../operations-notes.md).
+ADRs: [../adr/README.md](../adr/README.md). Operations: [../operations/runbook.md](../operations/runbook.md).
+All documentation: [../README.md](../README.md).
