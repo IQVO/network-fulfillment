@@ -45,7 +45,7 @@ gateway).
 
 ## CI (`.github/workflows/ci.yml`)
 
-Jobs: `lint`, `guide-lint`, `complexity`, `test`, `integration`,
+Jobs: `lint`, `guide-lint`, `complexity`, `test`, `bdd`, `integration`,
 `api-lint`, `mutation-fast`, `vuln`, `arch-test`, `helm-lint` (`helm lint`
 plus `charts/network-fulfillment/tests/`), then `trivy-scan`,
 `docker-publish`, `release`.
@@ -54,8 +54,11 @@ plus `charts/network-fulfillment/tests/`), then `trivy-scan`,
   by testcontainers INSIDE the test, never a `DATABASE_URL` service
   container with a skip gate (it would report success while asserting
   nothing).
-- Template jobs still dropped, not disabled: `bdd` (no `features/`),
-  `docs-api-drift` (no docs site), `web` (a `web/` remote exists but has no
+- `bdd` runs the godog/Gherkin suite in `features/` (ADR 0018) and gates
+  `docker-publish`. Scenarios tagged `@known-bug` are excluded until the
+  recorded defect is fixed.
+- Template jobs still dropped, not disabled: `docs-api-drift` (no docs site),
+  `web` (a `web/` remote exists but has no
   CI job yet), `drift`. Add each in the PR that first needs it. A job that
   fails because a directory is missing is noise, not signal.
 - `trivy-scan` builds the image (no push) and blocks on CRITICAL/HIGH with
@@ -76,7 +79,9 @@ plus `charts/network-fulfillment/tests/`), then `trivy-scan`,
 - `main` requires `lint test helm-lint trivy-scan` with `strict: true` and
   `enforce_admins: true`. `docker-publish`/`release` are push-triggered, not
   PR checks, so they are not required.
-- Add `bdd` to the lists when a `features/` directory lands.
+- `bdd` is not yet in either required-status-checks list: add it to
+  `develop` (and `main` if wanted) in the repository settings; the job
+  already exists and is green.
 
 ## Mutation thresholds
 

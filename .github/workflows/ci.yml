@@ -117,6 +117,23 @@ jobs:
           path: coverage.out
 
   # ============================================================
+  # CLASSIFICATION: BEHAVIOR TESTING (BDD / Gherkin)
+  # ============================================================
+  # features/*.feature run by godog (features_test.go) against the real REST
+  # routers over the in-memory adapters. Scenarios tagged @known-bug describe
+  # a defect and are excluded until it is fixed (docs/adr/0018).
+  bdd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Run BDD (godog/Gherkin) acceptance tests
+        run: go test ./... -run TestFeatures -v
+
+  # ============================================================
   # CLASSIFICATION: CORRECTNESS (INTEGRATION, REAL POSTGRES)
   # ============================================================
   # The Postgres adapter against a real Postgres 16, started by
@@ -301,7 +318,7 @@ jobs:
   docker-publish:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [lint, complexity, test]
+    needs: [lint, complexity, test, bdd]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

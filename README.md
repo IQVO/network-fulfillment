@@ -151,7 +151,7 @@ Not built yet:
 - **A `PackageManifested`-driven shipment confirmation.** ADR 0014 chose
   the explicit endpoint until a persisted correlation exists.
 - The `adapters/outbound/network/` -> `outbound/retailnetwork/` package
-  rename (ADR 0009), and BDD `features/`.
+  rename (ADR 0009).
 
 ## Why this context exists
 
@@ -312,6 +312,7 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 make check-fast   # fmt-check vet arch-test  (run before saying "done")
 make check        # fmt-check vet build lint test  (what lefthook pre-push runs)
 make check-all    # check + coverage (90% gate) + arch-test + bdd
+make bdd          # godog/Gherkin acceptance suite (features/, ADR 0018)
 make integration  # testcontainers Postgres and Kafka
 make mutation     # gremlins on ./internal/domain/networkorder
 make vuln         # govulncheck
@@ -319,7 +320,7 @@ make guide-lint   # agent guides: references resolve, context budget
 ```
 
 CI (`.github/workflows/ci.yml`) runs `lint`, `guide-lint`, `complexity`,
-`test`, `integration`, `api-lint`, `mutation-fast`, `vuln`, `helm-lint` and
+`test`, `bdd`, `integration`, `api-lint`, `mutation-fast`, `vuln`, `helm-lint` and
 `arch-test` on every PR into `develop`/`main`; `trivy-scan` only on PRs into
 `main`; `docker-publish` and `release` on push to `main`. See
 [docs/operations-notes.md](docs/operations-notes.md).

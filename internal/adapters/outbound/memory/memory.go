@@ -6,6 +6,7 @@ package memory
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/claudioed/network-fulfillment/internal/domain/capabilityoffer"
@@ -38,9 +39,13 @@ func (r *NetworkOrderRepo) FindByRef(_ context.Context, ref shared.NetworkRef) (
 	return r.orders[ref], nil
 }
 
-// ListUnanswered returns every order still in NEW. Iteration order is
-// deliberately not specified: the sweep must not depend on it, and a
-// map gives no guarantee anyway.
+// ListUnanswered returns every order still in NEW, soonest acknowledgement
+// deadline first (ties broken by networkRef so the order is total and
+// stable). apis/openapi.yaml promises "soonest deadline first" and the
+// Postgres adapter does `ORDER BY acknowledge_by`; without sorting here the
+// zero-configuration in-memory run returned Go's randomised map order. The
+// sweep must still not depend on the order — it does not — but the REST
+// surface does.
 func (r *NetworkOrderRepo) ListUnanswered(_ context.Context) ([]*networkorder.NetworkOrder, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -50,6 +55,12 @@ func (r *NetworkOrderRepo) ListUnanswered(_ context.Context) ([]*networkorder.Ne
 			out = append(out, o)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].AcknowledgeBy().Equal(out[j].AcknowledgeBy()) {
+			return out[i].AcknowledgeBy().Before(out[j].AcknowledgeBy())
+		}
+		return out[i].NetworkRef() < out[j].NetworkRef()
+	})
 	return out, nil
 }
 
