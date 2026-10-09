@@ -27,6 +27,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
@@ -70,6 +71,11 @@ type Server struct {
 	ConfirmShipment *usecases.ConfirmNetworkOrderShipment
 }
 
+// DefaultServiceName is the OTel instrumentation scope for the HTTP surface.
+// The *service.name* resource attribute is set by telemetry.Setup at the
+// composition root (OTEL_SERVICE_NAME from the chart, else this value).
+const DefaultServiceName = "network-fulfillment"
+
 // Routes returns this adapter's handler.
 //
 // GETs, plus the one ADR'd POST (shipment-confirmation); that is a design
@@ -90,7 +96,10 @@ func (s *Server) Routes() http.Handler {
 	if s.ConfirmShipment != nil {
 		mux.HandleFunc("POST /network-orders/{networkRef}/shipment-confirmation", s.handleConfirmShipment)
 	}
-	return corsMiddleware()(mux)
+	// otelhttp sits inside CORS and around the mux so http.route is the
+	// ServeMux pattern. It binds the global MeterProvider when built, so the
+	// composition root must call telemetry.Setup before Routes() (ADR 0019).
+	return corsMiddleware()(otelhttp.NewHandler(mux, DefaultServiceName))
 }
 
 // corsMiddleware allows the warehouse-console browser SPA (and this

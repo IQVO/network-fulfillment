@@ -16,12 +16,14 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 )
@@ -50,6 +52,25 @@ type infra struct {
 // goroutine touching the pool.
 func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	// OTLP trace + metric export and Go runtime metrics (ADR 0019). Never
+	// blocks on the Collector. MUST run before wireAPI/Routes(): otelhttp
+	// binds the global MeterProvider when the handler is built.
+	otelCtx, otelCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	otelClose, err := telemetry.Setup(otelCtx, getenv("OTEL_SERVICE_NAME", inboundhttp.DefaultServiceName),
+		getenv("SERVICE_VERSION", "dev"), getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultOTLPEndpoint))
+	otelCancel()
+	if err != nil {
+		logger.Error("telemetry setup failed", "error", err)
+		return 1
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := otelClose(closeCtx); err != nil {
+			logger.Error("telemetry flush failed", "error", err)
+		}
+	}()
 
 	in, closeInfra, ok := bootInfra(logger)
 	if !ok {

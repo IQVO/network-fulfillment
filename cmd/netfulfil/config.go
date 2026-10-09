@@ -92,3 +92,12 @@ func migrationsPath() string {
 	}
 	return "/app/migrations"
 }
+
+// getenv returns the environment variable key, or fallback when it is unset
+// or empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
