@@ -24,6 +24,7 @@ to update when a record is added or its Status line changes.
 | [0016](0016-cloudevents-submitted-and-settle-time-acknowledged.md) | `NetworkOrderSubmitted` at SUBMITTED; `NetworkOrderAcknowledged` only when the order settles (v2) | Accepted (2026-10-06); resolves a design note of 0015, versions the event per 0008 |
 | [0017](0017-cycle-time-p95-path-eligibility.md) | A path is eligible for a cutoff only if its `CycleTimeP95` fits the time left | Accepted (2026-10-06); resolves a design note of 0015, implements 0001 §8 |
 | [0018](0018-godog-bdd-acceptance-tests.md) | godog/Gherkin acceptance tests as executable specification | Accepted (2026-10-08); mirrors inventory-storage ADR 0007 |
+| [0019](0019-otlp-telemetry-export.md) | OTLP trace and metric export for the API process | Accepted (2026-10-08); mirrors network-inventory-planning ADR 0012 |
 
 [`0002-retail-network-not-amazon-counterpart.md`](0002-retail-network-not-amazon-counterpart.md)
 is a redirect stub ("Moved to ADR 0009"), kept so old links resolve; it is
