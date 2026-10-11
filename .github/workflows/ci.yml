@@ -31,7 +31,7 @@ jobs:
           cache: false          # golangci-lint-action manages its own cache
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.1
+          version: v2.14.0
           args: --timeout=5m
 
   # Agent-guide sensor (harness-template v3): skills load, references resolve, context budget.
@@ -66,7 +66,7 @@ jobs:
           cache: false          # golangci-lint-action manages its own cache
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.1
+          version: v2.14.0
           args: --timeout=5m --enable-only gocyclo,gocognit,cyclop,funlen,nestif
       - name: gocyclo report (functions over 10 — informational, gate is 15)
         if: always()
@@ -115,6 +115,23 @@ jobs:
         with:
           name: coverage
           path: coverage.out
+
+  # ============================================================
+  # CLASSIFICATION: BEHAVIOR TESTING (BDD / Gherkin)
+  # ============================================================
+  # features/*.feature run by godog (features_test.go) against the real REST
+  # routers over the in-memory adapters. Scenarios tagged @known-bug describe
+  # a defect and are excluded until it is fixed (docs/adr/0018).
+  bdd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Run BDD (godog/Gherkin) acceptance tests
+        run: go test ./... -run TestFeatures -v
 
   # ============================================================
   # CLASSIFICATION: CORRECTNESS (INTEGRATION, REAL POSTGRES)
@@ -301,7 +318,7 @@ jobs:
   docker-publish:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [lint, complexity, test]
+    needs: [lint, complexity, test, bdd]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

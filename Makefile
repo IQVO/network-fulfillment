@@ -12,7 +12,7 @@
 
 GO                 ?= go
 GOLANGCI_LINT      ?= golangci-lint
-GOLANGCI_VERSION   := v2.13.1
+GOLANGCI_VERSION   := v2.14.0
 GREMLINS           ?= gremlins
 GREMLINS_VERSION   := v0.6.0
 GOVULNCHECK        ?= govulncheck
