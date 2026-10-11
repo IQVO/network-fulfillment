@@ -84,7 +84,7 @@ func TestBreakerClient_OpensAfterConsecutiveFailures_PropagatesErrCircuitOpen(t 
 	client := ordermanagement.NewBreakerClient(inner, recorder)
 
 	for i := 0; i < 5; i++ {
-		_, err := client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{})
+		_, err := client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{NetworkRef: "po-1"})
 		if !errors.Is(err, boom) {
 			t.Fatalf("call %d: err = %v, want the real transport error %v (breaker still closed)", i, err, boom)
 		}
@@ -94,7 +94,7 @@ func TestBreakerClient_OpensAfterConsecutiveFailures_PropagatesErrCircuitOpen(t 
 	}
 	callsBeforeShortCircuit := atomic.LoadInt32(&inner.raiseCalls)
 
-	_, err := client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{})
+	_, err := client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{NetworkRef: "po-1"})
 	if !errors.Is(err, ordermanagement.ErrCircuitOpen) {
 		t.Fatalf("while open, err = %v, want %v", err, ordermanagement.ErrCircuitOpen)
 	}
@@ -146,7 +146,7 @@ func TestBreakerClient_SuccessDoesNotTrip(t *testing.T) {
 	client := ordermanagement.NewBreakerClient(inner, recorder)
 
 	for i := 0; i < 20; i++ {
-		result, err := client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{})
+		result, err := client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{NetworkRef: "po-1"})
 		if err != nil {
 			t.Fatalf("call %d: unexpected error %v", i, err)
 		}
@@ -173,7 +173,7 @@ func TestBreakerClient_HalfOpenProbeRecoversToClosedOnSuccess(t *testing.T) {
 	client := ordermanagement.NewBreakerClientWithTimeout(inner, recorder, 20*time.Millisecond)
 
 	for i := 0; i < 5; i++ {
-		_, _ = client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{})
+		_, _ = client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{NetworkRef: "po-1"})
 	}
 	if recorder.last() != gobreakerOpen {
 		t.Fatalf("breaker state after 5 consecutive failures = %d, want open (%d)", recorder.last(), gobreakerOpen)
@@ -185,7 +185,7 @@ func TestBreakerClient_HalfOpenProbeRecoversToClosedOnSuccess(t *testing.T) {
 	inner.raiseErr = nil
 	time.Sleep(30 * time.Millisecond)
 
-	result, err := client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{})
+	result, err := client.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{NetworkRef: "po-1"})
 	if err != nil {
 		t.Fatalf("half-open probe: unexpected error %v", err)
 	}
@@ -211,7 +211,7 @@ func TestBreakerClient_CallTimeoutIsBoundedByCallerDeadline(t *testing.T) {
 	cancel()
 
 	start := time.Now()
-	_, err := client.RaiseHeldOrder(ctx, contract.HeldOrderRequest{})
+	_, err := client.RaiseHeldOrder(ctx, contract.HeldOrderRequest{NetworkRef: "po-1"})
 	elapsed := time.Since(start)
 
 	if elapsed > time.Second {

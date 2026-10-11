@@ -48,6 +48,7 @@ func TestRaiseHeldOrder_SendsAHeldShipCompleteOrder(t *testing.T) {
 	deadline := now().Add(48 * time.Hour)
 	p := ordermanagement.NewPlanner(srv.URL, srv.Client())
 	res, err := p.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{
+		NetworkRef:     "po-1",
 		SiteId:         "site-1",
 		RequiredShipBy: deadline,
 		Lines:          map[shared.SKU]int{"SKU-1": 2},
@@ -111,6 +112,7 @@ func TestRaiseHeldOrder_FeasibilityIsOrderManagementsVerdict(t *testing.T) {
 
 			p := ordermanagement.NewPlanner(srv.URL, srv.Client())
 			res, err := p.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{
+				NetworkRef:     "po-1",
 				RequiredShipBy: now().Add(48 * time.Hour), // 2026-09-25T08:00:00Z
 			})
 			if err != nil {
@@ -137,7 +139,7 @@ func TestRaiseHeldOrder_AbsentPromiseIsNotAnError(t *testing.T) {
 	srv := rec.server(t)
 
 	p := ordermanagement.NewPlanner(srv.URL, srv.Client())
-	res, err := p.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{RequiredShipBy: now()})
+	res, err := p.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{NetworkRef: "po-1", RequiredShipBy: now()})
 	if err != nil {
 		t.Fatalf("an unpromisable order must not be an error, got %v", err)
 	}
@@ -180,5 +182,62 @@ func TestDo_NonSuccessStatusIsAnError(t *testing.T) {
 
 	if err := p.ReleaseHeldOrder(context.Background(), "ord-1"); err == nil {
 		t.Fatal("a 409 must surface as an error, not be swallowed")
+	}
+}
+
+// TestRaiseHeldOrder_SendsAStableIdempotencyKey pins the contract with
+// order-management's POST /orders, which sits behind a transactional
+// Idempotency-Key middleware and answers 400 idempotency-key-required without
+// the header. Before this, network-fulfillment sent none, so every raise failed
+// with "status 400" and every translatable network order stayed NEW forever.
+// The key must be derived from the NETWORK order (stable across NF's poll
+// retries and a crash between saving the order and raising the hold), and
+// different orders must never share one.
+func TestRaiseHeldOrder_SendsAStableIdempotencyKey(t *testing.T) {
+	var keys []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ord-1","promiseDate":"2026-09-24T08:00:00Z","lines":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	p := ordermanagement.NewPlanner(srv.URL, srv.Client())
+
+	raise := func(ref shared.NetworkRef) {
+		t.Helper()
+		if _, err := p.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{
+			NetworkRef: ref, SiteId: "site-1", RequiredShipBy: now().Add(time.Hour), Lines: map[shared.SKU]int{"SKU-1": 1},
+		}); err != nil {
+			t.Fatalf("RaiseHeldOrder(%s): %v", ref, err)
+		}
+	}
+	raise("po-1")
+	raise("po-1") // a retry
+	raise("po-2")
+
+	if keys[0] != "netful-raise-po-1" {
+		t.Fatalf("key = %q, want netful-raise-po-1", keys[0])
+	}
+	if keys[1] != keys[0] {
+		t.Fatalf("a retry of the same network order must reuse its key: %q vs %q", keys[1], keys[0])
+	}
+	if keys[2] == keys[0] || keys[2] != "netful-raise-po-2" {
+		t.Fatalf("a different network order must get its own key, got %q", keys[2])
+	}
+}
+
+func TestRaiseHeldOrder_RefusesAnEmptyNetworkRefWithoutCalling(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	t.Cleanup(srv.Close)
+
+	_, err := ordermanagement.NewPlanner(srv.URL, srv.Client()).
+		RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{SiteId: "site-1"})
+
+	if err == nil {
+		t.Fatal("an empty network ref would make every order share one idempotency key: it must be refused")
+	}
+	if called {
+		t.Fatal("order-management must not be called without a usable idempotency key")
 	}
 }
