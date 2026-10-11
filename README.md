@@ -114,8 +114,8 @@ What exists today:
   dead-letters to `<topic>.dlq`, and shutdown flips `/readyz` first, then
   drains HTTP, the outbox relay and the poller.
 - **Boot resilience** (ADR 0011) — the migration run, the database ping and
-  the capability-offer cache dials are retried with backoff (~31s budget)
-  to survive this cluster's first-dial connection reset, and the chart has
+  the capability-offer cache dials are retried with backoff (5 attempts, 15 s
+  of waits in total) to survive this cluster's first-dial connection reset, and the chart has
   a `startupProbe`. After the budget the service still refuses to boot.
 - **Packaging** — `Dockerfile`, `web/` (a Module Federation remote, ADR
   0010) and `charts/network-fulfillment/` (API, MCP, projector, reports and
@@ -290,7 +290,7 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `POLL_INTERVAL` | `1m` | Go duration; poller and reconciliation cadence |
 | `SWEEP_INTERVAL` | `1m` | Go duration; sweep and overdue-rejection cadence |
 | `PORT` | `8080` | HTTP listen port |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5188` | comma-separated; GET/OPTIONS only |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5188` | comma-separated; methods GET, POST, OPTIONS |
 | `EVENT_PUBLISHER` | `log` (default) | `kafka` publishes to both topics; with `DATABASE_URL` set this activates the transactional outbox (ADR 0003) instead of publishing directly |
 | `KAFKA_BROKERS` | `localhost:9092` | comma-separated broker list (publishers and capability-offer caches) |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | Go duration; sleep between empty outbox relay passes (outbox mode only) |
@@ -323,7 +323,23 @@ CI (`.github/workflows/ci.yml`) runs `lint`, `guide-lint`, `complexity`,
 `test`, `bdd`, `integration`, `api-lint`, `mutation-fast`, `vuln`, `helm-lint` and
 `arch-test` on every PR into `develop`/`main`; `trivy-scan` only on PRs into
 `main`; `docker-publish` and `release` on push to `main`. See
-[docs/operations-notes.md](docs/operations-notes.md).
+[docs/development/testing.md](docs/development/testing.md#ci).
+
+## Documentation
+
+Plain markdown under `docs/` (rendered by GitHub; there is no docs site in
+this repo). The fleet-wide site is `https://iqvo.github.io/warehouse-docs/`;
+this repo's own Pages URL would be `https://iqvo.github.io/network-fulfillment/`,
+but nothing publishes to it today.
+
+| Area | Page |
+| --- | --- |
+| Overview | [Introduction](docs/overview/introduction.md), [Architecture](docs/overview/architecture.md), [Quickstart](docs/overview/quickstart.md) |
+| Operations | [Configuration](docs/operations/configuration.md), [Runbook](docs/operations/runbook.md), [Observability](docs/operations/observability.md), [Troubleshooting](docs/operations/troubleshooting.md) |
+| Development | [Testing and CI](docs/development/testing.md) |
+| Interfaces | [Integration](docs/ecosystem/integration.md), [MCP tools](docs/mcp/tools.md), `apis/openapi.yaml`, `apis/asyncapi.yaml` |
+| Domain | [Use cases](docs/ddd/use-cases.md), [Subdomain classification](docs/ddd/subdomain-classification.md), [DDD artifact pack](docs/ddd/README.md) |
+| Decisions | [ADR index](docs/adr/README.md) |
 
 ## Related decisions elsewhere in the fleet
 
