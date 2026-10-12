@@ -183,7 +183,7 @@ func (w *world) reportsServer() *httptest.Server {
 	if w.reports == nil {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 		handlers := &inboundhttp.ReportsHandlers{Store: w.store}
-		w.reports = httptest.NewServer(inboundhttp.NewReportsRouter(handlers, logger))
+		w.reports = httptest.NewServer(inboundhttp.NewReportsRouter(handlers, logger, ""))
 	}
 	return w.reports
 }

@@ -1,11 +1,15 @@
 // Package telemetry holds network-fulfillment's Prometheus-facing
-// metrics. Unlike order-management (which re-exports an OTel Int64Gauge
-// through its OTel Collector pipeline), this repo has no OTel/otelchi
-// wiring at all (see cmd/netfulfil-projector's own doc comment: "this
-// process is trace-free... network-fulfillment has no
-// observability/OTel package"), so this package goes straight to
+// metrics AND (since ADR 0020) its OTel adapter: one TracerProvider/
+// MeterProvider pair exporting OTLP/gRPC plus Go-runtime metrics
+// (telemetry.go), used by every cmd/ composition root. This specific
+// file predates that and goes straight to
 // github.com/prometheus/client_golang against its own dedicated
-// registry, served at GET /metrics (internal/adapters/inbound/http).
+// registry, served at GET /metrics (internal/adapters/inbound/http):
+// unlike order-management (which re-exports an OTel Int64Gauge through
+// its OTel Collector pipeline), the circuit_breaker_state gauge here is
+// not on the OTel pipeline. ADR 0019 records that nothing in the
+// cluster scrapes this endpoint; moving it onto OTel is a separate,
+// not-yet-made decision.
 package telemetry
 
 import (
