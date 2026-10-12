@@ -1,19 +1,17 @@
 //go:build integration
 
 // Integration tests for the REST inbound adapter over the REAL stack: the
-// real production handler chain (Server.Routes: CORS + otelhttp + the
-// stdlib ServeMux — network-fulfillment's OLTP surface is deliberately NOT
-// chi; the chi router lives in the separate reports binary) on an
-// httptest.Server, the real Postgres repositories, the real UnitOfWork and
-// transactional outbox, and the real inbound leg behind it: a real
-// poller.Poller polling a real StubGateway into the real
-// ReceiveNetworkDemand use case, wired exactly like cmd/netfulfil's
-// composition root. Demand enters this context only by polling (ADR 0001
-// §5: no intake endpoint exists, or could), so the "resource lifecycle"
-// here is the honest one: poll -> receive -> persist -> observe over REST,
-// plus the one ADR'd write endpoint (POST shipment-confirmation, ADR 0014)
-// driven through its 204 / 409 / 404 paths with the repo's RFC 7807
-// problem slugs.
+// real production handler chain (Server.Routes: chi + otelchi RED metrics
+// + CORS, ADR-0013 Tier 1) on an httptest.Server, the real Postgres
+// repositories, the real UnitOfWork and transactional outbox, and the real
+// inbound leg behind it: a real poller.Poller polling a real StubGateway
+// into the real ReceiveNetworkDemand use case, wired exactly like
+// cmd/netfulfil's composition root. Demand enters this context only by
+// polling (ADR 0001 §5: no intake endpoint exists, or could), so the
+// "resource lifecycle" here is the honest one: poll -> receive -> persist
+// -> observe over REST, plus the one ADR'd write endpoint (POST
+// shipment-confirmation, ADR 0014) driven through its 204 / 409 / 404
+// paths with the repo's RFC 7807 problem slugs.
 //
 // Postgres comes from testcontainers: one container per package run, one
 // private database per test, migrated once. Never an external DATABASE_URL,
