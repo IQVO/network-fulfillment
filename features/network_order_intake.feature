@@ -150,15 +150,11 @@ Feature: Network order intake
     When I list the unanswered network orders
     Then the unanswered orders, soonest deadline first, are "po-6"
 
-  # KNOWN BUG (docs/adr/0018, finding 1): ReceiveNetworkDemand saves the order
-  # as NEW BEFORE asking order-management for a verdict, and its idempotency
-  # guard (FindByRef != nil -> return existing) then short-circuits every
-  # retry, so the poller counts the re-fetched demand as "received" while the
-  # order is never answered and sits NEW until the sweep rejects it as
-  # ACKNOWLEDGEMENT_DEADLINE_MISSED. apis/openapi.yaml says a failed unit
-  # "will be re-fetched ... processing is idempotent on networkRef, which is
-  # what makes the retry safe" - i.e. the retry must answer it.
-  @bdd @known-bug
+  # An order-management outage leaves the order recorded but unanswered (NEW).
+  # apis/openapi.yaml says a failed unit "will be re-fetched ... processing is
+  # idempotent on networkRef, which is what makes the retry safe": the retry
+  # must answer it (docs/adr/0018, finding 1, fixed).
+  @bdd
   Scenario: Demand that failed during an order-management outage is answered on a later pass
     Given order-management is unavailable
     And the network has demand "po-7" for 2 units of "ASIN-1"

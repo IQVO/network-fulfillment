@@ -71,10 +71,24 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 	// batch, or simply because the network still lists it as
 	// outstanding. Re-answering would send a duplicate acknowledgement
 	// for an order we already committed to.
+	//
+	// An order that is already ANSWERED (or whose acknowledgement window
+	// has closed, which the sweep owns) is returned as is. An order still
+	// NEW is different: it was recorded in step 2 but never answered —
+	// order-management was down, or we crashed between saving it and
+	// raising the hold. Returning it would make the poller count the
+	// demand as received while nothing ever answers it, so the order would
+	// sit NEW until the sweep rejects it as ACKNOWLEDGEMENT_DEADLINE_MISSED.
+	// The re-delivery therefore RESUMES at step 3; the held-order call is
+	// idempotent on the network ref (see ordermanagement.Planner), so a
+	// retry replays the same local order instead of reserving stock twice.
 	if existing, err := uc.Orders.FindByRef(ctx, demand.NetworkRef); err != nil {
 		return nil, err
 	} else if existing != nil {
-		return existing, nil
+		if existing.State() != networkorder.StateNew || existing.AcknowledgementOverdue(now) {
+			return existing, nil
+		}
+		return uc.resume(ctx, existing)
 	}
 
 	lines, translationErr := uc.translate(ctx, demand)
@@ -98,6 +112,23 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 		return nil, err
 	}
 
+	return uc.answer(ctx, o)
+}
+
+// resume finishes an order that was recorded but never answered (see the
+// idempotency note in Execute). A lineless order is the untranslatable-product
+// refusal whose answer never completed; every other order goes back through
+// steps 3-6.
+func (uc *ReceiveNetworkDemand) resume(ctx context.Context, o *networkorder.NetworkOrder) (*networkorder.NetworkOrder, error) {
+	if len(o.Lines()) == 0 {
+		return uc.reject(ctx, o, nil, shared.RejectionReasonUntranslatableSKU)
+	}
+	return uc.answer(ctx, o)
+}
+
+// answer is steps 3-6: raise the held order, ask for the verdict, then
+// acknowledge or reject.
+func (uc *ReceiveNetworkDemand) answer(ctx context.Context, o *networkorder.NetworkOrder) (*networkorder.NetworkOrder, error) {
 	result, err := uc.Planner.RaiseHeldOrder(ctx, contract.HeldOrderRequest{
 		NetworkRef:     o.NetworkRef(),
 		SiteId:         o.SiteId(),

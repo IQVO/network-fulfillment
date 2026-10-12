@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
@@ -92,6 +93,11 @@ func (p *Planner) RaiseHeldOrder(ctx context.Context, req contract.HeldOrderRequ
 	for sku, qty := range req.Lines {
 		lines = append(lines, orderLineRequest{SKU: string(sku), Quantity: qty})
 	}
+	// Map iteration order is random, and order-management's idempotency
+	// middleware hashes the request BODY: the same demand retried with its
+	// lines in a different order would be refused 422 idempotency-key-reused
+	// instead of replaying the first answer. Sort so a retry is byte-identical.
+	sort.Slice(lines, func(i, j int) bool { return lines[i].SKU < lines[j].SKU })
 
 	body := receiveOrderRequest{
 		Lines:                lines,
