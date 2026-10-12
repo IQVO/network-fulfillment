@@ -4,11 +4,12 @@
 // internal/adapters/inbound/mcp uses (server.go, tools.go, report_tool.go,
 // resources.go, prompts.go), adapted to this repo's domain.
 //
-// Unlike facility-layout, network-fulfillment has no OTel package
-// (AGENTS.md; no go.opentelemetry.io import anywhere in this repo), so
-// there is no tracing wrapper around tool calls here — this adapter is
-// trace-free like the rest of the codebase, not just the analytics
-// pipeline.
+// Unlike facility-layout, network-fulfillment has no per-tool-call OTel
+// tracing wrapper: this adapter's process (cmd/mcp) does call
+// telemetry.Setup and wire otelchi HTTP RED metrics on its chi router
+// (ADR 0020), but those instrument the HTTP transport layer, not
+// individual MCP tool invocations — there is no tracing span per tool
+// call here, unlike facility-layout's addTool.
 package mcp
 
 import (

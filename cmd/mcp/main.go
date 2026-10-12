@@ -14,9 +14,10 @@
 // static-bearer-key rollout was removed. It is reachable only from
 // inside the cluster.
 //
-// network-fulfillment has no OTel/observability package (AGENTS.md), so
-// unlike facility-layout's cmd/mcp/main.go this composition root wires no
-// telemetry.Setup — the process logs plain structured JSON only.
+// network-fulfillment has no business-metric OTel package, but it does
+// now call telemetry.Setup (ADR-0013 Tier 1 item 1) and wire otelchi
+// HTTP RED metrics (Tier 1 item 2) on this router, closing the gap
+// ADR-0019 explicitly left open for this binary.
 package main
 
 import (
@@ -29,11 +30,15 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riandyrn/otelchi"
+	otelchimetric "github.com/riandyrn/otelchi/metric"
 
 	inboundmcp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/mcp"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 )
 
@@ -51,6 +56,25 @@ func main() {
 func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	// OTLP trace + metric export and Go runtime metrics (ADR-0013 Tier 1
+	// item 1). Never blocks on the Collector. MUST run before newRouter:
+	// otelchi binds the global MeterProvider when the middleware is built.
+	serviceName := getenv("OTEL_SERVICE_NAME", "network-fulfillment-mcp")
+	otelCtx, otelCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownTelemetry, err := telemetry.Setup(otelCtx, serviceName,
+		getenv("SERVICE_VERSION", "dev"), getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultOTLPEndpoint))
+	otelCancel()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(flushCtx); err != nil {
+			logger.Warn("telemetry flush failed on shutdown", "error", err)
+		}
+	}()
 
 	mcpAddr := getenv("MCP_ADDR", ":8090")
 	databaseURL := os.Getenv("DATABASE_URL")
@@ -91,7 +115,7 @@ func run() error {
 	}
 	server := inboundmcp.NewServer(deps)
 
-	handler := newRouter(inboundmcp.Handler(server))
+	handler := newRouter(inboundmcp.Handler(server), serviceName)
 
 	srv := &http.Server{Addr: mcpAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 
@@ -117,8 +141,18 @@ func run() error {
 //     liveness/readiness probes.
 //   - The MCP Streamable HTTP endpoint is mounted at BOTH "/" and "/mcp",
 //     matching facility-layout's convention.
-func newRouter(mcpHandler http.Handler) http.Handler {
+//
+// Middleware order follows ADR-0013 Tier 1 item 2 verbatim: RequestID,
+// otelchi (tracing), otelchimetric (request duration + active requests),
+// the request logger, then Recoverer.
+func newRouter(mcpHandler http.Handler, serviceName string) http.Handler {
 	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(otelchi.Middleware(serviceName, otelchi.WithChiRoutes(r)))
+	metricCfg := otelchimetric.NewBaseConfig(serviceName)
+	r.Use(otelchimetric.NewServerRequestDuration(metricCfg))
+	r.Use(otelchimetric.NewServerActiveRequests(metricCfg))
+	r.Use(middleware.Recoverer)
 	r.Get("/healthz", healthz)
 	r.Handle("/", mcpHandler)
 	r.Mount("/mcp", mcpHandler)

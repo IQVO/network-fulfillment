@@ -200,15 +200,17 @@ func wireUnitOfWork(pool *pgxpool.Pool) ports.UnitOfWork {
 
 // apiDeps are the collaborators wireAPI assembles the REST server from.
 type apiDeps struct {
-	orders    ports.NetworkOrderRepo
-	gateway   ports.NetworkGateway
-	mode      network.Mode
-	poller    *poller.Poller
-	readiness *inboundhttp.Readiness
-	metrics   *telemetry.CircuitBreakerMetrics
-	offers    ports.CapabilityOfferRepo
-	events    ports.EventPublisher
-	pool      *pgxpool.Pool
+	orders      ports.NetworkOrderRepo
+	gateway     ports.NetworkGateway
+	mode        network.Mode
+	poller      *poller.Poller
+	readiness   *inboundhttp.Readiness
+	metrics     *telemetry.CircuitBreakerMetrics
+	offers      ports.CapabilityOfferRepo
+	events      ports.EventPublisher
+	pool        *pgxpool.Pool
+	logger      *slog.Logger
+	serviceName string
 }
 
 // wireAPI builds the REST server and its ConfirmShipment use case.
@@ -221,6 +223,8 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 		Readiness:       d.readiness,
 		MetricsRegistry: d.metrics.Registry,
 		Offers:          d.offers,
+		Logger:          d.logger,
+		ServiceName:     d.serviceName,
 	}
 
 	api.ConfirmShipment = &usecases.ConfirmNetworkOrderShipment{

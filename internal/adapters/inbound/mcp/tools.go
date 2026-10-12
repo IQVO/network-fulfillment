@@ -158,10 +158,10 @@ func (d Deps) registerTools(server *mcp.Server) {
 	}
 }
 
-// addTool registers one tool. network-fulfillment has no OTel package
-// (unlike facility-layout's addTool, which wraps every call in a trace
-// span), so this is a direct registration with no cross-cutting
-// instrumentation to add.
+// addTool registers one tool. Unlike facility-layout's addTool, which
+// wraps every call in a trace span, this is a direct registration with
+// no per-tool-call tracing — cmd/mcp's otelchi middleware (ADR 0020)
+// instruments the HTTP transport, not individual tool invocations.
 func addTool[In, Out any](
 	server *mcp.Server,
 	tool *mcp.Tool,

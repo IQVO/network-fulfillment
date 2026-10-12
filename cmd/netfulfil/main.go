@@ -54,10 +54,11 @@ func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	// OTLP trace + metric export and Go runtime metrics (ADR 0019). Never
-	// blocks on the Collector. MUST run before wireAPI/Routes(): otelhttp
-	// binds the global MeterProvider when the handler is built.
+	// blocks on the Collector. MUST run before wireAPI/Routes(): otelchi
+	// binds the global MeterProvider when the middleware is built.
+	serviceName := getenv("OTEL_SERVICE_NAME", inboundhttp.DefaultServiceName)
 	otelCtx, otelCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	otelClose, err := telemetry.Setup(otelCtx, getenv("OTEL_SERVICE_NAME", inboundhttp.DefaultServiceName),
+	otelClose, err := telemetry.Setup(otelCtx, serviceName,
 		getenv("SERVICE_VERSION", "dev"), getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultOTLPEndpoint))
 	otelCancel()
 	if err != nil {
@@ -102,15 +103,17 @@ func run() int {
 	}, logger)
 
 	api := wireAPI(apiDeps{
-		orders:    in.orders,
-		gateway:   in.gateway,
-		mode:      in.mode,
-		poller:    inbound,
-		readiness: readiness,
-		metrics:   circuitBreakerMetrics,
-		offers:    in.offers,
-		events:    eventPublisher,
-		pool:      in.pool,
+		orders:      in.orders,
+		gateway:     in.gateway,
+		mode:        in.mode,
+		poller:      inbound,
+		readiness:   readiness,
+		metrics:     circuitBreakerMetrics,
+		offers:      in.offers,
+		events:      eventPublisher,
+		pool:        in.pool,
+		logger:      logger,
+		serviceName: serviceName,
 	})
 
 	serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, reconcile, inbound, relay, readiness, in.recompute, in.capDone)

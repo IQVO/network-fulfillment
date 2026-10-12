@@ -40,8 +40,9 @@ the network (`SubmitAvailability` has no caller).
 Not built: a live `retail-network` HTTP adapter, and the
 `adapters/outbound/network/` -> `outbound/retailnetwork/` package rename
 (still deferred).
-Operations, CI, branch protection, gremlins thresholds, related fleet
-ADRs: `docs/operations-notes.md`.
+Operations: `docs/operations/runbook.md` (plus configuration, observability,
+troubleshooting); CI jobs and gremlins thresholds: `docs/development/testing.md`;
+doc map: `docs/overview/introduction.md`.
 
 Core concept: **throughput-constrained advertised availability**
 = `min(physicalAvailable, throughputFeasibleBefore(nextCutoff))` (ADR 0001,

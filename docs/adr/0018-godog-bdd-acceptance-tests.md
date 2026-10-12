@@ -105,28 +105,37 @@ as a blocking `bdd` job.**
 ## Findings recorded by the first run
 
 Writing the scenarios from the spec surfaced three defects. They are listed
-here so the `@known-bug` tags have a home; each is re-verified by
+here so the `@known-bug` tags have a home; each still tagged is re-verified by
 `BDD_TAGS=@known-bug make bdd`.
 
 1. **A demand that fails during an order-management outage is never answered
-   on retry.** `ReceiveNetworkDemand` saves the order as `NEW` *before*
-   asking order-management for a verdict, then its idempotency guard
-   (`FindByRef != nil` returns the existing order) short-circuits every
-   retry. The poller counts the re-fetched demand as `received`, the order
-   stays `NEW`, and the sweep eventually rejects it as
+   on retry. (Fixed.)** `ReceiveNetworkDemand` saves the order as `NEW`
+   *before* asking order-management for a verdict, and its idempotency guard
+   (`FindByRef != nil` returned the existing order) short-circuited every
+   retry. The poller counted the re-fetched demand as `received`, the order
+   stayed `NEW`, and the sweep eventually rejected it as
    `ACKNOWLEDGEMENT_DEADLINE_MISSED`. `apis/openapi.yaml` (`failed`) says a
    failed unit "will be re-fetched ... processing is idempotent on
-   `networkRef`, which is what makes the retry safe". Not fixed here: a
-   correct resume must also avoid raising a second held order when the first
-   attempt got past `RaiseHeldOrder`, which needs its own design (and ADR).
-   Scenario: *Demand that failed during an order-management outage is
-   answered on a later pass* (`@known-bug`).
-2. **`422 empty-network-ref` on shipment confirmation is unreachable.** The
-   spec documents it, but `net/http`'s `ServeMux` cleans `//` and answers a
-   307 redirect before the handler runs; the handler's `ref == ""` branch is
-   dead over HTTP. Fix is a spec edit (drop the 422) or an explicit
-   pre-routing check, both outside this change. Scenario: *An empty
-   networkRef is a 422 problem document* (`@known-bug`).
+   `networkRef`, which is what makes the retry safe". The original note held
+   the fix back because a resume must not raise a second held order when the
+   first attempt got past `RaiseHeldOrder`; that is now covered by the stable
+   `Idempotency-Key` derived from the network ref (order-management #105), so a
+   re-delivery of a still-`NEW` order **resumes at the held-order step** and the
+   retry replays the same local order. An order that is already answered, or
+   whose acknowledgement window has closed (the sweep owns it), is returned
+   unchanged. Because that middleware hashes the request body, the planner now
+   sends the order lines sorted by SKU: they come from a map, and a different
+   order on retry would have been refused `422 idempotency-key-reused`.
+   Scenario: *Demand that failed during an order-management outage is answered
+   on a later pass* (no longer `@known-bug`).
+2. **`422 empty-network-ref` on shipment confirmation was unreachable.
+   (Fixed.)** The spec documents it, but `net/http`'s `ServeMux` cleaned `//`
+   and answered a 307 redirect before the handler ran, so the handler's
+   `ref == ""` branch was dead over HTTP. The router has since moved to chi
+   (ADR 0019, otelchi), which routes `/network-orders//shipment-confirmation`
+   to the handler, so the documented 422 is returned and the spec stands.
+   Scenario: *An empty networkRef is a 422 problem document* (no longer
+   `@known-bug`).
 3. **A failed shipment submission is never retried.** By design (and as
    `apis/openapi.yaml` states for `500`), the order is saved `CONFIRMED`
    before the network is told, so a retry after a failed

@@ -20,14 +20,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"github.com/riandyrn/otelchi"
+	otelchimetric "github.com/riandyrn/otelchi/metric"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
@@ -69,6 +73,13 @@ type Server struct {
 	// ConfirmShipment backs the one write endpoint this adapter has
 	// (ADR 0014). A nil value means that route is not registered.
 	ConfirmShipment *usecases.ConfirmNetworkOrderShipment
+	// Logger backs the request logger (ADR 0013 Tier 1 item 2). A nil
+	// Logger (every pre-existing caller/test) falls back to
+	// slog.Default(), matching NewReportsRouter's own convention.
+	Logger *slog.Logger
+	// ServiceName labels this surface's otelchi spans/metrics. Empty
+	// (every pre-existing caller/test) falls back to DefaultServiceName.
+	ServiceName string
 }
 
 // DefaultServiceName is the OTel instrumentation scope for the HTTP surface.
@@ -80,26 +91,52 @@ const DefaultServiceName = "network-fulfillment"
 //
 // GETs, plus the one ADR'd POST (shipment-confirmation); that is a design
 // statement rather than an omission — see the package comment.
+//
+// Middleware order follows ADR-0013 (fleet-wide "Standard metrics
+// convention") Tier 1 item 2 verbatim: RequestID, then otelchi (tracing),
+// then otelchimetric (the http.server.request.duration and
+// http.server.active_requests instruments), then the request logger —
+// so a logged line already has a span/request id to correlate by — then
+// Recoverer. otelchi binds the global MeterProvider when the middleware
+// is built, so the composition root must call telemetry.Setup before
+// Routes() (ADR 0019); otelchi.WithChiRoutes resolves the route pattern
+// up front, so spans/metrics are named "/network-orders/{networkRef}"
+// rather than once per order ref.
 func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("GET /network-orders/{networkRef}", s.handleGetNetworkOrder)
-	mux.HandleFunc("GET /network-orders", s.handleListUnanswered)
-	mux.HandleFunc("GET /inbound-status", s.handleInboundStatus)
+	logger := s.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	serviceName := s.ServiceName
+	if serviceName == "" {
+		serviceName = DefaultServiceName
+	}
+
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(otelchi.Middleware(serviceName, otelchi.WithChiRoutes(r)))
+	metricCfg := otelchimetric.NewBaseConfig(serviceName)
+	r.Use(otelchimetric.NewServerRequestDuration(metricCfg))
+	r.Use(otelchimetric.NewServerActiveRequests(metricCfg))
+	r.Use(RequestLogger(logger))
+	r.Use(middleware.Recoverer)
+	r.Use(corsMiddleware())
+
+	r.Get("/healthz", s.handleHealthz)
+	r.Get("/readyz", s.handleReadyz)
+	r.Get("/network-orders/{networkRef}", s.handleGetNetworkOrder)
+	r.Get("/network-orders", s.handleListUnanswered)
+	r.Get("/inbound-status", s.handleInboundStatus)
 	if s.MetricsRegistry != nil {
-		mux.Handle("GET /metrics", promhttp.HandlerFor(s.MetricsRegistry, promhttp.HandlerOpts{}))
+		r.Get("/metrics", promhttp.HandlerFor(s.MetricsRegistry, promhttp.HandlerOpts{}).ServeHTTP)
 	}
 	if s.Offers != nil {
-		mux.HandleFunc("GET /capability-offers", s.handleListCapabilityOffers)
+		r.Get("/capability-offers", s.handleListCapabilityOffers)
 	}
 	if s.ConfirmShipment != nil {
-		mux.HandleFunc("POST /network-orders/{networkRef}/shipment-confirmation", s.handleConfirmShipment)
+		r.Post("/network-orders/{networkRef}/shipment-confirmation", s.handleConfirmShipment)
 	}
-	// otelhttp sits inside CORS and around the mux so http.route is the
-	// ServeMux pattern. It binds the global MeterProvider when built, so the
-	// composition root must call telemetry.Setup before Routes() (ADR 0019).
-	return corsMiddleware()(otelhttp.NewHandler(mux, DefaultServiceName))
+	return r
 }
 
 // corsMiddleware allows the warehouse-console browser SPA (and this
@@ -133,7 +170,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleGetNetworkOrder(w http.ResponseWriter, r *http.Request) {
-	ref := shared.NetworkRef(r.PathValue("networkRef"))
+	ref := shared.NetworkRef(chi.URLParam(r, "networkRef"))
 	if ref == "" {
 		writeError(w, r, shared.ErrEmptyNetworkRef)
 		return
@@ -207,7 +244,7 @@ func (s *Server) handleListCapabilityOffers(w http.ResponseWriter, r *http.Reque
 // why this is an explicit call rather than a PackageManifested
 // correlation.
 func (s *Server) handleConfirmShipment(w http.ResponseWriter, r *http.Request) {
-	ref := shared.NetworkRef(r.PathValue("networkRef"))
+	ref := shared.NetworkRef(chi.URLParam(r, "networkRef"))
 	if ref == "" {
 		writeError(w, r, shared.ErrEmptyNetworkRef)
 		return

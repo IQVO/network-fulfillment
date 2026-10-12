@@ -28,8 +28,9 @@ const AnalyticsTopic = "warehouse.network-fulfillment.analytics"
 // same OutboxPublisher) when DATABASE_URL is configured.
 //
 // Consistent with the ADR-0009-equivalent integration publisher, this
-// adapter is trace-free: no OTel package is used by the analytics
-// processes, so no producer span is opened and no trace headers are
+// adapter is trace-free: the analytics processes now call
+// telemetry.Setup for Go-runtime/HTTP-RED metrics (ADR 0020), but no
+// Kafka producer span is opened here and no trace headers are
 // injected.
 type AnalyticsPublisher struct {
 	Writer Writer

@@ -9,8 +9,8 @@ paths:
 
 `internal/adapters/inbound/http`, contract in `apis/openapi.yaml` (linted by
 Spectral in the `api-lint` CI job; this repo has no docs site and no
-`docs-api-drift` job). Routes are registered on a stdlib `http.ServeMux`
-in `server.go`'s `Routes()`.
+`docs-api-drift` job). Routes are registered on a `chi.Router` in
+`server.go`'s `Routes()` (ADR-0013 Tier 1: otelchi HTTP RED metrics).
 
 **Read-only by design, with one explicit write.** Demand arrives only by
 polling the network (ADR 0001 section 5); an intake endpoint would be a second,
