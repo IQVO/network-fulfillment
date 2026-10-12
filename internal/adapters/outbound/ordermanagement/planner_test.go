@@ -241,3 +241,36 @@ func TestRaiseHeldOrder_RefusesAnEmptyNetworkRefWithoutCalling(t *testing.T) {
 		t.Fatal("order-management must not be called without a usable idempotency key")
 	}
 }
+
+// order-management's idempotency middleware hashes the request body, so a retry
+// of the same demand must serialise byte-for-byte the same way. The lines come
+// from a map; without sorting, a multi-SKU order would randomly be refused
+// idempotency-key-reused on retry.
+func TestRaiseHeldOrder_SerialisesTheSameDemandIdentically(t *testing.T) {
+	var raw []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		raw = append(raw, string(buf[:n]))
+		_, _ = w.Write([]byte(`{"id":"ord-1","promiseDate":"2026-09-24T08:00:00Z"}`))
+	}))
+	t.Cleanup(srv.Close)
+	p := ordermanagement.NewPlanner(srv.URL, srv.Client())
+
+	req := contract.HeldOrderRequest{
+		NetworkRef:     "po-1",
+		SiteId:         "site-1",
+		RequiredShipBy: now().Add(48 * time.Hour),
+		Lines:          map[shared.SKU]int{"SKU-C": 3, "SKU-A": 1, "SKU-E": 5, "SKU-B": 2, "SKU-D": 4},
+	}
+	for i := 0; i < 40; i++ {
+		if _, err := p.RaiseHeldOrder(context.Background(), req); err != nil {
+			t.Fatalf("RaiseHeldOrder: %v", err)
+		}
+	}
+	for i, body := range raw {
+		if body != raw[0] {
+			t.Fatalf("request %d body differs from the first: %s vs %s", i, body, raw[0])
+		}
+	}
+}

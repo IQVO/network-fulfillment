@@ -267,6 +267,124 @@ func TestReceive_PlannerFailureLeavesNoAnswerOnTheNetwork(t *testing.T) {
 	}
 }
 
+// An outage between saving the order and raising the hold leaves it NEW. The
+// next poll re-delivers the same demand; it must be ANSWERED then, not
+// short-circuited by the idempotency guard (apis/openapi.yaml: a failed unit
+// "will be re-fetched ... processing is idempotent on networkRef, which is what
+// makes the retry safe").
+func TestReceive_ResumesAnUnansweredOrderOnTheNextPoll(t *testing.T) {
+	f := newFixture(true)
+	uc := f.receive()
+
+	f.planner.raiseErr = errBoom
+	if _, err := uc.Execute(context.Background(), demand("po-1", "ASIN-1")); !errors.Is(err, errBoom) {
+		t.Fatalf("first poll err = %v, want errBoom", err)
+	}
+	if o, _ := f.orders.FindByRef(context.Background(), "po-1"); o == nil || o.State() != networkorder.StateNew {
+		t.Fatalf("after the outage the order must be recorded as NEW, got %v", o)
+	}
+
+	f.planner.raiseErr = nil
+	o, err := uc.Execute(context.Background(), demand("po-1", "ASIN-1"))
+	if err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	if o.State() != networkorder.StateSubmitted {
+		t.Fatalf("state = %v, want SUBMITTED after the retry", o.State())
+	}
+	if accepted, submitted := f.gateway.Acknowledgement("po-1"); !submitted || !accepted {
+		t.Fatalf("acknowledgement submitted=%v accepted=%v, want true/true", submitted, accepted)
+	}
+	if got, want := f.planner.calls, []string{"raise", "raise"}; !equal(got, want) {
+		t.Fatalf("planner calls = %v, want %v (the held order is raised again, idempotently)", got, want)
+	}
+
+	// Now it IS answered: a third poll changes nothing.
+	if _, err := uc.Execute(context.Background(), demand("po-1", "ASIN-1")); err != nil {
+		t.Fatalf("third poll: %v", err)
+	}
+	if got := len(f.planner.calls); got != 2 {
+		t.Fatalf("planner calls = %d, want 2 (an answered order is never re-raised)", got)
+	}
+}
+
+func TestReceive_ResumedOrderThatIsInfeasibleIsRejectedAndTheHoldFreed(t *testing.T) {
+	f := newFixture(false)
+	uc := f.receive()
+
+	f.planner.raiseErr = errBoom
+	_, _ = uc.Execute(context.Background(), demand("po-1", "ASIN-1"))
+	f.planner.raiseErr = nil
+
+	o, err := uc.Execute(context.Background(), demand("po-1", "ASIN-1"))
+	if err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	if o.State() != networkorder.StateRejected {
+		t.Fatalf("state = %v, want REJECTED", o.State())
+	}
+	if accepted, submitted := f.gateway.Acknowledgement("po-1"); !submitted || accepted {
+		t.Fatalf("acknowledgement submitted=%v accepted=%v, want a rejection", submitted, accepted)
+	}
+	if got, want := f.planner.calls, []string{"raise", "raise", "cancel"}; !equal(got, want) {
+		t.Fatalf("planner calls = %v, want %v", got, want)
+	}
+}
+
+// Once the window has closed the sweep owns the order: a re-delivery must not
+// answer it late.
+func TestReceive_AnOverdueUnansweredOrderIsLeftToTheSweep(t *testing.T) {
+	f := newFixture(true)
+	f.planner.raiseErr = errBoom
+	_, _ = f.receive().Execute(context.Background(), demand("po-1", "ASIN-1"))
+	f.planner.raiseErr = nil
+
+	late := &usecases.ReceiveNetworkDemand{
+		Orders: f.orders, Gateway: f.gateway, Planner: f.planner, Translation: f.translation,
+		Events: nopPublisher{}, Clock: fixedClock{t: now().Add(networkorder.AcknowledgementWindow + time.Minute)},
+	}
+	o, err := late.Execute(context.Background(), demand("po-1", "ASIN-1"))
+	if err != nil {
+		t.Fatalf("late poll: %v", err)
+	}
+	if o.State() != networkorder.StateNew {
+		t.Fatalf("state = %v, want the order left NEW for the sweep", o.State())
+	}
+	if got := len(f.planner.calls); got != 1 {
+		t.Fatalf("planner calls = %d, want only the failed first attempt", got)
+	}
+	if _, submitted := f.gateway.Acknowledgement("po-1"); submitted {
+		t.Fatal("an overdue order must not be answered by a re-delivery")
+	}
+}
+
+// The untranslatable-product refusal records a lineless order first; if the
+// process dies before the rejection is answered, the re-delivery finishes it.
+func TestReceive_ResumesAnUnansweredUntranslatableRefusal(t *testing.T) {
+	f := newFixture(true)
+	o, err := networkorder.ReceiveUntranslatable("po-1", "site-1", now().Add(48*time.Hour), now())
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := f.orders.Save(context.Background(), o); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	got, err := f.receive().Execute(context.Background(), demand("po-1", "ASIN-UNKNOWN"))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got.State() != networkorder.StateRejected {
+		t.Fatalf("state = %v, want REJECTED", got.State())
+	}
+	if accepted, submitted := f.gateway.Acknowledgement("po-1"); !submitted || accepted {
+		t.Fatalf("acknowledgement submitted=%v accepted=%v, want a rejection", submitted, accepted)
+	}
+	if len(f.planner.calls) != 0 {
+		t.Fatalf("planner calls = %v, want none for an untranslatable order", f.planner.calls)
+	}
+}
+
 func TestRejectOverdue_FreesTheHoldOfAnOrderThatWasNeverAnswered(t *testing.T) {
 	f := newFixture(true)
 
