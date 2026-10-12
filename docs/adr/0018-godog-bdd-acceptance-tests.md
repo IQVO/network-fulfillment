@@ -128,12 +128,14 @@ here so the `@known-bug` tags have a home; each still tagged is re-verified by
    order on retry would have been refused `422 idempotency-key-reused`.
    Scenario: *Demand that failed during an order-management outage is answered
    on a later pass* (no longer `@known-bug`).
-2. **`422 empty-network-ref` on shipment confirmation is unreachable.** The
-   spec documents it, but `net/http`'s `ServeMux` cleans `//` and answers a
-   307 redirect before the handler runs; the handler's `ref == ""` branch is
-   dead over HTTP. Fix is a spec edit (drop the 422) or an explicit
-   pre-routing check, both outside this change. Scenario: *An empty
-   networkRef is a 422 problem document* (`@known-bug`).
+2. **`422 empty-network-ref` on shipment confirmation was unreachable.
+   (Fixed.)** The spec documents it, but `net/http`'s `ServeMux` cleaned `//`
+   and answered a 307 redirect before the handler ran, so the handler's
+   `ref == ""` branch was dead over HTTP. The router has since moved to chi
+   (ADR 0019, otelchi), which routes `/network-orders//shipment-confirmation`
+   to the handler, so the documented 422 is returned and the spec stands.
+   Scenario: *An empty networkRef is a 422 problem document* (no longer
+   `@known-bug`).
 3. **A failed shipment submission is never retried.** By design (and as
    `apis/openapi.yaml` states for `500`), the order is saved `CONFIRMED`
    before the network is told, so a retry after a failed
