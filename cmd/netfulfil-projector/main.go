@@ -14,9 +14,16 @@
 // itself replayed nothing — a failure mode this fleet has been bitten by
 // twice.
 //
-// Consistent with the rest of the analytics pipeline, this process is
-// trace-free: network-fulfillment has no observability/OTel package for
-// it.
+// Consistent with the rest of the analytics pipeline, this process has
+// no business-metric OTel package, but it does call telemetry.Setup
+// (ADR-0013 Tier 1 item 1) for Go-runtime metrics; see cmd/mcp's and
+// cmd/netfulfil-reports's own doc comments for why. Its HTTP surface
+// stays a plain stdlib net/http.ServeMux with a single /healthz route
+// on an internal admin port (never otelchi): otelchi RED metrics exist
+// to measure a real request surface's rate/error/duration, and this
+// admin port serves no route besides the liveness probe itself — the
+// same shape the fleet's sibling projector processes
+// (inventory-projector, wes-projector) use.
 package main
 
 import (
@@ -34,6 +41,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/analyticsstore"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 )
 
 // errMissingAnalyticsURL is returned when ANALYTICS_DATABASE_URL is
@@ -53,6 +61,12 @@ func run() error {
 	slog.SetDefault(logger)
 
 	rootCtx := context.Background()
+
+	shutdownTelemetry, err := setupTelemetry(rootCtx, logger)
+	if err != nil {
+		return err
+	}
+	defer shutdownTelemetry()
 
 	adminAddr := getenv("ADMIN_ADDR", ":8091")
 	analyticsURL := os.Getenv("ANALYTICS_DATABASE_URL")
@@ -111,6 +125,29 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(ctx)
+}
+
+// setupTelemetry installs Go runtime metrics only (ADR-0013 Tier 1 item
+// 1); this process has no HTTP RED surface worth tracing (see the
+// package doc comment). Never blocks on the Collector. The returned
+// func flushes and logs a warning on failure, so callers can simply
+// `defer shutdownTelemetry()`.
+func setupTelemetry(ctx context.Context, logger *slog.Logger) (func(), error) {
+	serviceName := getenv("OTEL_SERVICE_NAME", "network-fulfillment-projector")
+	otelCtx, otelCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer otelCancel()
+	shutdown, err := telemetry.Setup(otelCtx, serviceName,
+		getenv("SERVICE_VERSION", "dev"), getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultOTLPEndpoint))
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(flushCtx); err != nil {
+			logger.Warn("telemetry flush failed on shutdown", "error", err)
+		}
+	}, nil
 }
 
 // newLogger builds a JSON slog logger at the given level. The analytics

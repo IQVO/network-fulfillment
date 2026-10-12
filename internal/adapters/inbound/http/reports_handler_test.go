@@ -31,7 +31,7 @@ func (f *fakeReportStore) FreshnessLag(_ context.Context) (time.Duration, error)
 }
 
 func newReportsServer(store report.ReportStore) stdhttp.Handler {
-	return http.NewReportsRouter(&http.ReportsHandlers{Store: store}, nil)
+	return http.NewReportsRouter(&http.ReportsHandlers{Store: store}, nil, "")
 }
 
 func TestReportsAcknowledgement_OK(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/riandyrn/otelchi"
+	otelchimetric "github.com/riandyrn/otelchi/metric"
 
 	"log/slog"
 
@@ -147,21 +149,32 @@ func writeReportInternal(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // NewReportsRouter builds the chi router for the netfulfil-reports reader
-// service. A nil logger falls back to slog.Default(). The router is
-// trace-free, consistent with the rest of the analytics pipeline
-// (network-fulfillment has no OTel package for the analytics processes).
+// service. A nil logger falls back to slog.Default(); an empty
+// serviceName falls back to DefaultServiceName, the same fallback
+// convention Server.Routes() uses (ADR-0013 Tier 1 item 2 verbatim:
+// RequestID, otelchi, otelchimetric, then the request logger, then
+// Recoverer). telemetry.Setup must run in the composition root
+// (cmd/netfulfil-reports) before this router is built, exactly like
+// cmd/netfulfil's own ordering requirement, or the metrics bind to a
+// no-op MeterProvider.
 //
-// This is a SEPARATE router from the OLTP Server.Routes() stdlib mux
-// above: the reports binary is its own composition root
-// (cmd/netfulfil-reports) and never shares a process with the OLTP
-// server.
-func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger) *chi.Mux {
+// This is a SEPARATE router from the OLTP Server.Routes() above: the
+// reports binary is its own composition root (cmd/netfulfil-reports)
+// and never shares a process with the OLTP server.
+func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger, serviceName string) *chi.Mux {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if serviceName == "" {
+		serviceName = DefaultServiceName
 	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(otelchi.Middleware(serviceName, otelchi.WithChiRoutes(r)))
+	metricCfg := otelchimetric.NewBaseConfig(serviceName)
+	r.Use(otelchimetric.NewServerRequestDuration(metricCfg))
+	r.Use(otelchimetric.NewServerActiveRequests(metricCfg))
 	r.Use(RequestLogger(logger))
 	r.Use(middleware.Recoverer)
 

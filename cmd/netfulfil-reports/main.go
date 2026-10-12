@@ -5,9 +5,12 @@
 // REST. It writes nothing: the writer (cmd/netfulfil-projector) is a
 // separate deployable and owns the schema.
 //
-// Consistent with the rest of the analytics pipeline, this process is
-// trace-free: network-fulfillment has no observability/OTel package for
-// it.
+// Calls telemetry.Setup (ADR-0013 Tier 1 item 1) and wires otelchi HTTP
+// RED metrics on its chi router (Tier 1 item 2) — the same OTel SDK
+// adapter cmd/netfulfil uses, so this process now reports
+// http.server.request.duration/active_requests and Go-runtime metrics
+// too, closing the gap ADR-0019 left open ("the mcp, netfulfil-projector
+// and netfulfil-reports binaries are not instrumented here").
 package main
 
 import (
@@ -23,6 +26,7 @@ import (
 
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/analyticsstore"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 )
 
 // errMissingAnalyticsURL is returned when ANALYTICS_DATABASE_URL is unset.
@@ -41,6 +45,26 @@ func run() error {
 
 	rootCtx := context.Background()
 
+	// OTLP trace + metric export and Go runtime metrics (ADR 0019,
+	// ADR-0013 Tier 1 item 1). Never blocks on the Collector. MUST run
+	// before NewReportsRouter: otelchi binds the global MeterProvider
+	// when the middleware is built.
+	serviceName := getenv("OTEL_SERVICE_NAME", "network-fulfillment-reports")
+	otelCtx, otelCancel := context.WithTimeout(rootCtx, 10*time.Second)
+	shutdownTelemetry, err := telemetry.Setup(otelCtx, serviceName,
+		getenv("SERVICE_VERSION", "dev"), getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultOTLPEndpoint))
+	otelCancel()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(flushCtx); err != nil {
+			logger.Warn("telemetry flush failed on shutdown", "error", err)
+		}
+	}()
+
 	httpAddr := getenv("HTTP_ADDR", ":8092")
 	analyticsURL := os.Getenv("ANALYTICS_DATABASE_URL")
 	if analyticsURL == "" {
@@ -57,7 +81,7 @@ func run() error {
 	defer pool.Close()
 
 	handlers := &inboundhttp.ReportsHandlers{Store: analyticsstore.NewPostgresReport(pool)}
-	router := inboundhttp.NewReportsRouter(handlers, logger)
+	router := inboundhttp.NewReportsRouter(handlers, logger, serviceName)
 
 	srv := &http.Server{Addr: httpAddr, Handler: router, ReadHeaderTimeout: 5 * time.Second}
 
