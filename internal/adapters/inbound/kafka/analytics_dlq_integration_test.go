@@ -156,11 +156,16 @@ func TestAnalyticsConsumer_PoisonMessage_GoesToDeadLetterTopicWithoutBlockingPar
 
 	// Start reading the DLQ topic BEFORE publishing, so the poison
 	// message's eventual dead-letter write is never missed to a race.
+	// Group-less partition reader: the DLQ topic has exactly one partition
+	// (created by this test), so reading partition 0 directly needs no
+	// consumer-group join -- the group-coordinator handshake is what flaked
+	// on a cold, contended CI broker (join backoff outlasting the 60s read
+	// deadline while the consumer had already dead-lettered the message).
 	dlqReader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:     brokers,
-		Topic:       dlqTopic,
-		GroupID:     fmt.Sprintf("dlq-reader-%d", time.Now().UnixNano()),
-		StartOffset: kafkago.FirstOffset,
+		Brokers:   brokers,
+		Topic:     dlqTopic,
+		Partition: 0,
+		MinBytes:  1, MaxBytes: 10e6,
 	})
 	defer func() { _ = dlqReader.Close() }()
 
@@ -334,10 +339,12 @@ func TestAnalyticsConsumer_LegacyFlatMessage_DeadLetteredWithoutBlockingPartitio
 	defer consumeCancel()
 	go func() { _ = consumer.Run(consumeCtx) }()
 
+	// Group-less partition reader, same cold-broker rationale as the
+	// poison-message test above: no group join, direct partition-0 read.
 	dlqReader := kafkago.NewReader(kafkago.ReaderConfig{
 		Brokers: brokers, Topic: topic + ".dlq",
-		GroupID:     fmt.Sprintf("dlq-legacy-reader-%d", time.Now().UnixNano()),
-		StartOffset: kafkago.FirstOffset,
+		Partition: 0,
+		MinBytes:  1, MaxBytes: 10e6,
 	})
 	defer func() { _ = dlqReader.Close() }()
 
