@@ -72,11 +72,11 @@ Feature: Shipment confirmation
     And the network was asked to confirm shipment of 1 time for "po-1"
     And the domain event "NetworkOrderShipmentConfirmed" was published 1 time for "po-1"
 
-  # KNOWN SPEC/ROUTER MISMATCH (docs/adr/0018, finding 2): the spec documents
-  # 422 `empty-network-ref` for an empty networkRef, but net/http's ServeMux
-  # cleans "//" and answers a redirect (307) before the handler runs, so the
-  # branch is unreachable over HTTP. The scenario states the spec'd behaviour.
-  @bdd @known-bug
+  # apis/openapi.yaml documents 422 `empty-network-ref` for an empty networkRef.
+  # It became reachable when the router moved from net/http's ServeMux (which
+  # cleaned "//" and answered a 307 before the handler ran) to chi
+  # (docs/adr/0018, finding 2, fixed).
+  @bdd
   Scenario: An empty networkRef is a 422 problem document
     When I confirm shipment of network order ""
     Then the response status is 422
