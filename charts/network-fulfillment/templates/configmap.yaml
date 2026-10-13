@@ -35,6 +35,11 @@ data:
   # network never confirmed.
   SWEEP_INTERVAL: {{ .Values.config.sweepInterval | quote }}
 
+  # Outbox relay attempt cap (ADR 0021): a row that fails this many sends is
+  # excluded from the relay and logged at ERROR, so one poison row cannot
+  # block every later event forever. 0 = unlimited.
+  OUTBOX_MAX_ATTEMPTS: {{ .Values.config.outboxMaxAttempts | quote }}
+
   # How often the network is polled for new demand. Inbound is a poll and
   # nothing else (ADR 0001 section 5): the network offers no push, so this
   # interval is the ONLY thing that brings demand into this context. It

@@ -11,6 +11,7 @@ description: "ADR 0003 — why saving a NetworkOrder and publishing its domain e
 ## Status
 
 Accepted — implemented in the same change that introduced this record.
+Per-key ordering consequence amended by ADR-0021 (relay attempt cap).
 Envelope description superseded by ADR-0008: the outbox mechanism is
 unchanged, but the bytes it stores are now CloudEvents 1.0 structured-mode
 events (the flat `Envelope` / `AnalyticsEnvelope` shapes named below no

@@ -16,8 +16,8 @@ v1.47.0). Dashboards are in `warehouse-infra`, see below.
 
 | Process | Traces | Metrics | Logs |
 | --- | --- | --- | --- |
-| `netfulfil` | OTLP/gRPC push (ADR 0019, 0020) | OTLP/gRPC push every 30 s, plus a Prometheus `GET /metrics` | JSON to stdout, one line per request |
-| `mcp` | OTLP/gRPC push (ADR 0020) | OTLP/gRPC push every 30 s | JSON to stdout |
+| `netfulfil` | OTLP/gRPC push (ADR 0019, 0020) | OTLP/gRPC push every 30 s, plus a Prometheus `GET /metrics` | JSON to stdout, one line per request, level from `LOG_LEVEL` |
+| `mcp` | OTLP/gRPC push (ADR 0020) | OTLP/gRPC push every 30 s | JSON to stdout, level from `LOG_LEVEL` |
 | `netfulfil-projector` | none | OTLP/gRPC push every 30 s (Go-runtime only, ADR 0020) | JSON to stdout, level from `LOG_LEVEL` |
 | `netfulfil-reports` | OTLP/gRPC push (ADR 0020) | OTLP/gRPC push every 30 s | JSON to stdout, one line per request, level from `LOG_LEVEL` |
 
@@ -59,8 +59,19 @@ server span named `<METHOD> <route pattern>`, for example
 There are no other spans. The order-management and inventory-storage HTTP
 clients use a plain `http.Client`, so outbound calls are not traced and no
 trace context is sent to order-management. The poller, the tickers, the
-outbox relay and the Kafka publishers open no spans and add no trace headers
-to messages.
+outbox relay and the Kafka publishers open no spans.
+
+**Trace context across the outbox** ([ADR 0022](../adr/0022-trace-context-crosses-the-outbox.md)).
+In outbox mode `OutboxPublisher.Publish` injects the active span's W3C
+`traceparent` (and `tracestate` / `baggage` when present) into each
+`outbox_events.headers` row, after the CloudEvents `content-type`; the relay
+sends the stored headers with the Kafka message, so a consumer that extracts
+them continues the producer's trace. Today that covers events raised inside a
+REST request span (`NetworkOrderShipmentConfirmed` from the
+shipment-confirmation endpoint). Events raised by the poller and the tickers
+carry no `traceparent`, because those passes open no span. Direct mode (no
+`DATABASE_URL`) adds no trace header. This service's own consumers open no
+spans, so they do not extract.
 
 ### Metric instruments
 
@@ -133,10 +144,9 @@ its own.
 
 ## Logs
 
-Every process uses `log/slog` with a JSON handler on stdout. `netfulfil`,
-`mcp`, `netfulfil-reports` log at Info and above by default (`netfulfil`
-and `mcp` have no level knob; the projector and reports honour
-`LOG_LEVEL`). `netfulfil` now logs one `http request` line per request
+Every process uses `log/slog` with a JSON handler on stdout, at Info and
+above by default. All four honour `LOG_LEVEL` (`debug`, `info`,
+`warn`/`warning`, `error`; anything else is Info). `netfulfil` now logs one `http request` line per request
 (`RequestLogger`, same shape `netfulfil-reports` already used), stamped
 with the chi request id from `middleware.RequestID`; there is still no
 OTel trace id in log lines (the slog handler is plain, not
@@ -160,7 +170,10 @@ Messages worth knowing, with their fields (all from the code):
 | `submitted orders reconciled` | INFO | `examined`, `confirmed`, `failed`, `pending` | netfulfil | |
 | `capability offer recompute completed` | INFO | `examined`, `throughput_constrained` | netfulfil | |
 | `capability offer: usable inventory lookup failed` | ERROR | `sku`, `err` | netfulfil | inventory-storage call failed for one SKU |
-| `outbox relay pass failed` | ERROR | `error` | netfulfil | rows stay unpublished and are retried |
+| `outbox relay pass failed` | ERROR | `error` | netfulfil | a database failure of a relay pass (begin, claim, mark published); rows stay unpublished and are retried. Send failures are logged by the two lines below instead |
+| `outbox relay: send failed, stopping this pass at the failed row` | WARN | `outbox_id`, `topic`, `event_type`, `attempts`, `error` | netfulfil | the broker rejected a row below the attempt cap; the next pass retries it |
+| `outbox relay: row reached the attempt cap and is excluded from future claims; re-arm it with attempts = 0 after fixing the cause` | ERROR | `outbox_id`, `topic`, `event_type`, `key`, `attempts`, `max_attempts`, `error` | netfulfil | once per row, when it reaches `OUTBOX_MAX_ATTEMPTS` ([ADR 0021](../adr/0021-outbox-relay-attempt-cap.md)); consumers never got that event ([runbook](./runbook.md#an-outbox-row-hit-the-attempt-cap)) |
+| `outbox relay running` | INFO | `topic`, `analytics_topic`, `max_attempts` | netfulfil | outbox mode is on, with the attempt cap in force |
 | `stub network acknowledgement` | INFO | `networkRef`, `accepted` | netfulfil | what the stub gateway was told |
 | `analytics: message is not a valid CloudEvent, sending to dead-letter topic` | WARN | `topic`, `partition`, `offset`, `error` | projector | |
 | `analytics: exhausted retries, sending to dead-letter topic` | WARN | `topic`, `dlq_topic`, `phase`, `ce_id`, `ce_type`, `attempts`, `error` | projector | |
@@ -207,3 +220,5 @@ None of these exist yet; they follow from the code above.
 | Analytics stale | `GET /reports/acknowledgement/freshness` `lagSeconds` high while orders are arriving | projector stopped; note the lag also grows when no event is published at all |
 | 5xx on the API | `http_server_request_duration_seconds_count{http_response_status_code=~"5.."}` | |
 | DLQ growth | message count on `warehouse.network-fulfillment.analytics.dlq` | poison or failing projection |
+| Outbox row excluded | any ERROR `outbox relay: row reached the attempt cap ...` (log alert), or `SELECT count(*) FROM outbox_events WHERE published_at IS NULL AND attempts >= 20` > 0 | an event consumers never received; re-arm it after fixing the cause (ADR 0021) |
+| Outbox backlog | `SELECT count(*), min(created_at) FROM outbox_events WHERE published_at IS NULL` growing for > 5 min | the relay is stuck on a failing row below the cap, or the broker is down |

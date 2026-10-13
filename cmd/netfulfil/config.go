@@ -6,10 +6,13 @@ package main
 // the environment inline.
 
 import (
+	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -33,6 +36,30 @@ func durationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// outboxMaxAttempts parses OUTBOX_MAX_ATTEMPTS (ADR 0021): how many failed
+// sends exclude an outbox row from the relay's claims. Unset means
+// postgres.DefaultOutboxMaxAttempts (20); 0 means unlimited (the pre-ADR
+// behaviour, where one poison row blocks the relay forever).
+func outboxMaxAttempts(logger *slog.Logger) int {
+	return envInt(logger, "OUTBOX_MAX_ATTEMPTS", postgres.DefaultOutboxMaxAttempts)
+}
+
+// envInt parses a non-negative integer env var. Unset yields def; an invalid
+// or negative value logs a warning and yields def, so a typo can never
+// silently remove a limit. "0" is valid and its meaning is the caller's.
+func envInt(logger *slog.Logger, key string, def int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		logger.Warn("invalid integer env var, using default", "key", key, "value", raw, "default", def, "error", err)
+		return def
+	}
+	return n
 }
 
 // capabilityOfferEnabled reports whether CAPABILITY_OFFER_ENABLED=true
@@ -100,4 +127,23 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// newLogger builds the process logger: JSON to stdout at the level LOG_LEVEL
+// names (debug, info, warn or warning, error; case-insensitive). Unset or
+// any other value is info. Same vocabulary as the projector and reports
+// binaries (gap fix D22).
+func newLogger(level string) *slog.Logger {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn", "warning":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }

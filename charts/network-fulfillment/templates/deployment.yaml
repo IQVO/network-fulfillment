@@ -68,6 +68,8 @@ spec:
               value: {{ .Values.config.corsAllowedOrigins | quote }}
             - name: EVENT_PUBLISHER
               value: {{ .Values.config.eventPublisher | quote }}
+            - name: OUTBOX_MAX_ATTEMPTS
+              value: {{ .Values.config.outboxMaxAttempts | quote }}
             {{- if .Values.kafka.enabled }}
             - name: KAFKA_BROKERS
               value: {{ .Values.kafka.brokers | quote }}

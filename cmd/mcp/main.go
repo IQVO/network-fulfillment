@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,7 +55,7 @@ func main() {
 }
 
 func run() error {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := newLogger(getenv("LOG_LEVEL", "info"))
 	slog.SetDefault(logger)
 
 	// OTLP trace + metric export and Go runtime metrics (ADR-0013 Tier 1
@@ -202,6 +203,25 @@ func buildOffers(pool *pgxpool.Pool) ports.CapabilityOfferRepo {
 		return postgres.NewCapabilityOfferRepo(pool)
 	}
 	return memory.NewCapabilityOfferRepo()
+}
+
+// newLogger builds the process logger: JSON to stdout at the level LOG_LEVEL
+// names (debug, info, warn or warning, error; case-insensitive). Unset or
+// any other value is info. Same vocabulary as every other binary in this
+// repository (gap fix D22).
+func newLogger(level string) *slog.Logger {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn", "warning":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }
 
 func getenv(key, fallback string) string {

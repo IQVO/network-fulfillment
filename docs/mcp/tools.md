@@ -25,7 +25,16 @@ and match `internal/adapters/inbound/mcp/tools.go` and `report_tool.go`.
 Every tool is annotated `readOnlyHint: true` (the SDK also reports
 `idempotentHint: false`, its default). No write tool exists: demand enters
 this context only by polling the network, and the one write action,
-shipment confirmation, is REST only.
+shipment confirmation, is REST only. The server's instructions say
+"Read-only access", and that is checked, not just stated: the architecture
+test `TestMCPAdapterStaysReadOnly` fails if the MCP adapter calls any
+state-changing method (`Save`, `Publish`, `Execute`, ...) or sets
+`ReadOnlyHint: false` (gap fix D17).
+
+Optional inputs (`state`, `granularity`) carry `omitempty` in their Go
+struct tags, so the SDK leaves them out of the schema's `required` list and a
+call without them is accepted; `TestMCPOptionalToolInputsCarryOmitempty`
+keeps it that way (gap fix D16).
 
 | Tool | Registered when | Input | Output |
 | --- | --- | --- | --- |

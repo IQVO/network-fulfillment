@@ -13,10 +13,10 @@ run each layer, and what every CI job in `.github/workflows/ci.yml` does.
 
 | Layer | Where | How many | Run with | Needs |
 | --- | --- | --- | --- | --- |
-| Unit (domain, use cases, adapters with fakes, `httptest`) | `internal/**/*_test.go`, `cmd/netfulfil/*_test.go` | 49 test files without a build tag (not counting the BDD and architecture files below) | `make test` | Go only |
+| Unit (domain, use cases, adapters with fakes, `httptest`) | `internal/**/*_test.go`, `cmd/netfulfil/*_test.go` | 56 test files without a build tag (not counting the BDD and architecture files below) | `make test` | Go only |
 | BDD / acceptance (godog) | `features/*.feature`, step code in `features_*_test.go` at the repo root | 9 feature files, 76 `Scenario`/`Scenario Outline` blocks; 2 tagged `@known-bug` are excluded; the rest expand to 126 executed scenarios, 853 steps | `make bdd` | Go only |
-| Integration (testcontainers) | files with `//go:build integration` | 10 files | `make integration` | Docker |
-| Architecture fitness | `internal/architecture/` | 5 files, 13 `Test*` functions | `make arch-test` | Go only |
+| Integration (testcontainers) | files with `//go:build integration` | 15 files | `make integration` | Docker |
+| Architecture fitness | `internal/architecture/` | 8 files, 19 `Test*` functions | `make arch-test` | Go only |
 | Mutation | `gremlins` on `./internal/domain/networkorder` | thresholds in `.gremlins.yaml` | `make mutation` | `gremlins` v0.6.0 |
 | API contract lint | `apis/openapi.yaml` | Spectral, `.spectral.yaml` | CI `api-lint` only | Node 20 |
 | Chart tests | `charts/network-fulfillment/tests/*.py` | 2 scripts | CI `helm-lint` only | Helm, Python, PyYAML |
@@ -45,6 +45,16 @@ fake ports. Notable suites:
 - `cmd/netfulfil/retry_test.go`, `wiring_test.go`: the boot retry, the
   in-memory fallback when `DATABASE_URL` is unset, and the
   `MIGRATIONS_DATABASE_URL` split.
+- `cmd/netfulfil/outbox_relay_config_test.go`: `OUTBOX_MAX_ATTEMPTS` parsing
+  (`TestOutboxMaxAttempts`, `TestDefaultOutboxMaxAttemptsIsTwenty`) and that
+  the relay the composition root builds carries it
+  (`TestWireEventPublisher_OutboxRelayIsCapped`).
+- `internal/adapters/outbound/postgres/outbox_trace_headers_test.go`: the
+  trace-header injection (`TestTraceHeaders_NoSpanAddsNothing`,
+  `TestTraceHeaders_SpanInjectsTraceparent`) and the merge in which an
+  encoder-set header wins (`TestWithTraceHeaders_EncoderKeyWinsAndInputUntouched`).
+- `cmd/*/log_level_test.go` (all four binaries): `LOG_LEVEL=warning` means
+  warn (`TestNewLoggerAcceptsWarning`, `TestNewLoggerLevels`).
 
 **Coverage gate**: `make coverage` (and the CI `test` job) measure coverage
 of `./internal/domain/...` and `./internal/application/...` only, and fail
@@ -106,12 +116,17 @@ that (`TestPostgresIntegrationTestsUseTestcontainers`,
 | `.../postgres/network_order_repo_integration_test.go` | the order repository |
 | `.../postgres/capability_offer_repo_integration_test.go` | the offer repository |
 | `.../postgres/outbox_integration_test.go` | outbox write and relay |
+| `.../postgres/outbox_trace_integration_test.go` | trace context across the outbox (ADR 0022), real Postgres and Kafka: `TestOutboxTrace_TraceparentCrossesTheOutboxToKafka` (rows written in a span store its `traceparent`; a relay pass on a background context sends it to both topics; it extracts to the producing span) and `TestOutboxTrace_RowWithoutTraceHeadersRelaysUnchanged` |
+| `.../postgres/outbox_relay_cap_integration_test.go` | relay attempt cap (ADR 0021): `TestOutboxRelay_MaxAttempts_PoisonRowExcludedThenGoodRowPublishes` (a poison row, then a good row with the same key, which publishes once the poison row hits the cap and is logged at ERROR), `TestOutboxRelay_MaxAttempts_ReArmedRowIsClaimedAgain` (the runbook's re-arm SQL), `TestOutboxRelay_NoCap_PoisonRowBlocksLaterRows` (`0` = unlimited) |
 | `.../postgres/pool_limits_integration_test.go` | `MaxConns` and `statement_timeout` really applied |
 | `.../postgres/rehydrate_validation_integration_test.go` | corrupt stored state is refused on load |
 | `internal/adapters/outbound/analyticsstore/postgres_integration_test.go` | projection and report store |
 | `internal/adapters/outbound/kafka/publisher_integration_test.go` | both publishers against a real broker |
 | `internal/adapters/inbound/kafka/analytics_projector_integration_test.go` | consumer to projection, end to end |
 | `internal/adapters/inbound/kafka/analytics_dlq_integration_test.go` | retry and dead-letter path |
+| `internal/adapters/inbound/http/rest_api_integration_test.go` | the real REST handler chain over Postgres, the outbox and a real poller: poll, persist, read back, and the shipment-confirmation 204 / 409 / 404 paths |
+| `internal/adapters/inbound/mcp/streamable_http_integration_test.go` | the MCP wire contract over Streamable HTTP with the SDK client and Postgres: `initialize`, `tools/list` (every tool `readOnlyHint: true`), `tools/call`, `resources/read` |
+| `internal/application/usecases/usecases_wiring_integration_test.go` | the write use cases over Postgres, the unit of work and the outbox fan-out, with the real order-management HTTP planner against a stub |
 
 The `make help` text still says integration "needs a running Postgres"; the
 Makefile comment and the tests themselves only need Docker.
@@ -124,6 +139,9 @@ Makefile comment and the tests themselves only need Docker.
 | --- | --- |
 | `TestHexagonalArchitecture` | `arch-go` rules: domain depends on nothing, application on domain, adapters on both |
 | `TestMCPAdapterDependencyRule` | the MCP adapter depends only on application and domain, and nothing but `cmd/mcp` imports it |
+| `TestMCPOptionalToolInputsCarryOmitempty`, `TestMCPOptionalToolInputsSensorFailsOnBadFixtures` | an MCP tool input field whose `jsonschema` description says "optional" carries `omitempty`, or the SDK marks it required (gap fix D16) |
+| `TestOutboxRelaysPassAttemptCap`, `TestOutboxRelayCapSensorFailsOnBadFixtures` | every non-test `NewOutboxRelay` call under `cmd/` passes `WithMaxAttempts` (gap fix D12, ADR 0021) |
+| `TestMCPAdapterStaysReadOnly`, `TestMCPReadOnlySensorFailsOnBadFixtures` | the MCP adapter calls no state-changing method (`Save`, `Publish`, `Execute`, `Exec`, `Insert`, `Update`, `Upsert`, `Delete`) and sets no `ReadOnlyHint: false`, so the "Read-only access" server instructions stay true (gap fix D17) |
 | `TestNoAuthMiddlewareReintroduced` | no auth middleware on REST or MCP (fleet rule) |
 | `TestKafkaConsumerGroupNeverHardcodedInline` | no reader's `GroupID` is an inline string literal; it must come from a named constant, variable or function |
 | `TestKafkaIntegrationTestsUseTestcontainers`, `TestPostgresIntegrationTestsUseTestcontainers`, `TestPostgresIntegrationSensorFailsOnBadFixtures` | integration tests start real containers |
