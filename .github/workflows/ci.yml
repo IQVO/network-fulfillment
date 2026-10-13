@@ -246,6 +246,7 @@ jobs:
           pip install --require-hashes -r .github/requirements/chart-tests.txt
           python3 charts/network-fulfillment/tests/test_credential_wiring.py
           python3 charts/network-fulfillment/tests/test_data_files.py
+          python3 charts/network-fulfillment/tests/test_kong_config.py
 
   arch-test:
     runs-on: ubuntu-latest
