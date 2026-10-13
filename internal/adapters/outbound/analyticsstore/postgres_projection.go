@@ -42,8 +42,13 @@ func claim(ctx context.Context, tx pgx.Tx, eventId string, occurredAt time.Time)
 }
 
 // inTx runs fn in a transaction, committing on success and rolling back on
-// error.
+// error. When ctx already carries the analytics UnitOfWork's transaction
+// (ADR 0023) fn joins it instead, and the UnitOfWork owns commit/rollback,
+// so the consumer's dedupe claim and this write commit together.
 func (p *PostgresProjection) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
+	if tx, ok := txFrom(ctx); ok {
+		return fn(tx)
+	}
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return err

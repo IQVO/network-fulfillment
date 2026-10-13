@@ -9,7 +9,7 @@ to update when a record is added or its Status line changes.
 | [0001](0001-network-fulfillment-bounded-context.md) | Network Fulfillment as a bounded context — conformist to the network, anti-corruption layer for the fleet | Accepted (2026-09-23). Amended by 0009 (counterpart, PII rule, no `sandbox`) and 0014 (shipment-confirmation trigger) |
 | [0002](0002-mcp-and-analytics-data-product.md) | An MCP server and an analytics data product, on the same terms as the other eight bounded contexts | Accepted (2026-09-26) |
 | [0003](0003-transactional-outbox.md) | Transactional outbox for the network-fulfillment Published Language | Accepted; envelope description superseded by 0008; per-key ordering amended by 0021 |
-| [0004](0004-resilience-circuit-breakers-retry-dlq-shutdown.md) | Circuit breaker, Kafka DLQ, and graceful shutdown hardening | Accepted |
+| [0004](0004-resilience-circuit-breakers-retry-dlq-shutdown.md) | Circuit breaker, Kafka DLQ, and graceful shutdown hardening | Accepted; §6 (per-phase retries) amended by 0023 |
 | [0005](0005-kafka-hash-balancer-for-partition-affinity.md) | Hash balancer for per-aggregate Kafka partition affinity | Accepted |
 | [0006](0006-horizontal-autoscaling-and-pgxpool-tuning.md) | Per-workload HorizontalPodAutoscaler and pgxpool MaxConns/statement_timeout tuning | Accepted |
 | [0007](0007-migrations-direct-postgres-connection.md) | Run golang-migrate against a direct Postgres connection, not PgBouncer | Accepted |
@@ -28,6 +28,7 @@ to update when a record is added or its Status line changes.
 | [0020](0020-adr-0013-standard-metrics-convention-adoption.md) | Adopt fleet ADR-0013 ("Standard metrics convention"): otelchi HTTP RED metrics on every HTTP-serving process | Accepted (2026-10-12) |
 | [0021](0021-outbox-relay-attempt-cap.md) | Outbox relay attempt cap: `OUTBOX_MAX_ATTEMPTS` (default 20) excludes a poison row and logs it at ERROR | Accepted (2026-10-13); amends 0003 (per-key ordering) |
 | [0022](0022-trace-context-crosses-the-outbox.md) | The W3C trace context crosses the outbox to Kafka (`traceparent` stored in `outbox_events.headers`, sent by the relay) | Accepted (2026-10-13); additive to 0003 |
+| [0023](0023-analytics-claim-and-apply-in-one-transaction.md) | The analytics consumer's dedupe claim and projection write commit in one transaction (`analyticsstore.UnitOfWork`) | Accepted (2026-10-13); amends 0004 §6 |
 
 [`0002-retail-network-not-amazon-counterpart.md`](0002-retail-network-not-amazon-counterpart.md)
 is a redirect stub ("Moved to ADR 0009"), kept so old links resolve; it is

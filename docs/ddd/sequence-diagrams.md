@@ -285,12 +285,14 @@ sequenceDiagram
     alt not a valid CloudEvent
         AC->>DLQ: publish poison message
     else known type
+        Note over AC,PR: one analytics transaction, analyticsstore.UnitOfWork (ADR 0023)
         AC->>CE: MarkProcessed(id)
         alt first time
             AC->>PR: Apply Received / Acknowledged (v1 or v2) / Rejected, Submitted claimed with no effect
         else duplicate
             Note over AC: skip
         end
+        Note over AC,PR: COMMIT both, or roll both back and retry (max 3) then DLQ
     else unknown type
         Note over AC: ignore
     end

@@ -10,7 +10,7 @@ description: "ADR 0004 — Phase 2 resilience for network-fulfillment, ported fr
 
 ## Status
 
-Accepted — implemented in the same change that introduced this record.
+Accepted — implemented in the same change that introduced this record. §6 (separate per-phase retries) amended by [ADR 0023](./0023-analytics-claim-and-apply-in-one-transaction.md): the claim and the projection write now commit in one transaction and are retried as one unit.
 This is network-fulfillment's Phase 2 (resilience) fan-out of the fleet
 production-readiness plan, porting order-management's ADR 0025
 verbatim wherever this repo's own shape matches it, and documenting the

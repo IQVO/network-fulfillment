@@ -121,6 +121,8 @@ that (`TestPostgresIntegrationTestsUseTestcontainers`,
 | `.../postgres/pool_limits_integration_test.go` | `MaxConns` and `statement_timeout` really applied |
 | `.../postgres/rehydrate_validation_integration_test.go` | corrupt stored state is refused on load |
 | `internal/adapters/outbound/analyticsstore/postgres_integration_test.go` | projection and report store |
+| `.../analyticsstore/unit_of_work_integration_test.go` | analytics UnitOfWork (ADR 0023): `TestUnitOfWork_ClaimAndProjectionRollBackTogether` (the consumer claim, the projection claim and the rollup row roll back together), `TestUnitOfWork_CommitsClaimAndProjectionAndJoinsNestedScope` |
+| `internal/adapters/inbound/kafka/analytics_atomic_claim_integration_test.go` | claim and apply in one transaction (ADR 0023), real Kafka and Postgres: `TestAnalyticsConsumer_CrashBetweenClaimAndApply_RedeliveryAppliesExactlyOnce` (the projector stops after the claim and before the apply commits: no claim is left, and the redelivery in the same group applies the event exactly once) |
 | `internal/adapters/outbound/kafka/publisher_integration_test.go` | both publishers against a real broker |
 | `internal/adapters/inbound/kafka/analytics_projector_integration_test.go` | consumer to projection, end to end |
 | `internal/adapters/inbound/kafka/analytics_dlq_integration_test.go` | retry and dead-letter path |
