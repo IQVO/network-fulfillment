@@ -124,6 +124,8 @@ Makefile comment and the tests themselves only need Docker.
 | --- | --- |
 | `TestHexagonalArchitecture` | `arch-go` rules: domain depends on nothing, application on domain, adapters on both |
 | `TestMCPAdapterDependencyRule` | the MCP adapter depends only on application and domain, and nothing but `cmd/mcp` imports it |
+| `TestMCPOptionalToolInputsCarryOmitempty`, `TestMCPOptionalToolInputsSensorFailsOnBadFixtures` | an MCP tool input field whose `jsonschema` description says "optional" carries `omitempty`, or the SDK marks it required (gap fix D16) |
+| `TestMCPAdapterStaysReadOnly`, `TestMCPReadOnlySensorFailsOnBadFixtures` | the MCP adapter calls no state-changing method (`Save`, `Publish`, `Execute`, `Exec`, `Insert`, `Update`, `Upsert`, `Delete`) and sets no `ReadOnlyHint: false`, so the "Read-only access" server instructions stay true (gap fix D17) |
 | `TestNoAuthMiddlewareReintroduced` | no auth middleware on REST or MCP (fleet rule) |
 | `TestKafkaConsumerGroupNeverHardcodedInline` | no reader's `GroupID` is an inline string literal; it must come from a named constant, variable or function |
 | `TestKafkaIntegrationTestsUseTestcontainers`, `TestPostgresIntegrationTestsUseTestcontainers`, `TestPostgresIntegrationSensorFailsOnBadFixtures` | integration tests start real containers |
