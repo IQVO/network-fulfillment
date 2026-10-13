@@ -241,8 +241,8 @@ def check_startup_probe_gates_boot_work() -> None:
 
     grace = probe.get("periodSeconds", 10) * probe.get("failureThreshold", 3)
     assert grace >= 45, (
-        f"startupProbe allows only {grace}s; it must outlast the ~31s "
-        f"database retry budget in cmd/netfulfil/main.go"
+        f"startupProbe allows only {grace}s; it must outlast the 15 s "
+        f"(1+2+4+8) database retry backoff in cmd/netfulfil/retry.go"
     )
     # Liveness must still exist — the startup probe defers it, never
     # replaces it.

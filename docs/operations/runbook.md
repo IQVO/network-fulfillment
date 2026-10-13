@@ -101,8 +101,8 @@ them (15 s of waiting, plus the time each attempt takes). It exists because
 every Istio-injected pod's first outbound dial is reset about 10 s after
 start. After the last attempt the process exits 1 and logs
 `cannot wire order repository` (or `cannot wire capability offer pipeline`).
-The code comments and the README call this a "~31 s budget" (they add a
-fifth 16 s wait the loop never takes); the loop as written waits 15 s.
+The code comment in `retry.go` states the same 15 s (1+2+4+8; there is no
+fifth wait after the last attempt).
 
 `cmd/mcp` runs the same OLTP migrations at its own startup, **without** the
 retry, then opens its pool. `cmd/netfulfil-projector` runs the analytical

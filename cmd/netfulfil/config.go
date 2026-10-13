@@ -6,6 +6,7 @@ package main
 // the environment inline.
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -100,4 +101,23 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// newLogger builds the process logger: JSON to stdout at the level LOG_LEVEL
+// names (debug, info, warn or warning, error; case-insensitive). Unset or
+// any other value is info. Same vocabulary as the projector and reports
+// binaries (gap fix D22).
+func newLogger(level string) *slog.Logger {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn", "warning":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }

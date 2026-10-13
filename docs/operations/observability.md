@@ -16,8 +16,8 @@ v1.47.0). Dashboards are in `warehouse-infra`, see below.
 
 | Process | Traces | Metrics | Logs |
 | --- | --- | --- | --- |
-| `netfulfil` | OTLP/gRPC push (ADR 0019, 0020) | OTLP/gRPC push every 30 s, plus a Prometheus `GET /metrics` | JSON to stdout, one line per request |
-| `mcp` | OTLP/gRPC push (ADR 0020) | OTLP/gRPC push every 30 s | JSON to stdout |
+| `netfulfil` | OTLP/gRPC push (ADR 0019, 0020) | OTLP/gRPC push every 30 s, plus a Prometheus `GET /metrics` | JSON to stdout, one line per request, level from `LOG_LEVEL` |
+| `mcp` | OTLP/gRPC push (ADR 0020) | OTLP/gRPC push every 30 s | JSON to stdout, level from `LOG_LEVEL` |
 | `netfulfil-projector` | none | OTLP/gRPC push every 30 s (Go-runtime only, ADR 0020) | JSON to stdout, level from `LOG_LEVEL` |
 | `netfulfil-reports` | OTLP/gRPC push (ADR 0020) | OTLP/gRPC push every 30 s | JSON to stdout, one line per request, level from `LOG_LEVEL` |
 
@@ -133,10 +133,9 @@ its own.
 
 ## Logs
 
-Every process uses `log/slog` with a JSON handler on stdout. `netfulfil`,
-`mcp`, `netfulfil-reports` log at Info and above by default (`netfulfil`
-and `mcp` have no level knob; the projector and reports honour
-`LOG_LEVEL`). `netfulfil` now logs one `http request` line per request
+Every process uses `log/slog` with a JSON handler on stdout, at Info and
+above by default. All four honour `LOG_LEVEL` (`debug`, `info`,
+`warn`/`warning`, `error`; anything else is Info). `netfulfil` now logs one `http request` line per request
 (`RequestLogger`, same shape `netfulfil-reports` already used), stamped
 with the chi request id from `middleware.RequestID`; there is still no
 OTel trace id in log lines (the slog handler is plain, not

@@ -66,9 +66,10 @@ relay all run in this one process. Its env surface lives in
 | `OTEL_SERVICE_NAME` | `network-fulfillment` | no | `service.name` resource attribute. | `cmd/netfulfil/main.go` |
 | `SERVICE_VERSION` | `dev` | no | `service.version` resource attribute. The chart sets it to the image tag. | `cmd/netfulfil/main.go` |
 | `ENVIRONMENT` | `local` | no | `deployment.environment.name` resource attribute. | `internal/adapters/outbound/telemetry/telemetry.go` (`Environment`) |
+| `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn`/`warning` or `error` (case-insensitive); anything else is `info`. Same vocabulary in all four binaries. | `cmd/netfulfil/config.go` (`newLogger`) |
 
-The process logs JSON to stdout at the default `slog` level (Info). It has no
-`LOG_LEVEL` variable.
+The process logs JSON to stdout at the level `LOG_LEVEL` names (see the row
+below).
 
 ## `cmd/mcp` (the MCP server)
 
@@ -83,6 +84,7 @@ for the tool list.
 | `MIGRATIONS_DATABASE_URL` | value of `DATABASE_URL` | no | Direct DSN for the migration step this binary also runs at startup (ADR 0007). Unlike `netfulfil`, this step is **not retried**. | `cmd/mcp/main.go` |
 | `MIGRATIONS_PATH` | `/app/migrations` | no | OLTP migrations directory. | `cmd/mcp/main.go` |
 | `REPORTS_BASE_URL` | unset | no | Base URL of `netfulfil-reports`. Unset: the `get_acknowledgement_report` tool is not registered. The chart fills it in with the in-cluster reports Service when `analytics.enabled=true`. | `cmd/mcp/main.go` |
+| `LOG_LEVEL` | `info` | no | Same values as `netfulfil`. | `cmd/mcp/main.go` (`newLogger`) |
 
 `list_capability_offers` is always registered by this binary: it reads the
 `capability_offers` table, which stays empty unless `netfulfil` runs with
