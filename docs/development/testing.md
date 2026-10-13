@@ -13,10 +13,10 @@ run each layer, and what every CI job in `.github/workflows/ci.yml` does.
 
 | Layer | Where | How many | Run with | Needs |
 | --- | --- | --- | --- | --- |
-| Unit (domain, use cases, adapters with fakes, `httptest`) | `internal/**/*_test.go`, `cmd/netfulfil/*_test.go` | 49 test files without a build tag (not counting the BDD and architecture files below) | `make test` | Go only |
+| Unit (domain, use cases, adapters with fakes, `httptest`) | `internal/**/*_test.go`, `cmd/netfulfil/*_test.go` | 56 test files without a build tag (not counting the BDD and architecture files below) | `make test` | Go only |
 | BDD / acceptance (godog) | `features/*.feature`, step code in `features_*_test.go` at the repo root | 9 feature files, 76 `Scenario`/`Scenario Outline` blocks; 2 tagged `@known-bug` are excluded; the rest expand to 126 executed scenarios, 853 steps | `make bdd` | Go only |
-| Integration (testcontainers) | files with `//go:build integration` | 10 files | `make integration` | Docker |
-| Architecture fitness | `internal/architecture/` | 5 files, 13 `Test*` functions | `make arch-test` | Go only |
+| Integration (testcontainers) | files with `//go:build integration` | 15 files | `make integration` | Docker |
+| Architecture fitness | `internal/architecture/` | 8 files, 19 `Test*` functions | `make arch-test` | Go only |
 | Mutation | `gremlins` on `./internal/domain/networkorder` | thresholds in `.gremlins.yaml` | `make mutation` | `gremlins` v0.6.0 |
 | API contract lint | `apis/openapi.yaml` | Spectral, `.spectral.yaml` | CI `api-lint` only | Node 20 |
 | Chart tests | `charts/network-fulfillment/tests/*.py` | 2 scripts | CI `helm-lint` only | Helm, Python, PyYAML |
@@ -124,6 +124,9 @@ that (`TestPostgresIntegrationTestsUseTestcontainers`,
 | `internal/adapters/outbound/kafka/publisher_integration_test.go` | both publishers against a real broker |
 | `internal/adapters/inbound/kafka/analytics_projector_integration_test.go` | consumer to projection, end to end |
 | `internal/adapters/inbound/kafka/analytics_dlq_integration_test.go` | retry and dead-letter path |
+| `internal/adapters/inbound/http/rest_api_integration_test.go` | the real REST handler chain over Postgres, the outbox and a real poller: poll, persist, read back, and the shipment-confirmation 204 / 409 / 404 paths |
+| `internal/adapters/inbound/mcp/streamable_http_integration_test.go` | the MCP wire contract over Streamable HTTP with the SDK client and Postgres: `initialize`, `tools/list` (every tool `readOnlyHint: true`), `tools/call`, `resources/read` |
+| `internal/application/usecases/usecases_wiring_integration_test.go` | the write use cases over Postgres, the unit of work and the outbox fan-out, with the real order-management HTTP planner against a stub |
 
 The `make help` text still says integration "needs a running Postgres"; the
 Makefile comment and the tests themselves only need Docker.
