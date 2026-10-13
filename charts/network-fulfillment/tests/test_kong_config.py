@@ -52,7 +52,6 @@ ENABLE_KONG = [
     "--set", "analytics.database.projectorUrl=postgres://user:pass@localhost:5432/analytics",
     "--set", "kafka.enabled=true",
     "--set", "kafka.brokers=dummy:9092",
-    "--set", "analytics.reports.enabled=true",
     "--set", "analytics.reports.route.enabled=true",
     "--set", "analytics.reports.route.parentRefs[0].name=warehouse-gateway",
     "--set", "analytics.reports.route.parentRefs[0].namespace=kong",
