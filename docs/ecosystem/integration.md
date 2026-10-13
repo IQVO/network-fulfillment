@@ -219,6 +219,17 @@ urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v<N>`.
 The `id` is minted once and stored in the outbox row, so a redelivery keeps
 it: dedupe on `id`.
 
+Optional headers (outbox mode, ADR 0022): an event written inside a span
+also carries that span's W3C `traceparent` (and `tracestate` / `baggage` when
+present), so a consumer may extract it and continue the trace; consumers
+must not require it (poller- and ticker-raised events have none today).
+
+Delivery order (ADR 0021): events for one `networkRef` arrive in order,
+except that a row the broker rejected `OUTBOX_MAX_ATTEMPTS` times (default
+20) is excluded from the relay until an operator re-arms it, so later events
+for the same key can overtake it and it may arrive late. Dedupe on `id` and
+tolerate a late, earlier event.
+
 Each event is written to both `warehouse.network-fulfillment.events`
 (integration) and `warehouse.network-fulfillment.analytics` (this context's
 own analytics projector).

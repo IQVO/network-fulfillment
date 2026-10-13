@@ -49,6 +49,10 @@ fake ports. Notable suites:
   (`TestOutboxMaxAttempts`, `TestDefaultOutboxMaxAttemptsIsTwenty`) and that
   the relay the composition root builds carries it
   (`TestWireEventPublisher_OutboxRelayIsCapped`).
+- `internal/adapters/outbound/postgres/outbox_trace_headers_test.go`: the
+  trace-header injection (`TestTraceHeaders_NoSpanAddsNothing`,
+  `TestTraceHeaders_SpanInjectsTraceparent`) and the merge in which an
+  encoder-set header wins (`TestWithTraceHeaders_EncoderKeyWinsAndInputUntouched`).
 - `cmd/*/log_level_test.go` (all four binaries): `LOG_LEVEL=warning` means
   warn (`TestNewLoggerAcceptsWarning`, `TestNewLoggerLevels`).
 
@@ -112,6 +116,7 @@ that (`TestPostgresIntegrationTestsUseTestcontainers`,
 | `.../postgres/network_order_repo_integration_test.go` | the order repository |
 | `.../postgres/capability_offer_repo_integration_test.go` | the offer repository |
 | `.../postgres/outbox_integration_test.go` | outbox write and relay |
+| `.../postgres/outbox_trace_integration_test.go` | trace context across the outbox (ADR 0022), real Postgres and Kafka: `TestOutboxTrace_TraceparentCrossesTheOutboxToKafka` (rows written in a span store its `traceparent`; a relay pass on a background context sends it to both topics; it extracts to the producing span) and `TestOutboxTrace_RowWithoutTraceHeadersRelaysUnchanged` |
 | `.../postgres/outbox_relay_cap_integration_test.go` | relay attempt cap (ADR 0021): `TestOutboxRelay_MaxAttempts_PoisonRowExcludedThenGoodRowPublishes` (a poison row, then a good row with the same key, which publishes once the poison row hits the cap and is logged at ERROR), `TestOutboxRelay_MaxAttempts_ReArmedRowIsClaimedAgain` (the runbook's re-arm SQL), `TestOutboxRelay_NoCap_PoisonRowBlocksLaterRows` (`0` = unlimited) |
 | `.../postgres/pool_limits_integration_test.go` | `MaxConns` and `statement_timeout` really applied |
 | `.../postgres/rehydrate_validation_integration_test.go` | corrupt stored state is refused on load |

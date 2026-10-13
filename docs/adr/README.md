@@ -27,6 +27,7 @@ to update when a record is added or its Status line changes.
 | [0019](0019-otlp-telemetry-export.md) | OTLP trace and metric export for the API process | Accepted (2026-10-08); mirrors network-inventory-planning ADR 0012. §3 (otelhttp) superseded by 0020 |
 | [0020](0020-adr-0013-standard-metrics-convention-adoption.md) | Adopt fleet ADR-0013 ("Standard metrics convention"): otelchi HTTP RED metrics on every HTTP-serving process | Accepted (2026-10-12) |
 | [0021](0021-outbox-relay-attempt-cap.md) | Outbox relay attempt cap: `OUTBOX_MAX_ATTEMPTS` (default 20) excludes a poison row and logs it at ERROR | Accepted (2026-10-13); amends 0003 (per-key ordering) |
+| [0022](0022-trace-context-crosses-the-outbox.md) | The W3C trace context crosses the outbox to Kafka (`traceparent` stored in `outbox_events.headers`, sent by the relay) | Accepted (2026-10-13); additive to 0003 |
 
 [`0002-retail-network-not-amazon-counterpart.md`](0002-retail-network-not-amazon-counterpart.md)
 is a redirect stub ("Moved to ADR 0009"), kept so old links resolve; it is

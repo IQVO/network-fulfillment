@@ -59,8 +59,19 @@ server span named `<METHOD> <route pattern>`, for example
 There are no other spans. The order-management and inventory-storage HTTP
 clients use a plain `http.Client`, so outbound calls are not traced and no
 trace context is sent to order-management. The poller, the tickers, the
-outbox relay and the Kafka publishers open no spans and add no trace headers
-to messages.
+outbox relay and the Kafka publishers open no spans.
+
+**Trace context across the outbox** ([ADR 0022](../adr/0022-trace-context-crosses-the-outbox.md)).
+In outbox mode `OutboxPublisher.Publish` injects the active span's W3C
+`traceparent` (and `tracestate` / `baggage` when present) into each
+`outbox_events.headers` row, after the CloudEvents `content-type`; the relay
+sends the stored headers with the Kafka message, so a consumer that extracts
+them continues the producer's trace. Today that covers events raised inside a
+REST request span (`NetworkOrderShipmentConfirmed` from the
+shipment-confirmation endpoint). Events raised by the poller and the tickers
+carry no `traceparent`, because those passes open no span. Direct mode (no
+`DATABASE_URL`) adds no trace header. This service's own consumers open no
+spans, so they do not extract.
 
 ### Metric instruments
 
