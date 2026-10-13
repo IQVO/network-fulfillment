@@ -71,7 +71,10 @@ Omitted: indexes. They are `idx_network_orders_unanswered` (partial on
 its columns are shown as golang-migrate's Postgres driver creates them.
 
 **Infrastructure tables:** `outbox_events` is the transactional outbox
-(ADR 0003), one row per event per topic. `schema_migrations` is
+(ADR 0003), one row per event per topic. `headers` holds the CloudEvents
+`content-type` plus, when the row was written inside a span, its W3C
+`traceparent` (ADR 0022); `attempts` counts failed sends and a row at
+`OUTBOX_MAX_ATTEMPTS` is no longer claimed by the relay (ADR 0021). `schema_migrations` is
 golang-migrate's bookkeeping. There is **no** `processed_events` inbox and
 **no** `idempotency_keys` table in this database: the only OLTP Kafka
 consumers are the two in-memory capability caches, and inbound idempotency

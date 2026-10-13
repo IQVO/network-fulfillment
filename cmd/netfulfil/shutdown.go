@@ -94,7 +94,8 @@ func startRelay(ctx context.Context, logger *slog.Logger, relay *postgres.Outbox
 	}
 	go func() {
 		defer close(relayDone)
-		logger.Info("outbox relay running", "topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic)
+		logger.Info("outbox relay running", "topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic,
+			"max_attempts", relay.MaxAttempts())
 		if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("outbox relay stopped", "err", err)
 		}

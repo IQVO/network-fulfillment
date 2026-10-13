@@ -294,13 +294,15 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `EVENT_PUBLISHER` | `log` (default) | `kafka` publishes to both topics; with `DATABASE_URL` set this activates the transactional outbox (ADR 0003) instead of publishing directly |
 | `KAFKA_BROKERS` | `localhost:9092` | comma-separated broker list (publishers and capability-offer caches) |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | Go duration; sleep between empty outbox relay passes (outbox mode only) |
+| `OUTBOX_MAX_ATTEMPTS` | `20` | outbox relay attempt cap (ADR 0021): a row that failed this many sends is logged at ERROR and excluded until re-armed (`UPDATE outbox_events SET attempts = 0 WHERE id = ...`); `0` = unlimited |
 | `CAPABILITY_OFFER_ENABLED` | `false` | `true` wires the two Kafka caches, the inventory client, the recompute ticker and `GET /capability-offers`; boot blocks until both caches replay |
 | `SITE_ID` | `site-1` | the single site capability offers are computed for |
 | `RECOMPUTE_INTERVAL` | `1m` | Go duration; capability-offer recompute cadence |
 | `INVENTORY_STORAGE_URL` | `http://localhost:8080` | base URL for `GET /inventory/{sku}/usable` |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`/`warning`, `error` (same in all four binaries) |
 
 `cmd/mcp`: `MCP_ADDR` (`:8090`), `DATABASE_URL`, `MIGRATIONS_DATABASE_URL`,
-`MIGRATIONS_PATH`, `REPORTS_BASE_URL` (unset = no report tool).
+`MIGRATIONS_PATH`, `REPORTS_BASE_URL` (unset = no report tool), `LOG_LEVEL`.
 `cmd/netfulfil-projector`: `ANALYTICS_DATABASE_URL` (required),
 `ADMIN_ADDR` (`:8091`), `KAFKA_BROKERS`, `ANALYTICS_MIGRATIONS_PATH`
 (`migrations/analytics`), `LOG_LEVEL`. `cmd/netfulfil-reports`:

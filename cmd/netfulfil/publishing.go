@@ -72,8 +72,12 @@ func wireEventPublisher(pool *pgxpool.Pool, logger *slog.Logger) (ports.EventPub
 	// share the same underlying Writer shape (no fixed topic; Send stamps
 	// enc.Topic per message), so one relay drains rows bound for either
 	// topic without needing its own third adapter.
+	// OUTBOX_MAX_ATTEMPTS (ADR 0021): a row that fails this many sends is
+	// excluded from the relay's claims and logged at ERROR, so one poison
+	// row cannot block every later row, for both topics, forever.
 	relay := postgres.NewOutboxRelay(pool, integration, logger,
-		postgres.WithInterval(durationEnv("OUTBOX_RELAY_INTERVAL", time.Second)))
+		postgres.WithInterval(durationEnv("OUTBOX_RELAY_INTERVAL", time.Second)),
+		postgres.WithMaxAttempts(outboxMaxAttempts(logger)))
 	return outboxPublisher, relay, closeFn
 }
 
