@@ -189,6 +189,12 @@ func (c *AnalyticsConsumer) Run(ctx context.Context) error {
 			return err
 		}
 		if err := c.handleMessage(ctx, msg); err != nil {
+			if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+				// Shutdown landed mid-handle: the offset was not committed,
+				// so the message is redelivered on the next start and the
+				// processed-events dedupe absorbs the replay. A clean stop.
+				return nil
+			}
 			return err
 		}
 	}
@@ -238,6 +244,9 @@ func (c *AnalyticsConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 
 	isNew, err := c.markProcessedWithRetry(ctx, env.ID())
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err() // shutting down: never dead-letter a message only cancellation interrupted
+		}
 		return c.deadLetter(ctx, msg, topic, env, "mark_processed", err)
 	}
 	if !isNew {
@@ -245,6 +254,9 @@ func (c *AnalyticsConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 	}
 
 	if err := c.applyWithRetry(ctx, env); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err() // shutting down: never dead-letter a message only cancellation interrupted
+		}
 		return c.deadLetter(ctx, msg, topic, env, "apply", err)
 	}
 	return c.commit(ctx, msg)
