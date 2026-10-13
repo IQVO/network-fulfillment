@@ -159,7 +159,10 @@ Messages worth knowing, with their fields (all from the code):
 | `submitted orders reconciled` | INFO | `examined`, `confirmed`, `failed`, `pending` | netfulfil | |
 | `capability offer recompute completed` | INFO | `examined`, `throughput_constrained` | netfulfil | |
 | `capability offer: usable inventory lookup failed` | ERROR | `sku`, `err` | netfulfil | inventory-storage call failed for one SKU |
-| `outbox relay pass failed` | ERROR | `error` | netfulfil | rows stay unpublished and are retried |
+| `outbox relay pass failed` | ERROR | `error` | netfulfil | a database failure of a relay pass (begin, claim, mark published); rows stay unpublished and are retried. Send failures are logged by the two lines below instead |
+| `outbox relay: send failed, stopping this pass at the failed row` | WARN | `outbox_id`, `topic`, `event_type`, `attempts`, `error` | netfulfil | the broker rejected a row below the attempt cap; the next pass retries it |
+| `outbox relay: row reached the attempt cap and is excluded from future claims; re-arm it with attempts = 0 after fixing the cause` | ERROR | `outbox_id`, `topic`, `event_type`, `key`, `attempts`, `max_attempts`, `error` | netfulfil | once per row, when it reaches `OUTBOX_MAX_ATTEMPTS` ([ADR 0021](../adr/0021-outbox-relay-attempt-cap.md)); consumers never got that event ([runbook](./runbook.md#an-outbox-row-hit-the-attempt-cap)) |
+| `outbox relay running` | INFO | `topic`, `analytics_topic`, `max_attempts` | netfulfil | outbox mode is on, with the attempt cap in force |
 | `stub network acknowledgement` | INFO | `networkRef`, `accepted` | netfulfil | what the stub gateway was told |
 | `analytics: message is not a valid CloudEvent, sending to dead-letter topic` | WARN | `topic`, `partition`, `offset`, `error` | projector | |
 | `analytics: exhausted retries, sending to dead-letter topic` | WARN | `topic`, `dlq_topic`, `phase`, `ce_id`, `ce_type`, `attempts`, `error` | projector | |
@@ -206,3 +209,5 @@ None of these exist yet; they follow from the code above.
 | Analytics stale | `GET /reports/acknowledgement/freshness` `lagSeconds` high while orders are arriving | projector stopped; note the lag also grows when no event is published at all |
 | 5xx on the API | `http_server_request_duration_seconds_count{http_response_status_code=~"5.."}` | |
 | DLQ growth | message count on `warehouse.network-fulfillment.analytics.dlq` | poison or failing projection |
+| Outbox row excluded | any ERROR `outbox relay: row reached the attempt cap ...` (log alert), or `SELECT count(*) FROM outbox_events WHERE published_at IS NULL AND attempts >= 20` > 0 | an event consumers never received; re-arm it after fixing the cause (ADR 0021) |
+| Outbox backlog | `SELECT count(*), min(created_at) FROM outbox_events WHERE published_at IS NULL` growing for > 5 min | the relay is stuck on a failing row below the cap, or the broker is down |

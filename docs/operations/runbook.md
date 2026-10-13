@@ -212,12 +212,50 @@ Active when `DATABASE_URL` is set **and** `EVENT_PUBLISHER=kafka`.
   every `netfulfil` replica. Each pass claims up to 100 unpublished rows in id
   order with `FOR UPDATE SKIP LOCKED`, sends them one by one and sets
   `published_at`. On the first send failure it records `attempts` and
-  `last_error` on that row, commits, and stops the pass so later events do not
-  overtake it. An empty pass sleeps `OUTBOX_RELAY_INTERVAL`.
+  `last_error` on that row, commits, logs a WARN and stops the pass so later
+  events do not overtake it. An empty pass sleeps `OUTBOX_RELAY_INTERVAL`.
+- **Attempt cap** ([ADR 0021](../adr/0021-outbox-relay-attempt-cap.md)): once
+  a row has failed `OUTBOX_MAX_ATTEMPTS` sends (default 20, `0` = unlimited)
+  the relay logs it **at ERROR** and excludes it from future claims, so one
+  poison row cannot stop the relay forever. Later rows, **including rows for
+  the same `networkRef`**, then overtake it. The row is not deleted or moved
+  (there is no DLQ topic for the outbox): it stays in `outbox_events` with
+  `published_at IS NULL`, `attempts` and `last_error`.
 - Delivery is at least once: a crash between send and `UPDATE` republishes
   the row. Consumers dedupe on the CloudEvents `id`.
 - Published rows are never deleted. There is no housekeeping job for
   `outbox_events`.
+
+### An outbox row hit the attempt cap
+
+Symptom: an ERROR log
+`outbox relay: row reached the attempt cap and is excluded from future claims; ...`
+carrying `outbox_id`, `topic`, `event_type`, `key`, `attempts`,
+`max_attempts` and `error`. Consumers never received that event; later events
+for the same `networkRef` may already have been delivered.
+
+1. List the excluded rows (use the configured cap; 20 by default):
+
+   ```sql
+   SELECT id, topic, event_type, convert_from(key, 'UTF8') AS key, attempts, last_error, created_at
+   FROM outbox_events
+   WHERE published_at IS NULL AND attempts >= 20
+   ORDER BY id;
+   ```
+
+2. Fix the cause named in `last_error` (topic missing, message too large,
+   broker ACL, ...).
+3. Re-arm the row so the next relay pass claims it again:
+
+   ```sql
+   UPDATE outbox_events SET attempts = 0 WHERE id = <outbox_id>;
+   ```
+
+   It is delivered late, after later rows with the same key; consumers dedupe
+   on the CloudEvents `id`, so a re-armed row is never applied twice. If the
+   event must not be delivered at all any more, leave it excluded and record
+   why: deleting an unpublished outbox row is a manual data change and is not
+   part of this procedure.
 
 ## Background work in `netfulfil`
 

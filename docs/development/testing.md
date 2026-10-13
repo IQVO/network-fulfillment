@@ -45,6 +45,12 @@ fake ports. Notable suites:
 - `cmd/netfulfil/retry_test.go`, `wiring_test.go`: the boot retry, the
   in-memory fallback when `DATABASE_URL` is unset, and the
   `MIGRATIONS_DATABASE_URL` split.
+- `cmd/netfulfil/outbox_relay_config_test.go`: `OUTBOX_MAX_ATTEMPTS` parsing
+  (`TestOutboxMaxAttempts`, `TestDefaultOutboxMaxAttemptsIsTwenty`) and that
+  the relay the composition root builds carries it
+  (`TestWireEventPublisher_OutboxRelayIsCapped`).
+- `cmd/*/log_level_test.go` (all four binaries): `LOG_LEVEL=warning` means
+  warn (`TestNewLoggerAcceptsWarning`, `TestNewLoggerLevels`).
 
 **Coverage gate**: `make coverage` (and the CI `test` job) measure coverage
 of `./internal/domain/...` and `./internal/application/...` only, and fail
@@ -106,6 +112,7 @@ that (`TestPostgresIntegrationTestsUseTestcontainers`,
 | `.../postgres/network_order_repo_integration_test.go` | the order repository |
 | `.../postgres/capability_offer_repo_integration_test.go` | the offer repository |
 | `.../postgres/outbox_integration_test.go` | outbox write and relay |
+| `.../postgres/outbox_relay_cap_integration_test.go` | relay attempt cap (ADR 0021): `TestOutboxRelay_MaxAttempts_PoisonRowExcludedThenGoodRowPublishes` (a poison row, then a good row with the same key, which publishes once the poison row hits the cap and is logged at ERROR), `TestOutboxRelay_MaxAttempts_ReArmedRowIsClaimedAgain` (the runbook's re-arm SQL), `TestOutboxRelay_NoCap_PoisonRowBlocksLaterRows` (`0` = unlimited) |
 | `.../postgres/pool_limits_integration_test.go` | `MaxConns` and `statement_timeout` really applied |
 | `.../postgres/rehydrate_validation_integration_test.go` | corrupt stored state is refused on load |
 | `internal/adapters/outbound/analyticsstore/postgres_integration_test.go` | projection and report store |
@@ -125,6 +132,7 @@ Makefile comment and the tests themselves only need Docker.
 | `TestHexagonalArchitecture` | `arch-go` rules: domain depends on nothing, application on domain, adapters on both |
 | `TestMCPAdapterDependencyRule` | the MCP adapter depends only on application and domain, and nothing but `cmd/mcp` imports it |
 | `TestMCPOptionalToolInputsCarryOmitempty`, `TestMCPOptionalToolInputsSensorFailsOnBadFixtures` | an MCP tool input field whose `jsonschema` description says "optional" carries `omitempty`, or the SDK marks it required (gap fix D16) |
+| `TestOutboxRelaysPassAttemptCap`, `TestOutboxRelayCapSensorFailsOnBadFixtures` | every non-test `NewOutboxRelay` call under `cmd/` passes `WithMaxAttempts` (gap fix D12, ADR 0021) |
 | `TestMCPAdapterStaysReadOnly`, `TestMCPReadOnlySensorFailsOnBadFixtures` | the MCP adapter calls no state-changing method (`Save`, `Publish`, `Execute`, `Exec`, `Insert`, `Update`, `Upsert`, `Delete`) and sets no `ReadOnlyHint: false`, so the "Read-only access" server instructions stay true (gap fix D17) |
 | `TestNoAuthMiddlewareReintroduced` | no auth middleware on REST or MCP (fleet rule) |
 | `TestKafkaConsumerGroupNeverHardcodedInline` | no reader's `GroupID` is an inline string literal; it must come from a named constant, variable or function |
