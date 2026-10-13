@@ -145,7 +145,7 @@ projector:
 | --- | --- |
 | `acknowledgement_rollup` | per-day counters behind the acknowledgement report |
 | `analytics_processed_events` | event ids the projection has applied, with each event's business time (the source of the freshness lag) |
-| `analytics_consumed_events` | the consumer's own dedupe set, checked before the projection runs |
+| `analytics_consumed_events` | the consumer's own dedupe set, written in the same transaction as the projection write (ADR 0023) |
 
 Column-level ER diagrams: [ddd/entity-relationship.md](../ddd/entity-relationship.md).
 

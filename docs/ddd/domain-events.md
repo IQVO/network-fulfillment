@@ -69,10 +69,14 @@ never reached by these six types.
 Consumer behaviour:
 
 - **Analytics consumer**: dedupes on the CloudEvents `id`
-  (`analytics_consumed_events`, then `analytics_processed_events`). A
-  non-CloudEvent is dead-lettered immediately to
-  `warehouse.network-fulfillment.analytics.dlq`. Infrastructure failures
-  are retried up to 3 times per phase, then dead-lettered (ADR 0004).
+  (`analytics_consumed_events`, then `analytics_processed_events`). The
+  claim and the projection write commit in ONE analytics transaction
+  (ADR 0023), so a stop between them leaves no claim and the redelivery
+  applies the event exactly once. A non-CloudEvent is dead-lettered
+  immediately to `warehouse.network-fulfillment.analytics.dlq`.
+  Infrastructure failures roll the whole claim+apply back and are retried
+  up to 3 times, then dead-lettered (ADR 0004, ADR 0023). A shutdown is
+  never dead-lettered.
 - **The two capability caches** replay from the first offset under a
   per-process group and gate boot on `WaitReady` (60s each). A
   non-CloudEvent or a handling error is **logged and skipped**: no DLQ.

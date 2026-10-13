@@ -121,6 +121,8 @@ that (`TestPostgresIntegrationTestsUseTestcontainers`,
 | `.../postgres/pool_limits_integration_test.go` | `MaxConns` and `statement_timeout` really applied |
 | `.../postgres/rehydrate_validation_integration_test.go` | corrupt stored state is refused on load |
 | `internal/adapters/outbound/analyticsstore/postgres_integration_test.go` | projection and report store |
+| `.../analyticsstore/unit_of_work_integration_test.go` | analytics UnitOfWork (ADR 0023): `TestUnitOfWork_ClaimAndProjectionRollBackTogether` (the consumer claim, the projection claim and the rollup row roll back together), `TestUnitOfWork_CommitsClaimAndProjectionAndJoinsNestedScope` |
+| `internal/adapters/inbound/kafka/analytics_atomic_claim_integration_test.go` | claim and apply in one transaction (ADR 0023), real Kafka and Postgres: `TestAnalyticsConsumer_CrashBetweenClaimAndApply_RedeliveryAppliesExactlyOnce` (the projector stops after the claim and before the apply commits: no claim is left, and the redelivery in the same group applies the event exactly once) |
 | `internal/adapters/outbound/kafka/publisher_integration_test.go` | both publishers against a real broker |
 | `internal/adapters/inbound/kafka/analytics_projector_integration_test.go` | consumer to projection, end to end |
 | `internal/adapters/inbound/kafka/analytics_dlq_integration_test.go` | retry and dead-letter path |
@@ -141,6 +143,7 @@ Makefile comment and the tests themselves only need Docker.
 | `TestMCPAdapterDependencyRule` | the MCP adapter depends only on application and domain, and nothing but `cmd/mcp` imports it |
 | `TestMCPOptionalToolInputsCarryOmitempty`, `TestMCPOptionalToolInputsSensorFailsOnBadFixtures` | an MCP tool input field whose `jsonschema` description says "optional" carries `omitempty`, or the SDK marks it required (gap fix D16) |
 | `TestOutboxRelaysPassAttemptCap`, `TestOutboxRelayCapSensorFailsOnBadFixtures` | every non-test `NewOutboxRelay` call under `cmd/` passes `WithMaxAttempts` (gap fix D12, ADR 0021) |
+| `TestKafkaWritersSetRequiredAcks`, `TestKafkaWriterAcksSensorBites` (`kafka_writer_acks_fitness_test.go`) | every kafka-go `Writer` literal in a non-test file under `internal/` or `cmd/` sets `RequiredAcks` (the DLQ writer and both event publishers use `kafkago.RequireAll`, synchronous): kafka-go defaults to `RequireNone` (acks=0), which silently drops a write on a broker blip while `WriteMessages` returns nil (fleet rollout 2026-10-13) |
 | `TestMCPAdapterStaysReadOnly`, `TestMCPReadOnlySensorFailsOnBadFixtures` | the MCP adapter calls no state-changing method (`Save`, `Publish`, `Execute`, `Exec`, `Insert`, `Update`, `Upsert`, `Delete`) and sets no `ReadOnlyHint: false`, so the "Read-only access" server instructions stay true (gap fix D17) |
 | `TestNoAuthMiddlewareReintroduced` | no auth middleware on REST or MCP (fleet rule) |
 | `TestKafkaConsumerGroupNeverHardcodedInline` | no reader's `GroupID` is an inline string literal; it must come from a named constant, variable or function |

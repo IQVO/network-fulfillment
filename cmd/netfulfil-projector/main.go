@@ -91,7 +91,7 @@ func run() error {
 	projection := analyticsstore.NewPostgresProjection(pool)
 	consumed := analyticsstore.NewConsumedEventsRepo(pool)
 	group := inboundkafka.NewUniqueConsumerGroup(inboundkafka.AnalyticsConsumerGroupPrefix)
-	consumer := inboundkafka.NewAnalyticsConsumer(kafkaBrokers, outboundkafka.AnalyticsTopic, group, projection, consumed, logger)
+	consumer := inboundkafka.NewAnalyticsConsumer(kafkaBrokers, outboundkafka.AnalyticsTopic, group, projection, consumed, analyticsstore.NewUnitOfWork(pool), logger)
 	defer func() { _ = consumer.Close() }()
 
 	mux := http.NewServeMux()
