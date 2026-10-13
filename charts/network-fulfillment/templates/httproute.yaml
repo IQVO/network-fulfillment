@@ -5,6 +5,10 @@ metadata:
   name: {{ include "network-fulfillment.fullname" . }}
   labels:
     {{- include "network-fulfillment.labels" . | nindent 4 }}
+  {{- with include "network-fulfillment.kongPluginNames" . }}
+  annotations:
+    konghq.com/plugins: {{ . | quote }}
+  {{- end }}
 spec:
   parentRefs:
     {{- range .Values.gatewayApi.parentRefs }}
