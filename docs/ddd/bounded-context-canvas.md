@@ -4,6 +4,91 @@ Following the ddd-crew [Bounded Context Canvas v5](https://github.com/ddd-crew/b
 Every message row maps to a real route, MCP tool, port call or Kafka topic
 in the code on `develop`.
 
+## Canvas at a glance
+
+One picture of the sections below, laid out like the ddd-crew canvas:
+inbound collaborators on the left, this context in the middle (purpose,
+domain roles and the business decisions it enforces), outbound
+collaborators on the right. Arrows follow the message type: **solid blue**
+commands (`cmd`), **dotted green** queries (`qry`), **thick orange** events
+(`evt`); each arrow names its channel and the messages it carries. Box shapes
+mark the collaborator kind: rounded = people, UI or any client; blue =
+sibling bounded context; double border = external system or platform;
+grey = this context's own projector, reports or dead-letter path; dashed =
+published today with no consumer. Channel names on the arrows are
+abbreviated (REST, MCP, Kafka, HTTP, port); the Inbound and Outbound
+Communication tables carry the exact route, tool, topic and CloudEvents
+type for every message.
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 36, "padding": 8}}}%%
+flowchart LR
+    classDef bc fill:#fff3bf,stroke:#e67700,stroke-width:1.5px,color:#000
+    classDef card fill:#fff9db,stroke:#f08c00,color:#000,text-align:left
+    classDef ctx fill:#e7f5ff,stroke:#1c7ed6,color:#000
+    classDef actor fill:#fff4e6,stroke:#e8590c,color:#000
+    classDef ext fill:#ffe3e3,stroke:#c92a2a,color:#000
+    classDef self fill:#f1f3f5,stroke:#868e96,color:#000
+    classDef none fill:#f8f9fa,stroke:#adb5bd,stroke-dasharray:5 5,color:#495057
+    subgraph IN["Inbound - who commands, queries or feeds it"]
+        direction TB
+        in0[["External network (retail-network, stub only)"]]:::ext
+        in1(["Operators, upstream caller, console remote"]):::actor
+        in2(["MCP clients (AI agents)"]):::actor
+        in3["process-path-management"]:::ctx
+        in4["wes-work-planning"]:::ctx
+    end
+    subgraph BC["network-fulfillment - Supporting subdomain - WES tier"]
+        direction TB
+        purpose["<b>Purpose</b><br/>The one place where the fleet meets<br/>an external retail fulfillment<br/>network: poll its demand, answer in<br/>full inside the 24-hour window using<br/>order-management's feasibility<br/>verdict, reconcile each submission<br/>before releasing work, confirm<br/>shipment, compute the capability<br/>offer."]:::card
+        roles["<b>Domain roles</b><br/>- Gateway / Anti-Corruption Layer (primary)<br/>- Execution (the answer protocol and its clock)<br/>- Analysis (opt-in capability offers)<br/>- Published Language / Open Host (partly)"]:::card
+        rules["<b>Business decisions it enforces</b><br/>- Answer once, in full or not at all<br/>- One unknown product rejects the<br/>whole order, and the refusal is<br/>recorded<br/>- Feasibility is asked of<br/>order-management, never computed<br/>here<br/>- Hold, submit, reconcile, then<br/>release<br/>- Free the hold first on every<br/>rejection path<br/>- A missed deadline is reported, then<br/>refused, never answered late"]:::card
+        purpose ~~~ roles ~~~ rules
+    end
+    subgraph OUT["Outbound - whom it calls or notifies"]
+        direction TB
+        out0["order-management"]:::ctx
+        out1["inventory-storage (opt-in)"]:::ctx
+        out2[["External network (stub)"]]:::ext
+        out3["Any subscriber (none found in the fleet)"]:::none
+        out4["own analytics projector"]:::self
+    end
+    in0 -.->|"qry - port<br/>NetworkGateway.PollDemand<br/>Inbound demand (polled)"| BC
+    in1 -->|"cmd - REST<br/>Confirm shipment"| BC
+    in1 -.->|"qry - REST<br/>List unanswered orders, Get one<br/>order, Inbound leg health,<br/>Capability offers"| BC
+    in1 -.->|"qry - REST (reports)<br/>Acknowledgement and Translation<br/>report, freshness"| BC
+    in2 -.->|"qry - MCP<br/>get_network_order,<br/>list_network_orders,<br/>list_capability_offers,<br/>get_acknowledgement_report"| BC
+    in3 ==>|"evt - Kafka<br/>warehouse.process-path-management.events<br/>ProcessPathCreated / Updated /<br/>Deactivated, CPTScheduleChanged"| BC
+    in4 ==>|"evt - Kafka<br/>warehouse.work-planning.events<br/>PathCapacityChanged"| BC
+    BC -->|"cmd - REST<br/>Raise held order with<br/>feasibility verdict, Release<br/>held order, Cancel held order"| out0
+    BC -.->|"qry - REST<br/>Usable quantity per SKU"| out1
+    BC -->|"cmd - port NetworkGateway<br/>Acknowledge / reject in full,<br/>Shipment confirmation"| out2
+    BC -.->|"qry - port NetworkGateway<br/>Transaction status"| out2
+    BC ==>|"evt - Kafka<br/>warehouse.network-fulfillment.events<br/>NetworkOrderReceived,<br/>NetworkOrderSubmitted,<br/>NetworkOrderAcknowledged (v2),<br/>NetworkOrderRejected,<br/>NetworkOrderShipmentConfirmed,<br/>AcknowledgementDeadlineAtRisk"| out3
+    BC ==>|"evt - Kafka<br/>warehouse.network-fulfillment.analytics<br/>the same 6 events"| out4
+    linkStyle 0 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 1 stroke:#1971c2,stroke-width:1.5px
+    linkStyle 2 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 3 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 4 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 5 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 6 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 7 stroke:#1971c2,stroke-width:1.5px
+    linkStyle 8 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 9 stroke:#1971c2,stroke-width:1.5px
+    linkStyle 10 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 11 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 12 stroke:#e8590c,stroke-width:2.5px
+    class BC bc
+```
+
+Source: the Inbound Communication and Outbound Communication tables of this
+page, which map to `internal/adapters/inbound/{http,kafka,mcp,poller}` and `internal/adapters/outbound/`. The diagram omits assumptions, verification metrics, open
+questions and the ubiquitous language (sections below), the relationship
+pattern per message (OHS, ACL, Conformist, Customer/Supplier - see the
+tables) and anything the tables mark as deprecated or platform-only
+(health probes).
+
 ## Name
 
 **Network Fulfillment** (`network-fulfillment`, CloudEvents subdomain `wes`).
