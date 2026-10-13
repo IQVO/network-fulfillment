@@ -129,11 +129,14 @@ var _ ReportsClient = (*ReportsRESTClient)(nil)
 // --- get_acknowledgement_report tool ----------------------------------------
 
 // AcknowledgementReportToolInput is the tool's argument set (untrusted,
-// from a model).
+// from a model). Granularity is optional, so its json tag carries
+// omitempty: without it the MCP SDK marks the field required and a call that
+// leaves it out is rejected before the handler runs (gap fix D16, sensor
+// internal/architecture TestMCPOptionalToolInputsCarryOmitempty).
 type AcknowledgementReportToolInput struct {
 	From        string `json:"from" jsonschema:"start of the window, inclusive, RFC3339 (required)"`
 	To          string `json:"to" jsonschema:"end of the window, exclusive, RFC3339 (required)"`
-	Granularity string `json:"granularity,omitempty" jsonschema:"time bucket granularity; only 'day' is supported"`
+	Granularity string `json:"granularity,omitempty" jsonschema:"optional time bucket granularity; only 'day' is supported, and day is used when omitted"`
 }
 
 // getAcknowledgementReport is the tool handler: it validates the required

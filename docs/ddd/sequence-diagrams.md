@@ -270,12 +270,15 @@ sequenceDiagram
     participant PR as PostgresProjection
     participant DLQ as analytics.dlq topic
     loop every pass, OUTBOX_RELAY_INTERVAL when idle
-        RL->>DB: SELECT unpublished FOR UPDATE SKIP LOCKED LIMIT n
+        RL->>DB: SELECT unpublished AND attempts below OUTBOX_MAX_ATTEMPTS FOR UPDATE SKIP LOCKED LIMIT n
         RL->>K: WriteMessages to each row topic
         alt sent
             RL->>DB: UPDATE published_at = now, attempts + 1
         else send failed
-            RL->>DB: UPDATE attempts + 1, last_error
+            RL->>DB: UPDATE attempts + 1, last_error, COMMIT, stop this pass
+            opt attempts reached OUTBOX_MAX_ATTEMPTS, default 20 (ADR 0021)
+                RL->>RL: log ERROR, row excluded from later claims until re-armed
+            end
         end
     end
     K->>AC: message on warehouse.network-fulfillment.analytics

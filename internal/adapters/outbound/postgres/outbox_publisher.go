@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	kafkago "github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
@@ -46,12 +49,20 @@ func NewOutboxPublisher(pool *pgxpool.Pool, encoders ...outboundkafka.Encoder) *
 // shared.DomainEvent — the same contract the direct Kafka publishers
 // enforce — so a value that does not is rejected rather than silently
 // enqueued with no usable envelope.
+//
+// The W3C trace context of ctx (the span of the request or poll pass that
+// ran the use case) is injected into each row's headers with the global
+// propagator (gap fix D27, ADR 0022): `traceparent` and, when present,
+// `tracestate`/`baggage` are appended after the CloudEvents content-type
+// header. The relay copies the stored headers onto the Kafka message, so a
+// consumer can continue the trace. Without an active span nothing is added.
 func (p *OutboxPublisher) Publish(ctx context.Context, event any) error {
 	de, ok := event.(shared.DomainEvent)
 	if !ok {
 		return fmt.Errorf("postgres: event %T does not implement shared.DomainEvent", event)
 	}
 
+	trace := traceHeaders(ctx)
 	q := querierFrom(ctx, p.pool)
 	for _, enc := range p.encoders {
 		encodedBatch, err := enc.Encode(ctx, de)
@@ -59,7 +70,7 @@ func (p *OutboxPublisher) Publish(ctx context.Context, event any) error {
 			return err
 		}
 		for _, encoded := range encodedBatch {
-			headers, err := marshalHeaders(encoded.Headers)
+			headers, err := marshalHeaders(withTraceHeaders(encoded.Headers, trace))
 			if err != nil {
 				return fmt.Errorf("postgres: marshal outbox headers for %s/%s: %w", encoded.Topic, encoded.EventType, err)
 			}
@@ -72,6 +83,45 @@ func (p *OutboxPublisher) Publish(ctx context.Context, event any) error {
 		}
 	}
 	return nil
+}
+
+// traceHeaders returns the W3C trace context of ctx as Kafka headers, in a
+// stable key order, using the global propagator telemetry.Setup installs
+// (trace-context + baggage). Empty when ctx carries no span.
+func traceHeaders(ctx context.Context) []kafkago.Header {
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	keys := carrier.Keys()
+	sort.Strings(keys)
+	out := make([]kafkago.Header, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, kafkago.Header{Key: k, Value: []byte(carrier.Get(k))})
+	}
+	return out
+}
+
+// withTraceHeaders appends trace to hs, skipping a key hs already has (an
+// encoder-set header always wins). hs itself is never modified.
+func withTraceHeaders(hs, trace []kafkago.Header) []kafkago.Header {
+	if len(trace) == 0 {
+		return hs
+	}
+	out := append(make([]kafkago.Header, 0, len(hs)+len(trace)), hs...)
+	for _, t := range trace {
+		if !hasHeader(hs, t.Key) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func hasHeader(hs []kafkago.Header, key string) bool {
+	for _, h := range hs {
+		if h.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // outboxHeader is the JSON wire shape of one kafka-go header stored in

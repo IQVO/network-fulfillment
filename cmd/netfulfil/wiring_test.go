@@ -35,7 +35,7 @@ func TestWireOrders_RetriesTheDatabaseNotJustOnce(t *testing.T) {
 		t.Fatal("an unreachable database must fail the boot, never fall back to the in-memory repo")
 	}
 
-	// The full budget is ~31s; one attempt is ~0s. Anything under the
+	// The full budget is 15 s of backoff (1+2+4+8); one attempt is ~0s. Anything under the
 	// first two backoffs (1s + 2s) means the retry was skipped.
 	if elapsed < 3*time.Second {
 		t.Fatalf("wireOrders gave up in %v — it is not retrying, so a single "+

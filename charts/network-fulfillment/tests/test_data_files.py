@@ -241,8 +241,8 @@ def check_startup_probe_gates_boot_work() -> None:
 
     grace = probe.get("periodSeconds", 10) * probe.get("failureThreshold", 3)
     assert grace >= 45, (
-        f"startupProbe allows only {grace}s; it must outlast the ~31s "
-        f"database retry budget in cmd/netfulfil/main.go"
+        f"startupProbe allows only {grace}s; it must outlast the 15 s "
+        f"(1+2+4+8) database retry backoff in cmd/netfulfil/retry.go"
     )
     # Liveness must still exist — the startup probe defers it, never
     # replaces it.
@@ -250,8 +250,28 @@ def check_startup_probe_gates_boot_work() -> None:
     print(f"PASS: startupProbe gates boot for {grace}s, liveness still present")
 
 
+def check_outbox_max_attempts_reaches_the_container() -> None:
+    """The outbox relay attempt cap (ADR 0021, gap fix D12) is a chart value.
+
+    Without OUTBOX_MAX_ATTEMPTS the binary still defaults to 20, but an
+    operator who sets config.outboxMaxAttempts must see it reach the
+    container, including 0 (unlimited), which is a valid value and must not
+    be dropped as "empty".
+    """
+    env = env_map(render(None))
+    assert env.get("OUTBOX_MAX_ATTEMPTS") == "20", (
+        f"OUTBOX_MAX_ATTEMPTS = {env.get('OUTBOX_MAX_ATTEMPTS')!r}, want the fleet default '20'"
+    )
+    env = env_map(render("config:\n  outboxMaxAttempts: 0\n"))
+    assert env.get("OUTBOX_MAX_ATTEMPTS") == "0", (
+        f"config.outboxMaxAttempts=0 rendered OUTBOX_MAX_ATTEMPTS={env.get('OUTBOX_MAX_ATTEMPTS')!r}, want '0'"
+    )
+    print("PASS: config.outboxMaxAttempts reaches the container as OUTBOX_MAX_ATTEMPTS (default 20, 0 kept)")
+
+
 def main() -> int:
     check_startup_probe_gates_boot_work()
+    check_outbox_max_attempts_reaches_the_container()
     check_default_has_no_data_files()
     check_rendered_json_is_parseable()
     check_files_are_wired_where_the_binary_looks()
