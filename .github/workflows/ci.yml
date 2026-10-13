@@ -243,7 +243,7 @@ jobs:
         # has a render-assertion script that is NOT wired to CI and only
         # runs if somebody remembers — which is how it rots.
         run: |
-          pip install pyyaml
+          pip install --require-hashes -r .github/requirements/chart-tests.txt
           python3 charts/network-fulfillment/tests/test_credential_wiring.py
           python3 charts/network-fulfillment/tests/test_data_files.py
 
