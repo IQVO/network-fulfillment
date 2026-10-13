@@ -54,6 +54,10 @@ func NewAnalyticsPublisher(brokers []string, newId func() string) *AnalyticsPubl
 			Addr:                   kafkago.TCP(brokers...),
 			Balancer:               &kafkago.Hash{},
 			AllowAutoTopicCreation: true,
+			// RequiredAcks: see NewPublisher — kafka-go's RequireNone
+			// default would let the outbox relay mark unstored rows
+			// published; RequireAll + synchronous returns the error.
+			RequiredAcks: kafkago.RequireAll,
 		},
 		NewId: newId,
 	}

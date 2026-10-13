@@ -117,6 +117,12 @@ func NewPublisher(brokers []string, newId func() string) *Publisher {
 			Addr:                   kafkago.TCP(brokers...),
 			Balancer:               &kafkago.Hash{},
 			AllowAutoTopicCreation: true,
+			// RequiredAcks: kafka-go defaults to RequireNone (acks=0):
+			// WriteMessages returns nil without the broker confirming, so
+			// the outbox relay would mark rows published that the broker
+			// never stored. RequireAll + a synchronous writer (no Async)
+			// returns a failed write to the relay/caller.
+			RequiredAcks: kafkago.RequireAll,
 		},
 		NewId: newId,
 	}

@@ -178,22 +178,34 @@ func NewAnalyticsConsumer(brokers []string, topic, groupID string, projection re
 		Processed:  processed,
 		Atomic:     atomic,
 		Logger:     logger,
-		dlqWriter: &kafkago.Writer{
-			Addr:  kafkago.TCP(brokers...),
-			Topic: topic + dlqTopicSuffix,
-			// Hash (not the zero-value default, RoundRobin — see
-			// kafka-go's Writer.Config, which defaults Balancer to
-			// RoundRobin when nil): dlqPublish forwards the SAME
-			// aggregate key the source message carried (msg.Key,
-			// below), specifically so a manual replay tool can process
-			// one partition's dead letters without interleaving
-			// unrelated aggregates and, if it replays in offset order,
-			// preserve each aggregate's original relative event order.
-			// RoundRobin would scatter one aggregate's dead-lettered
-			// events across the DLQ topic's partitions despite the key
-			// being set, defeating that. See ADR 0005.
-			Balancer: &kafkago.Hash{},
-		},
+		dlqWriter:  newDLQWriter(brokers, topic+dlqTopicSuffix),
+	}
+}
+
+// newDLQWriter builds the dead-letter writer for dlqTopic.
+func newDLQWriter(brokers []string, dlqTopic string) *kafkago.Writer {
+	return &kafkago.Writer{
+		Addr:  kafkago.TCP(brokers...),
+		Topic: dlqTopic,
+		// Hash (not the zero-value default, RoundRobin — see
+		// kafka-go's Writer.Config, which defaults Balancer to
+		// RoundRobin when nil): dlqPublish forwards the SAME
+		// aggregate key the source message carried (msg.Key,
+		// below), specifically so a manual replay tool can process
+		// one partition's dead letters without interleaving
+		// unrelated aggregates and, if it replays in offset order,
+		// preserve each aggregate's original relative event order.
+		// RoundRobin would scatter one aggregate's dead-lettered
+		// events across the DLQ topic's partitions despite the key
+		// being set, defeating that. See ADR 0005.
+		Balancer: &kafkago.Hash{},
+		// RequiredAcks: kafka-go defaults to RequireNone (acks=0), so a
+		// broker blip or leader move would silently drop the poison
+		// message while WriteMessages returns nil and the offset is
+		// committed as if it had been dead-lettered. RequireAll waits for
+		// every in-sync replica; the writer stays synchronous so a failed
+		// dead-letter write reaches the consumer.
+		RequiredAcks: kafkago.RequireAll,
 	}
 }
 
