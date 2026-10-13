@@ -29,6 +29,10 @@ inside the cluster, like every context in the fleet.
     `POLL_INTERVAL` and `SWEEP_INTERVAL`. A malformed value falls back to the
     default, but a **zero or negative value is accepted** and is then handed to
     `time.NewTicker`, which panics. Always set these to a positive duration.
+- **Integers**: `envInt` (`cmd/netfulfil/config.go`) is used for
+  `OUTBOX_MAX_ATTEMPTS`. `0` is valid; a malformed or negative value logs a
+  WARN (`invalid integer env var, using default`) and falls back to the
+  default.
 - **Booleans**: only `CAPABILITY_OFFER_ENABLED` is boolean. It is `true` only
   for the string `true` (case-insensitive, surrounding spaces trimmed).
 - **`EVENT_PUBLISHER`** is compared exactly: only the lower-case string
@@ -57,6 +61,7 @@ relay all run in this one process. Its env surface lives in
 | `EVENT_PUBLISHER` | unset (log) | no | `kafka` publishes every domain event to both topics. With `DATABASE_URL` set this goes through the transactional outbox and starts the relay (ADR 0003); without it both topics are written directly. Anything else logs events only. | `cmd/netfulfil/publishing.go` (`wireEventPublisher`) |
 | `KAFKA_BROKERS` | `localhost:9092` | when Kafka is used | Comma-separated broker list for the two publishers and the two capability-offer caches. The caches read their start-up offsets from the first broker only. | `cmd/netfulfil/config.go` (`kafkaBrokers`), `internal/adapters/outbound/processpathcache/consumer.go` |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | no | Sleep between outbox relay passes that found nothing to publish (outbox mode only). A full batch of 100 is followed immediately by another pass. | `cmd/netfulfil/publishing.go`, `internal/adapters/outbound/postgres/outbox_relay.go` |
+| `OUTBOX_MAX_ATTEMPTS` | `20` | no | Outbox relay attempt cap (ADR 0021, outbox mode only). A row that has failed this many sends is excluded from the relay's claims and logged at ERROR; it stays in `outbox_events` until re-armed with `UPDATE outbox_events SET attempts = 0 WHERE id = ...` ([runbook](./runbook.md#an-outbox-row-hit-the-attempt-cap)). `0` = unlimited (one poison row then blocks every later row forever). An invalid or negative value logs a WARN and uses `20`. | `cmd/netfulfil/config.go` (`outboxMaxAttempts`, `envInt`), `cmd/netfulfil/publishing.go` |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5188` | no | Comma-separated browser origins. Methods `GET`, `POST`, `OPTIONS`; headers `Content-Type`, `Authorization`; no credentials; preflight cached 300 s. | `internal/adapters/inbound/http/server.go` (`corsMiddleware`) |
 | `CAPABILITY_OFFER_ENABLED` | `false` | no | `true` wires the CapabilityOffer pipeline: the two Kafka caches, the inventory-storage client, the `RECOMPUTE_INTERVAL` ticker and `GET /capability-offers`. Boot then blocks until both caches have replayed their topic (one shared wait of 120 s, the sum of the two caches' 60 s `WaitReadyTimeout`s). | `cmd/netfulfil/config.go`, `cmd/netfulfil/capability.go` |
 | `SITE_ID` | `site-1` | no | The single site capability offers are computed for (the CPT schedule is looked up by this id). | `cmd/netfulfil/config.go` (`siteId`) |
@@ -66,9 +71,10 @@ relay all run in this one process. Its env surface lives in
 | `OTEL_SERVICE_NAME` | `network-fulfillment` | no | `service.name` resource attribute. | `cmd/netfulfil/main.go` |
 | `SERVICE_VERSION` | `dev` | no | `service.version` resource attribute. The chart sets it to the image tag. | `cmd/netfulfil/main.go` |
 | `ENVIRONMENT` | `local` | no | `deployment.environment.name` resource attribute. | `internal/adapters/outbound/telemetry/telemetry.go` (`Environment`) |
+| `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn`/`warning` or `error` (case-insensitive); anything else is `info`. Same vocabulary in all four binaries. | `cmd/netfulfil/config.go` (`newLogger`) |
 
-The process logs JSON to stdout at the default `slog` level (Info). It has no
-`LOG_LEVEL` variable.
+The process logs JSON to stdout at the level `LOG_LEVEL` names (see the row
+below).
 
 ## `cmd/mcp` (the MCP server)
 
@@ -83,6 +89,7 @@ for the tool list.
 | `MIGRATIONS_DATABASE_URL` | value of `DATABASE_URL` | no | Direct DSN for the migration step this binary also runs at startup (ADR 0007). Unlike `netfulfil`, this step is **not retried**. | `cmd/mcp/main.go` |
 | `MIGRATIONS_PATH` | `/app/migrations` | no | OLTP migrations directory. | `cmd/mcp/main.go` |
 | `REPORTS_BASE_URL` | unset | no | Base URL of `netfulfil-reports`. Unset: the `get_acknowledgement_report` tool is not registered. The chart fills it in with the in-cluster reports Service when `analytics.enabled=true`. | `cmd/mcp/main.go` |
+| `LOG_LEVEL` | `info` | no | Same values as `netfulfil`. | `cmd/mcp/main.go` (`newLogger`) |
 
 `list_capability_offers` is always registered by this binary: it reads the
 `capability_offers` table, which stays empty unless `netfulfil` runs with
@@ -125,7 +132,7 @@ These look like knobs but are compiled in. Changing them is a code change.
 | order-management breaker | trips on 5 consecutive failures, or >50 % failures over at least 10 requests in a 30 s window; open for 30 s; 1 half-open probe | `internal/resilience/breaker.go` |
 | order-management call timeout | 30 s cap per call (`resilience.DefaultTimeout`), inside a 10 s `http.Client` timeout | `internal/adapters/outbound/ordermanagement/breaker.go`, `planner.go` |
 | inventory-storage call timeout | 10 s `http.Client` timeout | `internal/adapters/outbound/inventoryclient/client.go` |
-| Outbox relay batch | 100 rows per pass | `internal/adapters/outbound/postgres/outbox_relay.go` |
+| Outbox relay batch | 100 rows per pass (the attempt cap is configurable: `OUTBOX_MAX_ATTEMPTS`) | `internal/adapters/outbound/postgres/outbox_relay.go` |
 | Cache replay wait | 60 s per cache, applied as one 120 s deadline for both | `processpathcache.WaitReadyTimeout`, `pathcapacitycache.WaitReadyTimeout`, `cmd/netfulfil/capability.go` (`waitCachesReady`) |
 | OTel metric push | every 30 s | `internal/adapters/outbound/telemetry/telemetry.go` |
 | Graceful shutdown budget | 10 s | `cmd/netfulfil/shutdown.go`, and each other `main.go` |
@@ -147,6 +154,7 @@ values key (`CAPABILITY_OFFER_ENABLED`, `SITE_ID`, `RECOMPUTE_INTERVAL`,
 | `config.sweepInterval` | `SWEEP_INTERVAL` | api |
 | `config.corsAllowedOrigins` | `CORS_ALLOWED_ORIGINS` | api |
 | `config.eventPublisher` | `EVENT_PUBLISHER` | api |
+| `config.outboxMaxAttempts` | `OUTBOX_MAX_ATTEMPTS` (ConfigMap and env) | api |
 | `kafka.enabled` + `kafka.brokers` | `KAFKA_BROKERS` | api, projector |
 | `database.existingSecret` / `database.url` | `DATABASE_URL`, `MIGRATIONS_DATABASE_URL` (optional key) | api, mcp |
 | `productTranslation.mappings` | `PRODUCT_TRANSLATION_FILE=/etc/network-fulfillment/products.json` | api |

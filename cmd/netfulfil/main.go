@@ -51,7 +51,7 @@ type infra struct {
 // when run returns, after serve's graceful shutdown has stopped every
 // goroutine touching the pool.
 func run() int {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := newLogger(getenv("LOG_LEVEL", "info"))
 
 	// OTLP trace + metric export and Go runtime metrics (ADR 0019). Never
 	// blocks on the Collector. MUST run before wireAPI/Routes(): otelchi

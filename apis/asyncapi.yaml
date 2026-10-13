@@ -28,7 +28,11 @@ info:
     other envelope. All of `specversion`, `id`, `source`, `type`, `subject`,
     `time`, `datacontenttype` and `dataschema` are REQUIRED. W3C trace
     context, when present, travels in Kafka headers, never as extension
-    attributes. The Kafka message key is the network order reference
+    attributes: an event written through the transactional outbox inside a
+    span carries that span's `traceparent` (and `tracestate` / `baggage`
+    when present), stored with the outbox row and sent by the relay
+    (ADR 0022). Consumers may extract these headers and must not require
+    them. The Kafka message key is the network order reference
     (`networkRef`, identical to `subject`), so every event for one order
     lands on the same partition.
 
@@ -658,10 +662,15 @@ components:
           enum: ["application/cloudevents+json; charset=UTF-8"]
         traceparent:
           type: string
-          description: W3C trace context, when the producer propagates one.
+          description: |
+            W3C trace context of the span that wrote the event (outbox
+            mode, ADR 0022), when there was one. Optional.
         tracestate:
           type: string
-          description: W3C trace state, when present.
+          description: W3C trace state, when present. Optional.
+        baggage:
+          type: string
+          description: W3C baggage, when the writing request carried any. Optional.
 
     CloudEvent:
       type: object
