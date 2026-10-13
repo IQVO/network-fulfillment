@@ -16,12 +16,11 @@
 // legacy shape.
 //
 // ADR 0004 (ported from order-management's ADR 0025) adds in-process
-// retry and a dead-letter topic here — see handleMessage's doc comment
-// for the two-phase retry split this consumer needs that
-// order-management's RepromiseConsumer does not, because this
-// consumer's dedupe gate (ProcessedEvents.MarkProcessed) is a separate,
-// non-transactional call rather than one committed atomically with the
-// projection write.
+// retry and a dead-letter topic here. ADR 0023 makes the dedupe claim
+// (ProcessedEvents.MarkProcessed) and the projection write commit in ONE
+// analytics transaction (UnitOfWork), so the whole claim+apply step is
+// retried as a unit — exactly like order-management's RepromiseConsumer —
+// and a process stop between the two can no longer lose the update.
 package kafka
 
 import (
@@ -56,9 +55,9 @@ const AnalyticsConsumerGroupPrefix = "network-fulfillment-analytics"
 // free.
 const dlqTopicSuffix = ".dlq"
 
-// maxHandlerAttempts bounds each retried phase (markProcessed, apply) in
-// handleMessage: 1 initial attempt plus up to 2 retries, matching the
-// reference's "up to 3" bound.
+// maxHandlerAttempts bounds the retried claim+apply step in handleMessage:
+// 1 initial attempt plus up to 2 retries, matching the reference's "up to 3"
+// bound.
 const maxHandlerAttempts = 3
 
 const (
@@ -85,6 +84,25 @@ func NewUniqueConsumerGroup(prefix string) string {
 // it.
 type ProcessedEvents interface {
 	MarkProcessed(ctx context.Context, eventId string) (bool, error)
+}
+
+// UnitOfWork runs fn in ONE analytics transaction that both
+// ProcessedEvents.MarkProcessed and the ProjectionStore join through ctx
+// (ADR 0023): the claim and the projection write commit together or not at
+// all. Declared here for the same reason as ProcessedEvents; the
+// analyticsstore UnitOfWork implements it.
+type UnitOfWork interface {
+	Execute(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
+// passthroughUnitOfWork runs fn directly. It is only the fallback for a
+// consumer built without a UnitOfWork (the in-memory fakes unit tests use,
+// which have no transaction to share); production wiring always passes
+// analyticsstore.NewUnitOfWork.
+type passthroughUnitOfWork struct{}
+
+func (passthroughUnitOfWork) Execute(ctx context.Context, fn func(ctx context.Context) error) error {
+	return fn(ctx)
 }
 
 // The full CloudEvents `type` strings this consumer's projection handles.
@@ -120,11 +138,15 @@ type AnalyticsConsumer struct {
 	Reader     *kafkago.Reader
 	Projection report.ProjectionStore
 	Processed  ProcessedEvents
-	Logger     *slog.Logger
+	// Atomic brackets MarkProcessed + the projection apply in one
+	// transaction (ADR 0023). nil falls back to passthroughUnitOfWork
+	// (unit tests with in-memory fakes only).
+	Atomic UnitOfWork
+	Logger *slog.Logger
 	// dlqWriter publishes a poison message (ADR 0004 §DLQ) to
 	// topic+dlqTopicSuffix after maxHandlerAttempts in-process retries
-	// of a phase (markProcessed or apply) all fail with a genuine
-	// infrastructure error. nil in a zero-value AnalyticsConsumer some
+	// of the claim+apply step all fail with a genuine infrastructure
+	// error. nil in a zero-value AnalyticsConsumer some
 	// existing unit tests construct directly (they call HandleMessage
 	// directly and never reach the DLQ path) — dlqPublish itself guards
 	// against a nil writer so those tests keep compiling unchanged.
@@ -134,8 +156,9 @@ type AnalyticsConsumer struct {
 // NewAnalyticsConsumer constructs an AnalyticsConsumer reading topic from
 // brokers under groupID (see NewUniqueConsumerGroup). The dead-letter
 // topic is always derived as topic+dlqTopicSuffix, so an isolated test
-// topic/group gets its own isolated DLQ topic for free.
-func NewAnalyticsConsumer(brokers []string, topic, groupID string, projection report.ProjectionStore, processed ProcessedEvents, logger *slog.Logger) *AnalyticsConsumer {
+// topic/group gets its own isolated DLQ topic for free. atomic is the
+// analytics UnitOfWork both processed and projection join (ADR 0023).
+func NewAnalyticsConsumer(brokers []string, topic, groupID string, projection report.ProjectionStore, processed ProcessedEvents, atomic UnitOfWork, logger *slog.Logger) *AnalyticsConsumer {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -153,6 +176,7 @@ func NewAnalyticsConsumer(brokers []string, topic, groupID string, projection re
 		Reader:     reader,
 		Projection: projection,
 		Processed:  processed,
+		Atomic:     atomic,
 		Logger:     logger,
 		dlqWriter: &kafkago.Writer{
 			Addr:  kafkago.TCP(brokers...),
@@ -212,18 +236,16 @@ func (c *AnalyticsConsumer) Close() error {
 
 // handleMessage decodes/filters msg (a message that is not a valid
 // CloudEvent is a permanent failure: dead-lettered immediately with no
-// retry; an unrecognized `type` is silently committed past), then retries the mark-processed and
-// projection-apply phases INDEPENDENTLY, each up to maxHandlerAttempts.
+// retry; an unrecognized `type` is silently committed past), then retries
+// the claim+apply step as ONE unit, up to maxHandlerAttempts.
 //
-// The two phases are retried SEPARATELY, unlike order-management's
-// RepromiseConsumer (which retries its whole handler as one unit,
-// because its dedupe gate commits atomically with the state change it
-// guards). This consumer's ProcessedEvents.MarkProcessed is a plain,
-// separate call: if it succeeds and is then followed by an Apply
-// failure, retrying the WHOLE handler from the top would call
-// MarkProcessed again, see the event already marked, and skip Apply
-// entirely — silently losing the projection update. Retrying only the
-// phase that actually failed avoids that trap.
+// Retrying the whole step is safe because MarkProcessed and the projection
+// write share one analytics transaction (ADR 0023, amending ADR 0004 §6):
+// a failed or interrupted attempt rolls the claim back together with the
+// write, so the next attempt — or the redelivery after a process stop —
+// sees the event as new and applies it exactly once. Cancellation is never
+// dead-lettered: the offset stays uncommitted and the message is
+// redelivered on the next start.
 func (c *AnalyticsConsumer) handleMessage(ctx context.Context, msg kafkago.Message) error {
 	topic := c.Reader.Config().Topic
 
@@ -242,30 +264,19 @@ func (c *AnalyticsConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 		return c.commit(ctx, msg)
 	}
 
-	isNew, err := c.markProcessedWithRetry(ctx, env.ID())
-	if err != nil {
+	if err := c.claimAndApplyWithRetry(ctx, env); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err() // shutting down: never dead-letter a message only cancellation interrupted
 		}
-		return c.deadLetter(ctx, msg, topic, env, "mark_processed", err)
-	}
-	if !isNew {
-		return c.commit(ctx, msg)
-	}
-
-	if err := c.applyWithRetry(ctx, env); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err() // shutting down: never dead-letter a message only cancellation interrupted
-		}
-		return c.deadLetter(ctx, msg, topic, env, "apply", err)
+		return c.deadLetter(ctx, msg, topic, env, "claim_and_apply", err)
 	}
 	return c.commit(ctx, msg)
 }
 
-// deadLetter logs and publishes msg to the dead-letter topic after a
-// phase has exhausted its retries, then commits the offset regardless —
-// one poison message must never block every other event on this
-// partition.
+// deadLetter logs and publishes msg to the dead-letter topic after the
+// claim+apply step has exhausted its retries, then commits the offset
+// regardless — one poison message must never block every other event on
+// this partition.
 func (c *AnalyticsConsumer) deadLetter(ctx context.Context, msg kafkago.Message, topic string, env ce.Event, phase string, cause error) error {
 	c.log(ctx, "analytics: exhausted retries, sending to dead-letter topic",
 		"topic", topic, "dlq_topic", topic+dlqTopicSuffix, "phase", phase,
@@ -276,28 +287,11 @@ func (c *AnalyticsConsumer) deadLetter(ctx context.Context, msg kafkago.Message,
 	return c.commit(ctx, msg)
 }
 
-// markProcessedWithRetry retries Processed.MarkProcessed with jittered
-// exponential backoff, bounded to maxHandlerAttempts total attempts and
-// to ctx's own deadline/cancellation. Safe to retry as a whole: an
-// erroring call never marks the event (only a SUCCESSFUL call can), so
-// re-attempting after a failure cannot double-mark or skip anything.
-func (c *AnalyticsConsumer) markProcessedWithRetry(ctx context.Context, eventId string) (bool, error) {
-	policy := backoff.NewExponentialBackOff(
-		backoff.WithInitialInterval(retryInitialInterval),
-		backoff.WithMaxInterval(retryMaxInterval),
-	)
-	bounded := backoff.WithContext(backoff.WithMaxRetries(policy, maxHandlerAttempts-1), ctx)
-
-	return backoff.RetryNotifyWithData(func() (bool, error) {
-		return c.Processed.MarkProcessed(ctx, eventId)
-	}, bounded, nil)
-}
-
-// applyWithRetry retries the projection-apply step (decode of the
-// event-specific payload plus the matching Projection.Apply* call) with
-// jittered exponential backoff, bounded exactly like
-// markProcessedWithRetry.
-func (c *AnalyticsConsumer) applyWithRetry(ctx context.Context, env ce.Event) error {
+// claimAndApplyWithRetry retries claimAndApply with jittered exponential
+// backoff, bounded to maxHandlerAttempts total attempts and to ctx's own
+// deadline/cancellation. Safe to retry as a whole: every failed attempt
+// rolled its claim back (ADR 0023).
+func (c *AnalyticsConsumer) claimAndApplyWithRetry(ctx context.Context, env ce.Event) error {
 	policy := backoff.NewExponentialBackOff(
 		backoff.WithInitialInterval(retryInitialInterval),
 		backoff.WithMaxInterval(retryMaxInterval),
@@ -305,8 +299,33 @@ func (c *AnalyticsConsumer) applyWithRetry(ctx context.Context, env ce.Event) er
 	bounded := backoff.WithContext(backoff.WithMaxRetries(policy, maxHandlerAttempts-1), ctx)
 
 	return backoff.Retry(func() error {
-		return c.applyProjection(ctx, env)
+		return c.claimAndApply(ctx, env)
 	}, bounded)
+}
+
+// claimAndApply claims env's CloudEvents id and, when the claim is new,
+// applies the projection — both inside ONE analytics transaction. A
+// redelivery of an already-applied event is a committed no-op.
+func (c *AnalyticsConsumer) claimAndApply(ctx context.Context, env ce.Event) error {
+	return c.unitOfWork().Execute(ctx, func(ctx context.Context) error {
+		isNew, err := c.Processed.MarkProcessed(ctx, env.ID())
+		if err != nil {
+			return fmt.Errorf("analytics: mark processed: %w", err)
+		}
+		if !isNew {
+			return nil
+		}
+		return c.applyProjection(ctx, env)
+	})
+}
+
+// unitOfWork returns the configured analytics UnitOfWork, or the
+// passthrough fallback for a consumer built without one.
+func (c *AnalyticsConsumer) unitOfWork() UnitOfWork {
+	if c.Atomic == nil {
+		return passthroughUnitOfWork{}
+	}
+	return c.Atomic
 }
 
 // dlqPublish writes the raw, unmodified message payload plus error
@@ -366,8 +385,7 @@ func decodeAnalyticsEvent(raw []byte) (ce.Event, bool, error) {
 
 // applyProjection decodes env's payload (DataAs) and applies the matching
 // projection method, using the CloudEvents `id` and `time` attributes.
-// Retried independently of MarkProcessed — see handleMessage's doc
-// comment for why.
+// Always called inside claimAndApply's transaction.
 func (c *AnalyticsConsumer) applyProjection(ctx context.Context, env ce.Event) error {
 	var data analyticsEventData
 	if err := env.DataAs(&data); err != nil {
@@ -399,11 +417,10 @@ func (c *AnalyticsConsumer) applyProjection(ctx context.Context, env ce.Event) e
 	}
 }
 
-// HandleMessage decodes raw as a CloudEvent and applies the matching
-// projection method for its `type` — a thin, non-retrying wrapper around
-// decodeAnalyticsEvent/applyProjection/MarkProcessed, used by unit tests
-// that do not need Run's retry/DLQ machinery (which needs a real
-// *kafkago.Reader/Message). A message that is not a valid CloudEvent
+// HandleMessage decodes raw as a CloudEvent and claims+applies it in one
+// analytics transaction (claimAndApply) — a thin, non-retrying wrapper used
+// by unit tests that do not need Run's retry/DLQ machinery (which needs a
+// real *kafkago.Reader/Message). A message that is not a valid CloudEvent
 // returns an error wrapping cloudevents.ErrNotCloudEvent.
 func (c *AnalyticsConsumer) HandleMessage(ctx context.Context, raw []byte) error {
 	env, recognized, err := decodeAnalyticsEvent(raw)
@@ -413,14 +430,5 @@ func (c *AnalyticsConsumer) HandleMessage(ctx context.Context, raw []byte) error
 	if !recognized {
 		return nil
 	}
-
-	isNew, err := c.Processed.MarkProcessed(ctx, env.ID())
-	if err != nil {
-		return fmt.Errorf("analytics: mark processed: %w", err)
-	}
-	if !isNew {
-		return nil
-	}
-
-	return c.applyProjection(ctx, env)
+	return c.claimAndApply(ctx, env)
 }

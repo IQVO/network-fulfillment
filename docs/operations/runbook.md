@@ -191,8 +191,13 @@ pile up on the broker; they hold no partitions and can be deleted.
 - **Analytics consumer** (`internal/adapters/inbound/kafka/analytics_consumer.go`):
   a message that is not a valid CloudEvent goes to
   `warehouse.network-fulfillment.analytics.dlq` immediately. A recognised event
-  whose dedupe step or projection fails 3 times (backoff from 100 ms, max 2 s)
-  also goes there. The DLQ message keeps the original key, value and headers
+  whose claim+apply step fails 3 times (backoff from 100 ms, max 2 s) also goes
+  there; the log line carries `phase=claim_and_apply`. The dedupe claim
+  (`analytics_consumed_events`) and the projection write commit in one
+  analytics transaction ([ADR 0023](../adr/0023-analytics-claim-and-apply-in-one-transaction.md)),
+  so a failed attempt or a projector stop leaves no claim behind and the
+  redelivered message is applied exactly once. A shutdown is never
+  dead-lettered. The DLQ message keeps the original key, value and headers
   and adds `x-dlq-source-topic`, `x-dlq-error` and `x-dlq-failed-at`. The
   offset is committed either way, so one poison message never blocks the
   partition. Unknown event types are skipped and committed.

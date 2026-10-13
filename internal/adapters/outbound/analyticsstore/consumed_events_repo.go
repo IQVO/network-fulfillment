@@ -21,9 +21,11 @@ func NewConsumedEventsRepo(pool *pgxpool.Pool) *ConsumedEventsRepo {
 }
 
 // MarkProcessed records eventId in analytics_consumed_events if absent,
-// returning true iff this call newly recorded it.
+// returning true iff this call newly recorded it. Inside a UnitOfWork it
+// joins that transaction (ADR 0023), so a rolled-back projection write
+// rolls this claim back with it.
 func (r *ConsumedEventsRepo) MarkProcessed(ctx context.Context, eventId string) (bool, error) {
-	tag, err := r.pool.Exec(ctx,
+	tag, err := querierFrom(ctx, r.pool).Exec(ctx,
 		`INSERT INTO analytics_consumed_events (event_id) VALUES ($1) ON CONFLICT (event_id) DO NOTHING`,
 		eventId)
 	if err != nil {

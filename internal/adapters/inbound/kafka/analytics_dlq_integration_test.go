@@ -147,6 +147,7 @@ func TestAnalyticsConsumer_PoisonMessage_GoesToDeadLetterTopicWithoutBlockingPar
 		projection,
 		failingProcessed,
 		nil,
+		nil,
 	)
 	defer func() { _ = consumer.Close() }()
 
@@ -332,7 +333,7 @@ func TestAnalyticsConsumer_LegacyFlatMessage_DeadLetteredWithoutBlockingPartitio
 	projection := &syncFakeProjection{}
 	consumer := inboundkafka.NewAnalyticsConsumer(brokers, topic,
 		fmt.Sprintf("network-fulfillment-analytics-legacy-itest-%d", time.Now().UnixNano()),
-		projection, processed, nil)
+		projection, processed, nil, nil)
 	defer func() { _ = consumer.Close() }()
 
 	consumeCtx, consumeCancel := context.WithCancel(ctx)

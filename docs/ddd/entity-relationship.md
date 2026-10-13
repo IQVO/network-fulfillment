@@ -135,7 +135,8 @@ are no foreign keys in this database.
 
 **All tables here are analytics/projection or infrastructure tables.**
 They are derived from the analytics event stream and are not a source of
-truth. `analytics_consumed_events` is the consumer's dedupe gate.
+truth. `analytics_consumed_events` is the consumer's dedupe gate; it is
+written in the same transaction as the projection write (ADR 0023).
 `analytics_processed_events` is claimed by the projection upsert and
 drives freshness. `acknowledgement_rollup` is the report fact table.
 

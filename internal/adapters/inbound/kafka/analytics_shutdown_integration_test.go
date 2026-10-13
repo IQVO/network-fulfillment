@@ -83,6 +83,7 @@ func TestAnalyticsConsumer_ShutdownMidHandle_IsCleanAndDeadLettersNothing(t *tes
 		projection,
 		newSyncFakeProcessed(),
 		nil,
+		nil,
 	)
 	defer func() { _ = consumer.Close() }()
 

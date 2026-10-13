@@ -136,7 +136,8 @@ func TestAnalyticsProjector_AcknowledgedV1ReplayAndV2Settle_KafkaAndPostgres(t *
 		t.Helper()
 		consumer := inboundkafka.NewAnalyticsConsumer(brokers, topic,
 			inboundkafka.NewUniqueConsumerGroup("network-fulfillment-analytics-v2-itest-"+label),
-			analyticsstore.NewPostgresProjection(pool), analyticsstore.NewConsumedEventsRepo(pool), nil)
+			analyticsstore.NewPostgresProjection(pool), analyticsstore.NewConsumedEventsRepo(pool),
+			analyticsstore.NewUnitOfWork(pool), nil)
 		defer func() { _ = consumer.Close() }()
 		runCtx, stop := context.WithCancel(ctx)
 		done := make(chan error, 1)
