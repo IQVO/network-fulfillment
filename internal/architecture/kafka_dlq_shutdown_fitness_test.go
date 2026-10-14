@@ -26,10 +26,13 @@ package architecture
 //     context.X(...) call): talking to the broker needs one, so builders such as
 //     newDLQWriter(brokers, topic) or DeadLetterTopic(topic) are not sends.
 //
-//     A function whose own name matches the pattern (deadLetter, dlqPublish,
-//     writeDLQ, a func literal bound to a dlq-named variable or field) IS a
-//     dead-letter function: the sends inside it are delegated, and the guard
-//     belongs to its callers, which this sensor checks because calling it is a
+//     A function whose own name or receiver type matches the pattern
+//     (deadLetter, dlqPublish, writeDLQ, deadLetterSink.send, a func literal
+//     bound to a dlq-named variable or field) IS a dead-letter function: the
+//     sends inside it are delegated, and the guard belongs to its callers,
+//     which this sensor checks because calling it is a send. A dead-letter
+//     function of the same package that checks cancellation ITSELF (the shared
+//     consumeLoop.handleWithDeadLetter) is the decider: calling it is not a
 //     send. Known blind spot: a guard anywhere in the deciding function passes
 //     it (the sensor does not prove the guard dominates the call).
 //   - TestDeadLetterShutdownSensorBites proves the detector flags the pre-#89
@@ -101,9 +104,12 @@ func dlqsCalleeIsDeadLetter(call *ast.CallExpr) bool {
 	return dlqsPattern.MatchString(dlqsNameOf(call.Fun))
 }
 
-// dlqsIsSend reports whether call is a dead-letter send (see the file comment).
-func dlqsIsSend(call *ast.CallExpr) bool {
-	if !dlqsCalleeIsDeadLetter(call) {
+// dlqsIsSend reports whether call is a dead-letter send (see the file
+// comment). A call to a guarded decider (a dead-letter function of this
+// package that checks cancellation itself) is not: the callee already
+// refuses to dead-letter a cancelled message.
+func dlqsIsSend(call *ast.CallExpr, deciders map[string]bool) bool {
+	if !dlqsCalleeIsDeadLetter(call) || deciders[dlqsNameOf(call.Fun)] {
 		return false
 	}
 	for _, a := range call.Args {
@@ -181,13 +187,13 @@ func dlqsAnnotatedLines(fset *token.FileSet, f *ast.File) map[int]bool {
 
 // dlqsSends returns every dead-letter send in body, skipping the bodies of
 // the given dead-letter func literals.
-func dlqsSends(body ast.Node, skip map[*ast.FuncLit]bool) []*ast.CallExpr {
+func dlqsSends(body ast.Node, skip map[*ast.FuncLit]bool, deciders map[string]bool) []*ast.CallExpr {
 	var out []*ast.CallExpr
 	ast.Inspect(body, func(n ast.Node) bool {
 		if lit, ok := n.(*ast.FuncLit); ok && skip[lit] {
 			return false
 		}
-		if call, ok := n.(*ast.CallExpr); ok && dlqsIsSend(call) {
+		if call, ok := n.(*ast.CallExpr); ok && dlqsIsSend(call, deciders) {
 			out = append(out, call)
 		}
 		return true
@@ -195,24 +201,74 @@ func dlqsSends(body ast.Node, skip map[*ast.FuncLit]bool) []*ast.CallExpr {
 	return out
 }
 
-// dlqsUnguardedSends returns how many dead-letter sends f contains (for the
-// vacuity check) and the file:line (function) of each unguarded,
-// unannotated one in a deciding function.
-func dlqsUnguardedSends(fset *token.FileSet, f *ast.File) (sends int, unguarded []string) {
-	annotated := dlqsAnnotatedLines(fset, f)
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Body == nil {
+// dlqsRecvTypeName returns the receiver's bare type name, or "".
+func dlqsRecvTypeName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) != 1 {
+		return ""
+	}
+	typ := fd.Recv.List[0].Type
+	if star, ok := typ.(*ast.StarExpr); ok {
+		typ = star.X
+	}
+	if id, ok := typ.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// dlqsIsDeadLetterFunc reports whether fd is itself a dead-letter function:
+// its name or its receiver type (deadLetterSink.send) matches the pattern.
+func dlqsIsDeadLetterFunc(fd *ast.FuncDecl) bool {
+	return dlqsPattern.MatchString(fd.Name.Name) || dlqsPattern.MatchString(dlqsRecvTypeName(fd))
+}
+
+// dlqsFuncs returns every function declaration with a body in files.
+func dlqsFuncs(files []*ast.File) []*ast.FuncDecl {
+	var out []*ast.FuncDecl
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
+				out = append(out, fd)
+			}
+		}
+	}
+	return out
+}
+
+// dlqsGuardedDeciders returns the names of the package's dead-letter
+// functions that check cancellation themselves (consumeLoop's
+// handleWithDeadLetter): their callers are not deciding anything.
+func dlqsGuardedDeciders(funcs []*ast.FuncDecl) map[string]bool {
+	out := map[string]bool{}
+	for _, fd := range funcs {
+		if dlqsIsDeadLetterFunc(fd) && dlqsHasGuard(fd.Body) {
+			out[fd.Name.Name] = true
+		}
+	}
+	return out
+}
+
+// dlqsUnguardedSends returns how many dead-letter sends the package made of
+// files contains (for the vacuity check) and the file:line (function) of
+// each unguarded, unannotated one in a deciding function.
+func dlqsUnguardedSends(fset *token.FileSet, files []*ast.File) (sends int, unguarded []string) {
+	annotated := map[string]bool{}
+	for _, f := range files {
+		for line := range dlqsAnnotatedLines(fset, f) {
+			annotated[fmt.Sprintf("%s:%d", fset.Position(f.Pos()).Filename, line)] = true
+		}
+	}
+	funcs := dlqsFuncs(files)
+	deciders := dlqsGuardedDeciders(funcs)
+	for _, fd := range funcs {
+		sends += len(dlqsSends(fd.Body, nil, deciders))
+		if dlqsIsDeadLetterFunc(fd) || dlqsHasGuard(fd.Body) {
 			continue
 		}
-		sends += len(dlqsSends(fd.Body, nil))
-		if dlqsPattern.MatchString(fd.Name.Name) || dlqsHasGuard(fd.Body) {
-			continue
-		}
-		for _, call := range dlqsSends(fd.Body, dlqsBoundLits(fd.Body)) {
-			line := fset.Position(call.Pos()).Line
-			if !annotated[line] && !annotated[line-1] {
-				unguarded = append(unguarded, fmt.Sprintf("%s (in %s)", fset.Position(call.Pos()), fd.Name.Name))
+		for _, call := range dlqsSends(fd.Body, dlqsBoundLits(fd.Body), deciders) {
+			pos := fset.Position(call.Pos())
+			if !annotated[fmt.Sprintf("%s:%d", pos.Filename, pos.Line)] && !annotated[fmt.Sprintf("%s:%d", pos.Filename, pos.Line-1)] {
+				unguarded = append(unguarded, fmt.Sprintf("%s (in %s)", pos, fd.Name.Name))
 			}
 		}
 	}
@@ -252,14 +308,18 @@ func TestDeadLetterCallsGuardCancellation(t *testing.T) {
 	if _, err := os.Stat(root); err != nil {
 		t.Skip("no internal/adapters/inbound/kafka in this repo: no consumer to check")
 	}
-	total := 0
+	fset := token.NewFileSet()
+	byDir := map[string][]*ast.File{}
 	for _, p := range dlqsSourceFiles(t, root) {
-		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, p, nil, parser.ParseComments)
 		if err != nil {
 			t.Fatalf("parse %s: %v", p, err)
 		}
-		sends, unguarded := dlqsUnguardedSends(fset, f)
+		byDir[filepath.Dir(p)] = append(byDir[filepath.Dir(p)], f)
+	}
+	total := 0
+	for _, files := range byDir {
+		sends, unguarded := dlqsUnguardedSends(fset, files)
 		total += sends
 		for _, pos := range unguarded {
 			t.Errorf("%s", deadLetterShutdownViolation(pos))
@@ -355,6 +415,26 @@ func (l *consumeLoop) run(ctx context.Context, m M) error {
 	if err := l.handle(ctx, m); err != nil { return l.deadLetter(ctx, m, err) }
 	return nil
 }`, 2, 1},
+		{"a self-guarded dead-letter decider makes its caller a non-decider", `package kafka
+import "context"
+func (l *consumeLoop) run(ctx context.Context) error {
+	for {
+		msg, err := l.reader.FetchMessage(ctx)
+		if err != nil { return err }
+		if err := l.handleWithDeadLetter(ctx, msg); err != nil { return err }
+	}
+}
+func (l *consumeLoop) handleWithDeadLetter(ctx context.Context, msg M) error {
+	err := l.handle(ctx, msg)
+	if err == nil { return nil }
+	if ctx.Err() != nil { return ctx.Err() }
+	return l.deadLetter(ctx, msg, err)
+}`, 1, 0},
+		{"a method of a dead-letter sink type is a dead-letter function", `package kafka
+import "context"
+func (d deadLetterSink) send(ctx context.Context, msg M, cause error) error {
+	return writeDLQ(ctx, d.writer, msg)
+}`, 1, 0},
 		{"builders and getters without a context are not sends", `package kafka
 func NewC(b []string, topic string) *C {
 	return &C{DLQ: newDLQWriter(b, topic+DLQSuffix), Topic: DeadLetterTopic(topic), sink: c.dlq()}
@@ -373,7 +453,7 @@ func TestDeadLetterShutdownSensorBites(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			sends, unguarded := dlqsUnguardedSends(fset, f)
+			sends, unguarded := dlqsUnguardedSends(fset, []*ast.File{f})
 			if sends != tc.wantSends || len(unguarded) != tc.wantUnguarded {
 				t.Fatalf("sends=%d unguarded=%v, want %d send(s) and %d unguarded", sends, unguarded, tc.wantSends, tc.wantUnguarded)
 			}
