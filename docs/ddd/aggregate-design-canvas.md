@@ -34,21 +34,29 @@ stateDiagram-v2
     REJECTED --> [*]
     CONFIRMED --> [*]
     note right of SUBMITTED
-        LinkLocalOrder allowed here and in ACKNOWLEDGED, once only
+        LinkLocalOrder allowed here and in ACKNOWLEDGED, the same id is a no-op
     end note
     note left of NEW
-        Acknowledge = Submit then ConfirmAcknowledgement, for tests and fixtures
+        RecordHold allowed here, once. Acknowledge = Submit then ConfirmAcknowledgement, for tests and fixtures
     end note
 ```
 
 Source: `internal/domain/networkorder/network_order.go` (`State` constants,
 `Submit`, `ConfirmAcknowledgement`, `Acknowledge`, `Reject`,
-`LinkLocalOrder`, `ConfirmShipment`); `migrations/0003_submitted_state.up.sql`
+`LinkLocalOrder`, `ConfirmShipment`), `internal/domain/networkorder/hold.go`
+(`RecordHold`, `SettleHold`, `HoldOrphaned`); `migrations/0003_submitted_state.up.sql`
 (`network_orders_state_check`).
 
 Omitted: `Rehydrate` (the repository's path back to any state, which
 bypasses invariants), and `AcknowledgementOverdue`, a query rather than a
 transition.
+
+The hold (the `order-management` order raised for the demand) has its own
+small lifecycle that is **orthogonal** to the state above (ADR 0024): it is
+recorded while the order is `NEW` (`RecordHold`), and later gets one outcome,
+`CANCELLED` or `ALREADY_RELEASED` (`SettleHold`), or none while it is open. A
+`NEW` and a `REJECTED` order can both carry an open or a settled hold, which is
+why it is not a state.
 
 ### 4. Enforced Invariants
 
@@ -59,27 +67,35 @@ transition.
 | Each line has a ref, a product id, a SKU and a positive quantity | `NewLine` → `ErrEmptyNetworkLineRef`, `ErrEmptyNetworkProductId`, `ErrUnknownProduct` (empty SKU), `ErrNonPositiveQuantity` |
 | Exactly one answer, in full | `Submit` (only from `NEW`), `Reject` (only from `NEW`/`SUBMITTED`) → `ErrAlreadyAnswered` |
 | Only a submitted answer can be confirmed | `ConfirmAcknowledgement` → `ErrNotSubmitted` |
-| No local work for demand we have not committed to | `LinkLocalOrder` → `ErrNotAcknowledged` (state must be `SUBMITTED`/`ACKNOWLEDGED`); also the DB `CHECK local_order_requires_answer` |
-| The local-order mapping is set once and never overwritten | `LinkLocalOrder` → `ErrLocalOrderAlreadyLinked` |
+| No local work is committed for demand we have not committed to | `LinkLocalOrder` → `ErrNotAcknowledged` (state must be `SUBMITTED`/`ACKNOWLEDGED`). The database `CHECK local_order_requires_answer` that used to repeat this was dropped by migration `0005`: the hold is now recorded earlier, on purpose |
+| The hold is recorded only while the order is unanswered, and is never overwritten | `RecordHold` → `ErrAlreadyAnswered` unless `NEW`; `ErrLocalOrderAlreadyLinked` for a different id; the same id is a no-op (order-management replays the same order for a retried raise). `LinkLocalOrder` is also a no-op for the same id |
+| A hold has at most one outcome, from a closed vocabulary, and needs a hold | `SettleHold` → `ErrNoHold`, `ErrUnknownHoldOutcome`, `ErrHoldAlreadySettled`; DB `CHECK`s `hold_outcome_vocabulary`, `hold_outcome_has_settled_at`, `hold_outcome_requires_hold` |
+| A hold is orphaned only past `acknowledgeBy` plus the grace, and only for `NEW` or `REJECTED` | `HoldOrphaned(now, grace)` (a query, the sweep's rule) |
 | No shipment confirmation before acknowledgement | `ConfirmShipment` → `ErrConfirmBeforeAcknowledge` |
 | `acknowledgeBy = receivedAt + 24h`, fixed at receipt | `Receive`/`ReceiveUntranslatable` compute it from `AcknowledgementWindow`; it is persisted and never recomputed |
 | The line set cannot be mutated from outside | `Lines()` returns a copy |
 | No network identifier crosses to `order-management` | `SKUQuantities()` returns only `map[SKU]int` |
+| Read surfaces show the hold only for an order we committed to | `CommittedLocalOrderId()` returns it only from `SUBMITTED` on; REST and MCP use it |
 
 ### 5. Corrective Policies
 
 - **Deadline sweep** (`SweepAcknowledgementDeadlines`): for every `NEW`
   order past `acknowledgeBy`, publish `AcknowledgementDeadlineAtRisk`. It
   never mutates the aggregate and re-fires on every pass.
-- **Reject overdue** (`RejectOverdueOrders`): cancel the held local order
-  if one is linked, then `Reject` with `ACKNOWLEDGEMENT_DEADLINE_MISSED`. It
-  never acknowledges late.
+- **Reject overdue** (`RejectOverdueOrders`): cancel the order-management hold
+  if one is recorded and still open, then `Reject` with
+  `ACKNOWLEDGEMENT_DEADLINE_MISSED`. It never acknowledges late.
+- **Orphaned-hold sweep** (`SweepOrphanedHolds`, ADR 0024): for a `NEW` or
+  `REJECTED` order whose hold is still open once `acknowledgeBy` plus
+  `ORPHAN_HOLD_GRACE` has passed, cancel it, record the outcome and publish
+  `OrphanedHoldCancelled`. It never changes the order's state.
 - **Reconciliation** (`ReconcileSubmittedOrders`): `SUCCESS` →
   `ConfirmAcknowledgement`, then release the hold. `FAILURE` → cancel the
-  hold, then `Reject` with `SUBMISSION_FAILED`. `PENDING` → retry on the
-  next pass.
-- **Idempotent receipt**: `ReceiveNetworkDemand` returns the existing order
-  for a known `NetworkRef`, so the poller's re-delivery is safe.
+  hold (and record its outcome), then `Reject` with `SUBMISSION_FAILED`.
+  `PENDING` → retry on the next pass.
+- **Idempotent receipt**: `ReceiveNetworkDemand` returns an answered (or
+  overdue) order for a known `NetworkRef` unchanged, so the poller's
+  re-delivery is safe, and **resumes** an unanswered one inside its window.
 - **Idempotent confirmation**: `ConfirmNetworkOrderShipment` returns an
   already-`CONFIRMED` order unchanged.
 
@@ -88,8 +104,10 @@ transition.
 | Command | Method | Issued by |
 | --- | --- | --- |
 | Receive demand | `Receive` / `ReceiveUntranslatable` | `ReceiveNetworkDemand` (poller) |
+| Record the hold | `RecordHold` | `ReceiveNetworkDemand.answer`, right after the raise |
 | Submit acceptance | `Submit` + `LinkLocalOrder` | `ReceiveNetworkDemand.acknowledge` |
 | Reject | `Reject` | `ReceiveNetworkDemand.reject`, `RejectOverdueOrders`, `ReconcileSubmittedOrders.fail` |
+| Settle the hold | `SettleHold` | `freeHold` (the three reject paths, outcome `CANCELLED`), `SweepOrphanedHolds` (`CANCELLED` or `ALREADY_RELEASED`) |
 | Confirm acknowledgement | `ConfirmAcknowledgement` | `ReconcileSubmittedOrders.confirm` |
 | Confirm shipment | `ConfirmShipment` | `ConfirmNetworkOrderShipment` (REST `POST .../shipment-confirmation`) |
 
@@ -107,6 +125,7 @@ from `internal/domain/shared/events.go`. Each is published as
 | `NetworkOrderRejected` | after every `Reject` (carries `reason`) | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` |
 | `NetworkOrderShipmentConfirmed` | after `ConfirmShipment` is saved | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` |
 | `AcknowledgementDeadlineAtRisk` | sweep, overdue `NEW` order (no transition) | `com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk` |
+| `OrphanedHoldCancelled` | after `SettleHold(CANCELLED)` by the orphaned-hold sweep is saved (no transition) | `com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled` |
 
 Every state transition that answers the network raises an event: `Submit`
 raises `NetworkOrderSubmitted`, `ConfirmAcknowledgement` raises
@@ -130,7 +149,9 @@ then lives until shipment confirmation (days) and stays as a terminal
 record. Event count per instance: **3–5** domain events (Received, then
 Submitted and Acknowledged (v2) on the happy path, or Rejected, possibly
 Rejected after a failed reconciliation, then ShipmentConfirmed), plus one `AcknowledgementDeadlineAtRisk` per sweep
-pass while the order is overdue.
+pass while the order is overdue, and at most one `OrphanedHoldCancelled` (once
+the hold has an outcome the sweep stops). The row also carries `hold_outcome`
+and `hold_settled_at`, both empty until the hold is settled.
 
 ## CapabilityOffer
 

@@ -165,6 +165,21 @@ config:
   # 0 = unlimited (one poison row blocks the relay forever).
   outboxMaxAttempts: 20
 
+  # Orphaned-hold sweep (ADR 0024, gap OM-0020). A demand this context cannot
+  # meet is HELD in order-management, which reserves real inventory and has no
+  # timeout of its own. If nothing decides the order (a failed cancel, a missed
+  # window) the sweep cancels that hold on the SWEEP_INTERVAL ticker once
+  # acknowledgeBy + orphanHoldGrace has passed, and reports
+  # OrphanedHoldCancelled.
+  #
+  # ON by default: a leaked hold is the worse failure. false turns the pass
+  # off (ORPHAN_HOLD_SWEEP_ENABLED); an unparseable value keeps it on.
+  orphanHoldSweepEnabled: true
+  # A Go duration added to acknowledgeBy (ORPHAN_HOLD_GRACE). It lets
+  # RejectOverdueOrders, on the same ticker, do its own work first, so the
+  # sweep is a backstop and never a second actor racing it. "0" means no grace.
+  orphanHoldGrace: "1h"
+
   # How often the network is polled. Inbound is a poll and nothing else
   # (ADR 0001 section 5), so this is the only thing that brings demand in.
   # Far below the 24h acknowledgement window on purpose: a slow or stopped

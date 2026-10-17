@@ -13,10 +13,10 @@ run each layer, and what every CI job in `.github/workflows/ci.yml` does.
 
 | Layer | Where | How many | Run with | Needs |
 | --- | --- | --- | --- | --- |
-| Unit (domain, use cases, adapters with fakes, `httptest`) | `internal/**/*_test.go`, `cmd/netfulfil/*_test.go` | 56 test files without a build tag (not counting the BDD and architecture files below) | `make test` | Go only |
-| BDD / acceptance (godog) | `features/*.feature`, step code in `features_*_test.go` at the repo root | 9 feature files, 76 `Scenario`/`Scenario Outline` blocks; 2 tagged `@known-bug` are excluded; the rest expand to 126 executed scenarios, 853 steps | `make bdd` | Go only |
-| Integration (testcontainers) | files with `//go:build integration` | 15 files | `make integration` | Docker |
-| Architecture fitness | `internal/architecture/` | 8 files, 19 `Test*` functions | `make arch-test` | Go only |
+| Unit (domain, use cases, adapters with fakes, `httptest`) | `internal/**/*_test.go`, `cmd/netfulfil/*_test.go` | 68 test files without a build tag (not counting the BDD and architecture files below) | `make test` | Go only |
+| BDD / acceptance (godog) | `features/*.feature`, step code in `features_*_test.go` at the repo root | 10 feature files, 83 `Scenario`/`Scenario Outline` blocks that expand to 135 executed scenarios, 951 steps; no scenario is tagged `@known-bug` any more | `make bdd` | Go only |
+| Integration (testcontainers) | files with `//go:build integration` | 20 files | `make integration` | Docker |
+| Architecture fitness | `internal/architecture/` | 11 files, 25 `Test*` functions | `make arch-test` | Go only |
 | Mutation | `gremlins` on `./internal/domain/networkorder` | thresholds in `.gremlins.yaml` | `make mutation` | `gremlins` v0.6.0 |
 | API contract lint | `apis/openapi.yaml` | Spectral, `.spectral.yaml` | CI `api-lint` only | Node 20 |
 | Chart tests | `charts/network-fulfillment/tests/*.py` | 2 scripts | CI `helm-lint` only | Helm, Python, PyYAML |
@@ -32,10 +32,27 @@ needed: the default build has the in-memory repositories, the stub gateway and
 fake ports. Notable suites:
 
 - `internal/domain/networkorder` and `internal/domain/capabilityoffer`: every
-  lifecycle transition and invariant, plus `ParseState`/`ParseBasis`.
+  lifecycle transition and invariant, plus `ParseState`/`ParseBasis`. For the
+  hold (ADR 0024): `network_order_hold_test.go` (`RecordHold`, `SettleHold`,
+  `HoldOrphaned` at every state and at the grace boundary) and
+  `network_order_committed_test.go` (`CommittedLocalOrderId`).
 - `internal/application/usecases`: each use case, including
   `failure_paths_test.go` (planner, gateway and repository failures),
-  `cycle_time_eligibility_test.go` (ADR 0017) and `events_test.go`.
+  `cycle_time_eligibility_test.go` (ADR 0017) and `events_test.go`. For ADR
+  0024: `sweep_orphaned_holds_test.go` (every order-management answer, the
+  grace, the outcome never marked done on a failure, one event per hold) and
+  `hold_recording_test.go` (the hold is recorded at raise; `freeHold` records
+  `CANCELLED` with the rejection).
+- `internal/adapters/outbound/ordermanagement/cancel_answers_test.go`: the
+  cancel's 404 and 409/422 become the two contract sentinels, and the breaker
+  counts them as answers, not failures.
+- `internal/adapters/inbound/{http,mcp}/hold_exposure_test.go`: `localOrderId`
+  stays absent for a `NEW` or `REJECTED` order even though the hold is recorded.
+- `cmd/netfulfil/orphan_hold_config_test.go`: `ORPHAN_HOLD_SWEEP_ENABLED` (on by
+  default, a typo keeps it on) and `ORPHAN_HOLD_GRACE` (`0` valid, negative or
+  malformed uses `1h`).
+- `internal/adapters/outbound/telemetry/orphan_hold_metrics_test.go`: the
+  `network_fulfillment.orphaned_holds.swept` counter and its `outcome` attribute.
 - `internal/adapters/outbound/kafka/wire_golden_test.go`: the CloudEvents wire
   shape of every event against `testdata/wire/{events,analytics}/*.json`.
 - `internal/adapters/outbound/events/testdata/log_publisher.golden`: the log
@@ -81,30 +98,26 @@ real `StubGateway` and running the real poller.
 | `capability_offers.feature` | 12 |
 | `inbound_status.feature` | 6 |
 | `integration_events.feature` | 5 |
-| `network_order_intake.feature` | 10 (1 `@known-bug`) |
+| `network_order_intake.feature` | 10 |
 | `network_order_queries.feature` | 7 |
 | `operations.feature` | 6 |
-| `shipment_confirmation.feature` | 6 (1 `@known-bug`) |
+| `orphaned_holds.feature` | 7 (ADR 0024: cancel after the window and grace, a 404 is done, a 409 is not an orphan and not retried, a failing cancel is retried and never marked done, `SUBMITTED` is never swept, `RejectOverdueOrders` frees a recorded hold first) |
+| `shipment_confirmation.feature` | 6 |
 
-`@known-bug` scenarios state the correct behaviour for a defect the suite
-found and are excluded until it is fixed. The test-only variable `BDD_TAGS`
-overrides the default filter `~@known-bug`:
-
-```bash
-BDD_TAGS=@known-bug go test . -run TestFeatures -v   # watch the two known bugs fail
-```
-
-The two excluded scenarios are described in
-[troubleshooting](../operations/troubleshooting.md): an order that failed
-during an order-management outage is never answered later, and an empty
-`networkRef` on the shipment confirmation is a 307 redirect, not a 422.
+A scenario tagged `@known-bug` states the correct behaviour for a defect the
+suite found and is excluded until it is fixed. None is tagged today: the order
+that failed during an order-management outage is now answered on a later pass,
+and an empty `networkRef` on the shipment confirmation is a 422. The test-only
+variable `BDD_TAGS` overrides the default filter `~@known-bug`
+(`BDD_TAGS=@known-bug go test . -run TestFeatures -v` would run only tagged
+scenarios, and there are none).
 
 Output of `go test . -run TestFeatures -count=1 -v` on this branch:
 
 ```text
-126 scenarios (126 passed)
-853 steps (853 passed)
---- PASS: TestFeatures (0.25s)
+135 scenarios (135 passed)
+951 steps (951 passed)
+--- PASS: TestFeatures (0.31s)
 ```
 
 ## Integration tests
@@ -120,6 +133,8 @@ that (`TestPostgresIntegrationTestsUseTestcontainers`,
 | --- | --- |
 | `internal/adapters/outbound/postgres/integration_test.go` | shared fixtures, migrations against a real Postgres |
 | `.../postgres/network_order_repo_integration_test.go` | the order repository |
+| `.../postgres/hold_integration_test.go` | the hold (ADR 0024): `TestNetworkOrderRepo_SavesEveryStateTheAggregateCanReach` (a `REJECTED` order that keeps its id is saved, which the dropped CHECK used to refuse), `TestNetworkOrderRepo_HoldOutcomeRoundTrips`, `TestNetworkOrderRepo_SettlingAnOpenHoldIsPersisted`, `TestNetworkOrderRepo_ListOpenHoldsReturnsOnlyOpenHoldsOfDecidedOrOverdueCandidates` |
+| `.../postgres/migration_0005_integration_test.go` | `TestMigration0005_UpDownUp`: migration `0005` up, down (clears the ids the restored CHECK would refuse, `SUBMITTED` data survives) and up again, on a bare Postgres |
 | `.../postgres/capability_offer_repo_integration_test.go` | the offer repository |
 | `.../postgres/outbox_integration_test.go` | outbox write and relay |
 | `.../postgres/outbox_trace_integration_test.go` | trace context across the outbox (ADR 0022), real Postgres and Kafka: `TestOutboxTrace_TraceparentCrossesTheOutboxToKafka` (rows written in a span store its `traceparent`; a relay pass on a background context sends it to both topics; it extracts to the producing span) and `TestOutboxTrace_RowWithoutTraceHeadersRelaysUnchanged` |

@@ -41,6 +41,13 @@ func wireCases() []wireCase {
 			LocalOrderId: "ord-1", At: at}},
 		{"AcknowledgementDeadlineAtRisk.json", shared.AcknowledgementDeadlineAtRisk{NetworkRef: "po-1", SiteId: "site-1",
 			AcknowledgeBy: at.Add(-time.Hour), At: at}},
+		// OrphanedHoldCancelled (ADR 0024): the fact the orphaned-hold
+		// sweep reports, once per cancelled hold, for both OM answers
+		// that mean "the hold is gone" (204 and 404).
+		{"OrphanedHoldCancelled.json", shared.OrphanedHoldCancelled{NetworkRef: "po-1", SiteId: "site-1",
+			LocalOrderId: "ord-1", AcknowledgeBy: at.Add(-26 * time.Hour), Answer: shared.HoldAnswerCancelled, At: at}},
+		{"OrphanedHoldCancelled_notfound.json", shared.OrphanedHoldCancelled{NetworkRef: "po-1", SiteId: "site-1",
+			LocalOrderId: "ord-1", AcknowledgeBy: at.Add(-26 * time.Hour), Answer: shared.HoldAnswerNotFound, At: at}},
 		// Zero-valued optional members must keep serialising as they did
 		// (empty strings, 0001-01-01T00:00:00Z) — no omitempty crept in.
 		{"NetworkOrderReceived_zero.json", shared.NetworkOrderReceived{NetworkRef: "po-1"}},
@@ -49,6 +56,7 @@ func wireCases() []wireCase {
 		{"NetworkOrderRejected_zero.json", shared.NetworkOrderRejected{NetworkRef: "po-1"}},
 		{"NetworkOrderShipmentConfirmed_zero.json", shared.NetworkOrderShipmentConfirmed{NetworkRef: "po-1"}},
 		{"AcknowledgementDeadlineAtRisk_zero.json", shared.AcknowledgementDeadlineAtRisk{NetworkRef: "po-1"}},
+		{"OrphanedHoldCancelled_zero.json", shared.OrphanedHoldCancelled{NetworkRef: "po-1"}},
 	}
 	for _, r := range []shared.RejectionReason{
 		shared.RejectionReasonUntranslatableSKU,

@@ -71,11 +71,12 @@ func (uc *RejectOverdueOrders) Execute(ctx context.Context) (RejectOverdueResult
 func (uc *RejectOverdueOrders) rejectOne(ctx context.Context, o *networkorder.NetworkOrder) error {
 	// Free the local hold first. This is the step that actually matters
 	// operationally — an unanswered order sitting on real inventory
-	// reservations is stock we cannot sell to anyone else.
-	if local := o.LocalOrderId(); local != nil {
-		if err := uc.Planner.CancelHeldOrder(ctx, *local); err != nil {
-			return err
-		}
+	// reservations is stock we cannot sell to anyone else. The hold is on the
+	// order since the raise (ADR 0024 §1): before that it was only linked at
+	// SUBMITTED, so this branch could never fire for a NEW order. A hold the
+	// orphaned-hold sweep already settled is not cancelled again.
+	if err := freeHold(ctx, uc.Planner, o, uc.Clock.Now()); err != nil {
+		return err
 	}
 	if err := o.Reject(); err != nil {
 		return err

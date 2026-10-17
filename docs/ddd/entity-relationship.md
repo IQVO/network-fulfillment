@@ -4,7 +4,8 @@ The final schema after applying the migrations in order. There are two
 separate databases:
 
 - the **OLTP** database (`DATABASE_URL`): `migrations/0001_init`,
-  `0002_outbox`, `0003_submitted_state`, `0004_capability_offers`;
+  `0002_outbox`, `0003_submitted_state`, `0004_capability_offers`,
+  `0005_hold_outcome`;
 - the **analytical** database (`ANALYTICS_DATABASE_URL`):
   `migrations/analytics/0001_report`, `0002_rejected_submission_failed`.
 
@@ -24,8 +25,10 @@ erDiagram
         TIMESTAMPTZ required_ship_by
         TIMESTAMPTZ acknowledge_by "receivedAt + 24h, persisted"
         TEXT state "CHECK NEW, SUBMITTED, ACKNOWLEDGED, REJECTED, CONFIRMED"
-        TEXT local_order_id "nullable, CHECK only when SUBMITTED, ACKNOWLEDGED, CONFIRMED"
+        TEXT local_order_id "nullable, the order-management hold, recorded at raise (any state)"
         TIMESTAMPTZ received_at
+        TEXT hold_outcome "nullable, CHECK CANCELLED, ALREADY_RELEASED, needs local_order_id"
+        TIMESTAMPTZ hold_settled_at "nullable, set together with hold_outcome"
     }
     network_order_lines {
         TEXT network_ref PK,FK
@@ -60,13 +63,23 @@ erDiagram
 ```
 
 Source: `migrations/0001_init.up.sql`, `migrations/0002_outbox.up.sql`,
-`migrations/0003_submitted_state.up.sql`, `migrations/0004_capability_offers.up.sql`;
+`migrations/0003_submitted_state.up.sql`, `migrations/0004_capability_offers.up.sql`,
+`migrations/0005_hold_outcome.up.sql`;
 `internal/adapters/outbound/postgres/migrate.go` (golang-migrate).
 
 Omitted: indexes. They are `idx_network_orders_unanswered` (partial on
 `acknowledge_by WHERE state = 'NEW'`), `idx_network_orders_local_order`
-(partial, `local_order_id IS NOT NULL`), `idx_network_order_lines_sku` and
+(partial, `local_order_id IS NOT NULL`), `network_orders_open_holds` (partial
+on `acknowledge_by WHERE local_order_id IS NOT NULL AND hold_outcome IS NULL AND
+state IN ('NEW', 'REJECTED')`, the orphaned-hold sweep's candidates; empty in a
+healthy fleet), `idx_network_order_lines_sku` and
 `idx_outbox_events_unpublished` (partial, `published_at IS NULL`).
+The named CHECKs added by `0005` are `hold_outcome_vocabulary`,
+`hold_outcome_has_settled_at` (outcome and instant are set together) and
+`hold_outcome_requires_hold` (an outcome needs a `local_order_id`); the same
+migration **drops** `local_order_requires_answer`, the CHECK that allowed
+`local_order_id` only from `SUBMITTED` on (ADR 0024). The table `network_orders`
+therefore now carries a `local_order_id` on a `NEW` or `REJECTED` order too.
 `schema_migrations` is created by golang-migrate, not by a migration file;
 its columns are shown as golang-migrate's Postgres driver creates them.
 
@@ -84,7 +97,8 @@ is "find by `network_ref` first".
 
 - `network_orders.local_order_id` → `order-management`'s order id. That is
   another context's database, so the link is by value only (the persisted
-  correlation of OM ADR 0018).
+  correlation of OM ADR 0018). It names the held order from the moment it is
+  raised, so the orphaned-hold sweep can find and cancel it.
 - `capability_offers.sku` / `network_order_lines.sku` → the same SKU
   vocabulary. They are separate aggregates and are deliberately not joined.
 - `capability_offers.site_id` / `network_orders.site_id`: a shared value,

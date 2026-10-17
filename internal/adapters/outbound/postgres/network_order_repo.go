@@ -53,18 +53,31 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 		localOrderId = &s
 	}
 
+	// The hold outcome and its instant travel together (a CHECK in migration
+	// 0005 enforces it); both are NULL while the hold is open.
+	var holdOutcome *string
+	var holdSettledAt *time.Time
+	if outcome := o.HoldOutcome(); outcome != "" {
+		s := string(outcome)
+		at := o.HoldSettledAt()
+		holdOutcome = &s
+		holdSettledAt = &at
+	}
+
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO network_orders (
 			network_ref, site_id, required_ship_by, acknowledge_by,
-			state, local_order_id, received_at
+			state, local_order_id, received_at, hold_outcome, hold_settled_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (network_ref) DO UPDATE SET
 			state = EXCLUDED.state,
-			local_order_id = EXCLUDED.local_order_id
+			local_order_id = EXCLUDED.local_order_id,
+			hold_outcome = EXCLUDED.hold_outcome,
+			hold_settled_at = EXCLUDED.hold_settled_at
 	`,
 		string(o.NetworkRef()), string(o.SiteId()), o.RequiredShipBy(), o.AcknowledgeBy(),
-		string(o.State()), localOrderId, o.ReceivedAt(),
+		string(o.State()), localOrderId, o.ReceivedAt(), holdOutcome, holdSettledAt,
 	); err != nil {
 		return err
 	}
@@ -97,7 +110,8 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 // is the application's concern, not the repository's.
 func (r *NetworkOrderRepo) FindByRef(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT site_id, required_ship_by, acknowledge_by, state, local_order_id, received_at
+		SELECT site_id, required_ship_by, acknowledge_by, state, local_order_id, received_at,
+		       hold_outcome, hold_settled_at
 		FROM network_orders WHERE network_ref = $1
 	`, string(ref))
 
@@ -246,6 +260,55 @@ func (r *NetworkOrderRepo) ListAll(ctx context.Context) ([]*networkorder.Network
 	return out, nil
 }
 
+// ListOpenHolds returns the candidates of the orphaned-hold sweep (ADR 0024
+// §3): every order with a recorded hold that has no outcome yet, in NEW or
+// REJECTED. Like ListUnanswered it narrows by state and never by the
+// deadline: whether acknowledgeBy plus the grace has passed is the domain's
+// rule (NetworkOrder.HoldOrphaned), not a second definition in SQL.
+// Oldest acknowledgement deadline first, so a pass frees the longest-leaked
+// hold first. Served by the partial index network_orders_open_holds.
+func (r *NetworkOrderRepo) ListOpenHolds(ctx context.Context) ([]*networkorder.NetworkOrder, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT network_ref
+		FROM network_orders
+		WHERE local_order_id IS NOT NULL
+		  AND hold_outcome IS NULL
+		  AND state IN ('NEW', 'REJECTED')
+		ORDER BY acknowledge_by, network_ref
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []shared.NetworkRef
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		refs = append(refs, shared.NetworkRef(ref))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]*networkorder.NetworkOrder, 0, len(refs))
+	for _, ref := range refs {
+		o, err := r.FindByRef(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		// Settled or answered between the two queries: no longer a candidate.
+		if o == nil || !o.HoldOpen() {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 // scanOrder rehydrates one aggregate from an order row plus its lines.
 func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef, row pgx.Row) (*networkorder.NetworkOrder, error) {
 	var (
@@ -255,8 +318,11 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		stateRaw        string
 		localOrderIdRaw *string
 		receivedAt      time.Time
+		holdOutcomeRaw  *string
+		holdSettledAt   *time.Time
 	)
-	if err := row.Scan(&siteId, &requiredShipBy, &acknowledgeBy, &stateRaw, &localOrderIdRaw, &receivedAt); err != nil {
+	if err := row.Scan(&siteId, &requiredShipBy, &acknowledgeBy, &stateRaw, &localOrderIdRaw, &receivedAt,
+		&holdOutcomeRaw, &holdSettledAt); err != nil {
 		return nil, err
 	}
 
@@ -276,14 +342,28 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		localOrderId = &id
 	}
 
-	return networkorder.Rehydrate(
+	o := networkorder.Rehydrate(
 		ref,
 		shared.SiteId(siteId),
 		requiredShipBy, acknowledgeBy, receivedAt,
 		lines,
 		state,
 		localOrderId,
-	), nil
+	)
+	if holdOutcomeRaw != nil {
+		// Validated like the state: a value outside the vocabulary is a row
+		// this code did not write, and must not become an aggregate.
+		outcome, err := networkorder.ParseHoldOutcome(*holdOutcomeRaw)
+		if err != nil {
+			return nil, fmt.Errorf("rehydrate network order %q: %w", ref, err)
+		}
+		var settledAt time.Time
+		if holdSettledAt != nil {
+			settledAt = *holdSettledAt
+		}
+		o.RestoreHold(outcome, settledAt)
+	}
+	return o, nil
 }
 
 // findLines loads an order's lines.

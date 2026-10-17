@@ -269,9 +269,44 @@ def check_outbox_max_attempts_reaches_the_container() -> None:
     print("PASS: config.outboxMaxAttempts reaches the container as OUTBOX_MAX_ATTEMPTS (default 20, 0 kept)")
 
 
+def check_orphan_hold_sweep_knobs_reach_the_container() -> None:
+    """The orphaned-hold sweep's two knobs (ADR 0024 §5, gap OM-0020) are chart values.
+
+    Fleet rule R10 (configmap-mount): a knob the binary reads must be rendered
+    into the main ConfigMap AND that ConfigMap must be mounted with envFrom, or
+    the value an operator sets never reaches the process. The sweep is ON by
+    default (a leaked hold is the worse failure) and both "off" and "no grace"
+    are valid values that must not be dropped as empty.
+    """
+    docs = render(None)
+    cm = main_configmap(docs)
+    for key in ("ORPHAN_HOLD_SWEEP_ENABLED", "ORPHAN_HOLD_GRACE"):
+        assert key in cm.get("data", {}), f"{key} is not rendered into the main ConfigMap"
+    mounted = {ref["configMapRef"]["name"] for ref in container(docs).get("envFrom", []) if "configMapRef" in ref}
+    assert cm["metadata"]["name"] in mounted, (
+        f"the main ConfigMap {cm['metadata']['name']} is not mounted with envFrom ({sorted(mounted)})"
+    )
+    env = env_map(docs)
+    assert env.get("ORPHAN_HOLD_SWEEP_ENABLED") == "true", (
+        f"ORPHAN_HOLD_SWEEP_ENABLED = {env.get('ORPHAN_HOLD_SWEEP_ENABLED')!r}, want the default 'true'"
+    )
+    assert env.get("ORPHAN_HOLD_GRACE") == "1h", (
+        f"ORPHAN_HOLD_GRACE = {env.get('ORPHAN_HOLD_GRACE')!r}, want the default '1h'"
+    )
+    env = env_map(render('config:\n  orphanHoldSweepEnabled: false\n  orphanHoldGrace: "0"\n'))
+    assert env.get("ORPHAN_HOLD_SWEEP_ENABLED") == "false", (
+        f"config.orphanHoldSweepEnabled=false rendered {env.get('ORPHAN_HOLD_SWEEP_ENABLED')!r}, want 'false'"
+    )
+    assert env.get("ORPHAN_HOLD_GRACE") == "0", (
+        f"config.orphanHoldGrace=0 rendered {env.get('ORPHAN_HOLD_GRACE')!r}, want '0' kept"
+    )
+    print("PASS: orphan-hold sweep knobs are in the ConfigMap, mounted via envFrom, default on/1h, off and 0 kept")
+
+
 def main() -> int:
     check_startup_probe_gates_boot_work()
     check_outbox_max_attempts_reaches_the_container()
+    check_orphan_hold_sweep_knobs_reach_the_container()
     check_default_has_no_data_files()
     check_rendered_json_is_parseable()
     check_files_are_wired_where_the_binary_looks()

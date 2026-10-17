@@ -91,6 +91,32 @@ func (r *NetworkOrderRepo) ListAll(_ context.Context) ([]*networkorder.NetworkOr
 	return out, nil
 }
 
+// ListOpenHolds returns every order whose order-management hold is recorded
+// and has no outcome, in NEW or REJECTED (ADR 0024 §3), oldest acknowledgement
+// deadline first so a pass frees the longest-leaked hold first. It matches
+// the Postgres query's narrowing, not the orphan rule: the sweep still asks
+// the domain whether acknowledgeBy plus the grace has passed.
+func (r *NetworkOrderRepo) ListOpenHolds(_ context.Context) ([]*networkorder.NetworkOrder, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*networkorder.NetworkOrder
+	for _, o := range r.orders {
+		if !o.HoldOpen() {
+			continue
+		}
+		if o.State() == networkorder.StateNew || o.State() == networkorder.StateRejected {
+			out = append(out, o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].AcknowledgeBy().Equal(out[j].AcknowledgeBy()) {
+			return out[i].AcknowledgeBy().Before(out[j].AcknowledgeBy())
+		}
+		return out[i].NetworkRef() < out[j].NetworkRef()
+	})
+	return out, nil
+}
+
 // ProductTranslation is an in-memory ports.ProductTranslation: the
 // Anti-Corruption Layer's dictionary, seeded explicitly.
 //

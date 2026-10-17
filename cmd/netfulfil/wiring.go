@@ -164,6 +164,32 @@ func wireUseCases(
 	return receive, sweep, rejectOverdue
 }
 
+// wireOrphanHoldSweep builds the orphaned-hold sweep (ADR 0024), or returns
+// nil when ORPHAN_HOLD_SWEEP_ENABLED turns it off. Like the other use cases
+// its UnitOfWork is set only when pool is non-nil (in-memory mode has no
+// transactional backing).
+func wireOrphanHoldSweep(
+	orders ports.NetworkOrderRepo,
+	planner ports.FulfillmentPlanner,
+	events ports.EventPublisher,
+	pool *pgxpool.Pool,
+	logger *slog.Logger,
+) *usecases.SweepOrphanedHolds {
+	if !orphanHoldSweepEnabled(logger) {
+		logger.Warn("orphaned-hold sweep disabled by ORPHAN_HOLD_SWEEP_ENABLED: a hold nobody decides stays reserved in order-management")
+		return nil
+	}
+	return &usecases.SweepOrphanedHolds{
+		Orders:     orders,
+		Planner:    planner,
+		Events:     events,
+		Clock:      systemClock{},
+		UnitOfWork: wireUnitOfWork(pool),
+		Metrics:    telemetry.NewOrphanHoldMetrics(nil),
+		Grace:      orphanHoldGrace(logger),
+	}
+}
+
 // wireReconcile builds the submitted-order reconciliation use case
 // (ADR 0001 §5). Its UnitOfWork is set only when pool is non-nil, the
 // same "nil means no transactional backing" convention as wireUseCases.

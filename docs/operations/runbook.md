@@ -140,7 +140,7 @@ consumer first.
 
 | Database | Owner | Tables (migration) | Applied by |
 | --- | --- | --- | --- |
-| OLTP (`DATABASE_URL`) | `netfulfil` | `network_orders`, `network_order_lines` (0001), `outbox_events` (0002), state `SUBMITTED` added (0003), `capability_offers` (0004) | `netfulfil` at startup, and `cmd/mcp` at startup |
+| OLTP (`DATABASE_URL`) | `netfulfil` | `network_orders`, `network_order_lines` (0001), `outbox_events` (0002), state `SUBMITTED` added (0003), `capability_offers` (0004), columns `hold_outcome` and `hold_settled_at` on `network_orders` (0005, ADR 0024) | `netfulfil` at startup, and `cmd/mcp` at startup |
 | Analytical (`ANALYTICS_DATABASE_URL`) | `netfulfil-projector` | `analytics_processed_events`, `analytics_consumed_events`, `acknowledgement_rollup` (0001), column `orders_rejected_submission_failed` (0002) | `netfulfil-projector` at startup |
 
 - Migrations ship in the image (`/app/migrations`, `/app/migrations/analytics`)
@@ -151,6 +151,13 @@ consumer first.
   does not work in PgBouncer's transaction-pooling mode, and concurrent
   replicas then crash-loop (ADR 0007). In the kind cluster the Secret carries
   both keys.
+- Migration `0005_hold_outcome` is additive for data (two nullable columns,
+  new CHECKs, a partial index) and **drops** the `local_order_requires_answer`
+  CHECK, so a `NEW` or `REJECTED` order now carries `local_order_id`: the hold
+  is recorded the moment order-management creates it. An older binary keeps
+  working against the new schema. Its `.down.sql` sets `local_order_id` to
+  `NULL` on `NEW` and `REJECTED` rows before restoring the old CHECK, so a
+  rollback forgets which holds those orders had.
 - Every migration has a `.down.sql`, but nothing in the repo runs them. A
   rollback is a manual `migrate ... down` against the direct DSN.
 - The reports binary only reads; its pool is pinned read-only.
@@ -269,7 +276,8 @@ for the same `networkRef` may already have been delivered.
 | Poller | immediately at start, then every `POLL_INTERVAL` | `PollDemand(since)` on the gateway, then `ReceiveNetworkDemand` per unit. The watermark advances only after a pass with no failure. |
 | `ReconcileSubmittedOrders` | every `POLL_INTERVAL` (first run after one interval) | settles every `SUBMITTED` order from the gateway's submission status. |
 | `SweepAcknowledgementDeadlines` | every `SWEEP_INTERVAL` | publishes `AcknowledgementDeadlineAtRisk` for every overdue `NEW` order, on every pass while it stays overdue. |
-| `RejectOverdueOrders` | every `SWEEP_INTERVAL`, own ticker | cancels the hold (if linked) and rejects each overdue `NEW` order with `ACKNOWLEDGEMENT_DEADLINE_MISSED`. |
+| `RejectOverdueOrders` | every `SWEEP_INTERVAL`, own ticker | cancels the order-management hold (if one is recorded and still open) and rejects each overdue `NEW` order with `ACKNOWLEDGEMENT_DEADLINE_MISSED`. |
+| `SweepOrphanedHolds` | every `SWEEP_INTERVAL`, own ticker, unless `ORPHAN_HOLD_SWEEP_ENABLED=false` | the backstop for `RejectOverdueOrders` (ADR 0024): cancels the order-management hold of a `NEW` or `REJECTED` order that nobody decided, once `now > acknowledgeBy + ORPHAN_HOLD_GRACE`, records the outcome and publishes `OrphanedHoldCancelled`. Never changes the order's state. See [A held order is stuck in order-management](#a-held-order-is-stuck-in-order-management). |
 | `RecomputeCapabilityOffers` | every `RECOMPUTE_INTERVAL`, only when enabled | upserts one `capability_offers` row per known SKU. |
 | Outbox relay | continuous | see above. |
 
@@ -283,9 +291,12 @@ Use-case details: [ddd/use-cases.md](../ddd/use-cases.md).
   analytical connections against the fleet's single Postgres
   (`max_connections` 100 per the comment in `postgres/pool.go`, shared with
   every other context).
-- **`netfulfil` replicas.** Every replica runs its own poller, all four
-  tickers and its own outbox relay. The relay is safe across replicas
-  (`SKIP LOCKED`). The poller and the use cases are not coordinated:
+- **`netfulfil` replicas.** Every replica runs its own poller, every ticker
+  (including the orphaned-hold sweep) and its own outbox relay. The relay is
+  safe across replicas (`SKIP LOCKED`). The sweeps take no row lock: two
+  replicas can cancel the same orphaned hold (order-management's cancel is
+  idempotent) and both publish `OrphanedHoldCancelled`, so a consumer must
+  tolerate a rare duplicate (ADR 0024). The poller and the use cases are not coordinated:
   `ReceiveNetworkDemand`'s idempotency is a `FindByRef` followed by a save,
   with no lock, so two replicas that fetch the same demand at the same moment
   can both raise a held order in order-management. In stub mode every replica
@@ -371,6 +382,151 @@ retains.
 Read the DLQ topic, fix the cause named in `x-dlq-error`, and produce the
 message value back to `warehouse.network-fulfillment.analytics` with the same
 key. The projector dedupes on the CloudEvents `id`.
+
+### A held order is stuck in order-management
+
+**Symptom.** A held (never released) order in `order-management` keeps stock
+reserved for a network order this context never committed to. Typical signs:
+usable stock for the SKU stays low with no shipment behind it; a `NEW` order
+sits past `acknowledgeBy` (`/inbound-status` `overdue > 0`); a `REJECTED` order
+whose rejection never freed its stock.
+
+Why it happens: `ReceiveNetworkDemand` raises the order as a **held** order
+(`releaseOnAllocation: false`), which reserves real inventory, and
+order-management has no timeout of its own (its ADR 0020). Only this context
+decides the hold, by release (`POST /orders/{id}/release`) or cancel
+(`DELETE /orders/{id}`). If neither happens, for example because the cancel
+failed while order-management was down, the reservation would last forever.
+[ADR 0024](../adr/0024-orphaned-order-management-hold-sweep.md) records the
+order-management order id on the `network_orders` row as soon as the hold
+exists, and `SweepOrphanedHolds` cancels the ones nobody decided.
+
+**What the sweep does, and when.**
+
+1. `acknowledgeBy` is `receivedAt + 24 h`. Once `now` is past it,
+   `RejectOverdueOrders` (every `SWEEP_INTERVAL`) cancels the hold and rejects
+   the order. That is the normal path.
+2. `SweepOrphanedHolds` is the backstop on the same `SWEEP_INTERVAL`. A hold is
+   orphaned only when all of these hold: the row has `local_order_id`, no
+   `hold_outcome`, `state` is `NEW` or `REJECTED`, and `now` is strictly after
+   `acknowledgeBy + ORPHAN_HOLD_GRACE` (default `1h`). So an orphan is freed
+   within `ORPHAN_HOLD_GRACE + SWEEP_INTERVAL` after the window closes
+   (with the kind overlay's `sweepInterval = "5m"` and the default grace,
+   about 1 h 5 min).
+3. It calls `DELETE /orders/{id}` and records the answer in `hold_outcome`
+   (with `hold_settled_at`), so the next pass finds nothing:
+   - `2xx`, or `404`: outcome `CANCELLED`, event `OrphanedHoldCancelled`
+     (`answer` `CANCELLED` or `NOT_FOUND`);
+   - `409` or `422`: order-management says the order was already released.
+     Not an orphan: outcome `ALREADY_RELEASED`, no event, never retried;
+   - anything else (`5xx`, any other status, timeout, transport error, open
+     circuit breaker): nothing is recorded, the hold stays open and the next
+     pass tries again, with no retry limit.
+4. It never changes the order's state and publishes no
+   `NetworkOrderRejected`. A `NEW` order whose hold the sweep cancelled is
+   rejected by `RejectOverdueOrders` on its next pass, which skips the cancel
+   because the outcome is already recorded.
+
+`SUBMITTED`, `ACKNOWLEDGED` and `CONFIRMED` orders are never swept: this
+context committed to them or is waiting for the network's verdict.
+
+**Confirm it.** `GET /network-orders/{networkRef}` and the MCP tools do **not**
+show the hold id for a `NEW` or `REJECTED` order (`localOrderId` appears only
+from `SUBMITTED` on) and do not show the outcome, so use the database. The
+first query is the sweep's own candidate list (an index serves it); the second
+shows what it already settled:
+
+```sql
+SELECT network_ref, state, acknowledge_by, local_order_id
+FROM network_orders
+WHERE local_order_id IS NOT NULL AND hold_outcome IS NULL AND state IN ('NEW', 'REJECTED')
+ORDER BY acknowledge_by;
+
+SELECT network_ref, state, local_order_id, hold_outcome, hold_settled_at
+FROM network_orders
+WHERE hold_outcome IS NOT NULL
+ORDER BY hold_settled_at DESC LIMIT 20;
+```
+
+A row from the first query with `acknowledge_by + ORPHAN_HOLD_GRACE` still in
+the future is not orphaned yet. A row that is older than `ORPHAN_HOLD_GRACE +
+SWEEP_INTERVAL` means the sweep is off, failing or not running. Then check:
+
+- **Log lines (`netfulfil`).** WARN `orphaned holds swept` with `examined`,
+  `cancelled`, `alreadyReleased` and `failed`, logged only on a pass that acted
+  on at least one hold. ERROR `orphaned-hold sweep failed` (field `err`) when
+  the candidate list could not be read. WARN `orphaned-hold sweep disabled by
+  ORPHAN_HOLD_SWEEP_ENABLED: a hold nobody decides stays reserved in
+  order-management` at boot when it is off. WARN `invalid
+  ORPHAN_HOLD_SWEEP_ENABLED, keeping the orphaned-hold sweep on` or `invalid
+  ORPHAN_HOLD_GRACE, using the default` for a typo. The sweep logs counts, not
+  the reason a single cancel failed.
+- **Metric.** Counter `network_fulfillment.orphaned_holds.swept` (unit
+  `{hold}`, OTLP only, not on `GET /metrics`), attribute `outcome` =
+  `cancelled`, `already_released` or `failed`, one data point per hold per
+  pass. `failed` growing means order-management is answering the cancel with
+  something other than 2xx, 404, 409 or 422 (see [observability](observability.md#orphaned-hold-sweep-metric)).
+- **Breaker.** `circuit_breaker_state{dependency="order-management"}` = `2`
+  (open) makes every cancel fail without a call.
+- **Event.** `OrphanedHoldCancelled` on both topics. In outbox mode:
+  `SELECT created_at, topic FROM outbox_events WHERE event_type LIKE '%OrphanedHoldCancelled';`
+  With the log publisher the event is logged as `integration event` with
+  `answer`.
+
+**What `OrphanedHoldCancelled` means.** A hold leaked, and the sweep freed it.
+It is a reported fact, not a state change: the order keeps its state. `data`:
+`networkRef`, `siteId`, `localOrderId` (the order-management order that was
+held; for an order never submitted this event is the only place it is
+published), `acknowledgeBy`, `answer` (`CANCELLED` = order-management cancelled
+it now; `NOT_FOUND` = it no longer existed, so it was already gone), `at`.
+One event per hold, except that two replicas can both cancel and both publish.
+Its presence means the normal path failed first (order-management down, breaker
+open, a crash): look for what stopped `RejectOverdueOrders`. An `alreadyReleased`
+count is different: someone released that order in order-management, so its
+stock is committed to the floor and the sweep leaves it alone; decide in
+order-management whether it should ship.
+
+**If order-management answers not-found or 5xx.**
+
+- `404` is treated as done (`NOT_FOUND`). If you expected the hold to exist,
+  check that `ORDER_MANAGEMENT_URL` points at the order-management that raised
+  it and that `local_order_id` is the id you see there.
+- `5xx`, timeout or open breaker: no action needed on this side. The row stays
+  open and every `SWEEP_INTERVAL` the sweep tries again, so it settles once
+  order-management is healthy (the breaker lets a probe through after 30 s).
+  Fix order-management, then re-run the first query until it returns no row
+  past the grace. If one hold keeps failing while others settle, cancel it by
+  hand in order-management with `DELETE /orders/{localOrderId}`; the next pass
+  then gets a 2xx or 404 and records the outcome.
+
+**When to turn the sweep off.** Rarely, and only on purpose: set
+`ORPHAN_HOLD_SWEEP_ENABLED=false` (chart value `config.orphanHoldSweepEnabled:
+false`, then roll the pod) while order-management must not receive cancels
+(a migration or a restore), while `ORDER_MANAGEMENT_URL` points at the wrong
+service (every cancel would then be a `404`, which the sweep records as done
+although the real hold still exists), or to stop a sweep that is cancelling
+holds it should not while you investigate. The default is on because a leaked
+hold is the worse failure; an unparseable value keeps it on. While it is off,
+nothing frees a hold that `RejectOverdueOrders` missed. Turn it back on
+afterwards: the first pass frees everything that accumulated. To change only
+the delay, set `ORPHAN_HOLD_GRACE` (a Go duration, `0` = none).
+
+**Holds the sweep cannot see (hand steps).**
+
+1. `SUBMITTED` order that never settles (the network keeps answering
+   `PENDING`): not swept, because cancelling could contradict a later
+   `SUCCESS`. List them with `list_network_orders` `state=SUBMITTED`.
+2. `ACKNOWLEDGED` order whose release call failed (the failure is not logged
+   and nothing retries it): release it in order-management with
+   `POST /orders/{localOrderId}/release`. Never cancel it: the network was told
+   we will ship.
+3. A hold raised before this context could record its id (a crash between
+   order-management's commit and this context's write) and not re-delivered
+   inside the window: the row has `local_order_id IS NULL`. Nothing can name
+   the hold, because this context never reads order-management state. Find the
+   held order in order-management and cancel it there with `DELETE /orders/{id}`.
+4. Orders rejected before migration `0005` whose raise had succeeded have no
+   recorded id either; same hand step.
 
 ## Reports API (`netfulfil-reports`)
 

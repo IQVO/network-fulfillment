@@ -97,9 +97,31 @@ asynchronous (observable) instruments, read on each 30 s collection):
 | `go.processor.limit` | up-down counter | `{thread}` | |
 | `go.config.gogc` | up-down counter | `%` | |
 
-No business metric is defined in this repo: there is no counter for orders
-received, acknowledged or rejected. Those numbers come from the analytics
-report and from `GET /inbound-status` (below).
+No business metric is defined for orders received, acknowledged or rejected:
+those numbers come from the analytics report and from `GET /inbound-status`
+(below). The one business counter is the orphaned-hold sweep's.
+
+### Orphaned-hold sweep metric
+
+`internal/adapters/outbound/telemetry/orphan_hold_metrics.go` (ADR 0024 §7,
+following the fleet's Tier 2 business-counter convention that ADR 0020 adopts),
+built on the global `MeterProvider` that `telemetry.Setup` installs and pushed
+over OTLP like the instruments above. It is **not** on `GET /metrics`, which
+serves only the breaker gauge.
+
+| Instrument | Type | Unit | Attributes |
+| --- | --- | --- | --- |
+| `network_fulfillment.orphaned_holds.swept` | counter | `{hold}` | `outcome` = `cancelled`, `already_released` or `failed` |
+
+One data point per hold per pass, added by `SweepOrphanedHolds` through
+`ports.OrphanHoldMetrics`: `cancelled` = order-management cancelled the hold or
+answered `404`; `already_released` = it answered `409` or `422`; `failed` = the
+cancel or the save failed and the hold stays open for the next pass, so a hold
+that keeps failing adds one `failed` per pass. A healthy fleet emits nothing at
+all, so there is no series until the first hold is swept. Before `Setup` runs
+(or in a test) the instrument is OTel's no-op. Behind the Collector the
+Prometheus name has not been checked here; the usual OTel rules would give
+`network_fulfillment_orphaned_holds_swept_total` with an `outcome` label.
 
 In Prometheus, behind the fleet Collector, these names become
 `http_server_request_duration_seconds_*`, `go_goroutine_count`,
@@ -167,6 +189,10 @@ Messages worth knowing, with their fields (all from the code):
 | `poll pass had failures; watermark not advanced` | WARN | `failures`, `of`, `since` | netfulfil | |
 | `acknowledgement deadlines at risk` | WARN | `examined`, `atRisk` | netfulfil | sweep found overdue `NEW` orders |
 | `overdue orders rejected` | WARN | `examined`, `rejected` | netfulfil | |
+| `orphaned holds swept` | WARN | `examined`, `cancelled`, `alreadyReleased`, `failed` | netfulfil | the orphaned-hold sweep acted on at least one hold; not logged on a pass that found nothing to do ([runbook](./runbook.md#a-held-order-is-stuck-in-order-management)) |
+| `orphaned-hold sweep failed` | ERROR | `err` | netfulfil | the sweep could not list the open holds; retried next tick |
+| `orphaned-hold sweep disabled by ORPHAN_HOLD_SWEEP_ENABLED: a hold nobody decides stays reserved in order-management` | WARN | | netfulfil | once at boot, when the sweep is switched off |
+| `invalid ORPHAN_HOLD_SWEEP_ENABLED, keeping the orphaned-hold sweep on` / `invalid ORPHAN_HOLD_GRACE, using the default` | WARN | `value`, `error` (and `default` for the grace) | netfulfil | at boot, for an unparseable or (grace) negative value |
 | `submitted orders reconciled` | INFO | `examined`, `confirmed`, `failed`, `pending` | netfulfil | |
 | `capability offer recompute completed` | INFO | `examined`, `throughput_constrained` | netfulfil | |
 | `capability offer: usable inventory lookup failed` | ERROR | `sku`, `err` | netfulfil | inventory-storage call failed for one SKU |
@@ -222,3 +248,6 @@ None of these exist yet; they follow from the code above.
 | DLQ growth | message count on `warehouse.network-fulfillment.analytics.dlq` | poison or failing projection |
 | Outbox row excluded | any ERROR `outbox relay: row reached the attempt cap ...` (log alert), or `SELECT count(*) FROM outbox_events WHERE published_at IS NULL AND attempts >= 20` > 0 | an event consumers never received; re-arm it after fixing the cause (ADR 0021) |
 | Outbox backlog | `SELECT count(*), min(created_at) FROM outbox_events WHERE published_at IS NULL` growing for > 5 min | the relay is stuck on a failing row below the cap, or the broker is down |
+| Orphaned holds failing | `network_fulfillment.orphaned_holds.swept{outcome="failed"}` increasing, or WARN `orphaned holds swept` with `failed > 0` on consecutive passes, or a row of the runbook's open-holds query older than `ORPHAN_HOLD_GRACE + SWEEP_INTERVAL` | a hold nobody decided cannot be freed (order-management down, breaker open, an unexpected status); stock stays reserved ([runbook](./runbook.md#a-held-order-is-stuck-in-order-management)) |
+| A hold had leaked | any `OrphanedHoldCancelled` event, or `network_fulfillment.orphaned_holds.swept{outcome="cancelled"}` increasing | the normal cancel path failed first; worth finding out why |
+| Sweep switched off | WARN `orphaned-hold sweep disabled by ORPHAN_HOLD_SWEEP_ENABLED` at boot | nothing frees a hold that `RejectOverdueOrders` missed |

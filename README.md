@@ -35,8 +35,11 @@ What exists today:
   `NEW -> SUBMITTED -> ACKNOWLEDGED -> CONFIRMED`, and `REJECTED` from
   `NEW` or `SUBMITTED`; one answer per order, acknowledged in full or
   rejected in full, a 24h `acknowledgeBy` deadline fixed at receipt, and a
-  persisted one-to-one `localOrderId` link allowed once the order is at
-  least `SUBMITTED`.
+  persisted one-to-one `localOrderId` link to the `order-management` hold.
+  The hold is recorded on the order the moment it is raised, while the order
+  is still `NEW` (`RecordHold`, ADR 0024), and carries an outcome
+  (`CANCELLED` or `ALREADY_RELEASED`, unset while the hold is open). REST and
+  MCP still show `localOrderId` only from `SUBMITTED` on.
 - **`CapabilityOffer` aggregate** (`internal/domain/capabilityoffer`, ADR
   0001 §8) — the advertisable quantity per `(sku, siteId)`:
   `min(physicalAvailable, throughputFeasible)` with a `PHYSICAL` /
@@ -50,7 +53,8 @@ What exists today:
   unknown product rejects the whole order), saves the order `NEW` and
   publishes `NetworkOrderReceived`, raises a **held** order in
   `order-management` (`POST /orders` with `releaseOnAllocation: false`,
-  `allowPartialShipment: false`, `requiredShipBy`), treats a returned
+  `allowPartialShipment: false`, `requiredShipBy`) and records the returned
+  order id on the order at once, treats a returned
   `promiseDate` as "feasible" and a null one as "not feasible", then either
   submits the acknowledgement (order goes `SUBMITTED`, linked to the local
   order, **not yet released**) or cancels the hold (`DELETE /orders/{id}`)
@@ -64,8 +68,19 @@ What exists today:
   `1m`), publishes `AcknowledgementDeadlineAtRisk` for every order still
   `NEW` past its deadline. It never mutates the aggregate (ADR 0001 §6).
 - **`RejectOverdueOrders`** — on its own ticker (same `SWEEP_INTERVAL`),
-  cancels the held local order (if linked) and rejects every overdue `NEW`
-  order (`ACKNOWLEDGEMENT_DEADLINE_MISSED`). It never acknowledges late.
+  cancels the order-management hold (recorded since the raise, so this now
+  fires for a `NEW` order) and rejects every overdue `NEW` order
+  (`ACKNOWLEDGEMENT_DEADLINE_MISSED`). It never acknowledges late.
+- **`SweepOrphanedHolds`** (ADR 0024, gap OM-0020) — on its own ticker (same
+  `SWEEP_INTERVAL`, on by default, `ORPHAN_HOLD_SWEEP_ENABLED`), the backstop
+  for a hold nobody decided: for a `NEW` or `REJECTED` order with a recorded,
+  unsettled hold, once `now > acknowledgeBy + ORPHAN_HOLD_GRACE` (default
+  `1h`) it calls `DELETE /orders/{id}`. A 2xx or 404 records the outcome and
+  publishes `OrphanedHoldCancelled`; a 409 or 422 (already released) is
+  recorded without an event; a 5xx, timeout or open breaker is retried on the
+  next pass. It never changes the order's state. Counter
+  `network_fulfillment.orphaned_holds.swept`. Runbook:
+  [A held order is stuck in order-management](docs/operations/runbook.md#a-held-order-is-stuck-in-order-management).
 - **`ConfirmNetworkOrderShipment`** (ADR 0014) — the one write endpoint,
   `POST /network-orders/{networkRef}/shipment-confirmation`: `ACKNOWLEDGED
   -> CONFIRMED`, publishes `NetworkOrderShipmentConfirmed`, then tells the
@@ -97,8 +112,9 @@ What exists today:
   Postgres (`migrations/analytics/`), and `cmd/netfulfil-reports` serves
   `GET /reports/acknowledgement` and `GET /reports/acknowledgement/freshness`
   over a read-only pool.
-- **Persistence** — Postgres (`migrations/0001`–`0004`: `network_orders`,
-  `network_order_lines`, `outbox_events`, `capability_offers`) when
+- **Persistence** — Postgres (`migrations/0001`–`0005`: `network_orders`,
+  `network_order_lines`, `outbox_events`, `capability_offers`, and the hold
+  outcome columns of `network_orders`) when
   `DATABASE_URL` is set, and in-memory repositories when it is not. If
   `DATABASE_URL` is set but Postgres cannot be reached, the service refuses
   to boot instead of falling back. Migrations run at startup
@@ -216,10 +232,12 @@ stock rather than advertising zero.
 
 ```
 NetworkOrder      networkRef, siteId, requiredShipBy, acknowledgeBy, lines,
-                  localOrderId, receivedAt
+                  localOrderId, holdOutcome, holdSettledAt, receivedAt
                   NEW -> SUBMITTED -> ACKNOWLEDGED -> CONFIRMED
                   NEW | SUBMITTED -> REJECTED
                   invariant: acknowledged in full or rejected in full
+                  localOrderId = the order-management hold, recorded at raise;
+                  holdOutcome = CANCELLED | ALREADY_RELEASED, unset while open
 
 CapabilityOffer   (sku, siteId) -> advertisedQuantity + basis + computedAt
                   PHYSICAL | THROUGHPUT_CONSTRAINED
@@ -240,9 +258,11 @@ internal/
   application/ports/           NetworkOrderRepo, CapabilityOfferRepo, NetworkGateway,
                                FulfillmentPlanner, ProductTranslation,
                                ProcessPathCapability, PathCapacity,
-                               InventoryAvailability, EventPublisher, UnitOfWork, Clock
+                               InventoryAvailability, EventPublisher, UnitOfWork, Clock,
+                               OrphanHoldMetrics
   application/usecases/        ReceiveNetworkDemand, ReconcileSubmittedOrders,
                                SweepAcknowledgementDeadlines, RejectOverdueOrders,
+                               SweepOrphanedHolds,
                                ConfirmNetworkOrderShipment, RecomputeCapabilityOffers
   adapters/inbound/http/       REST (+ the reports router)
   adapters/inbound/poller/     the inbound leg
@@ -288,7 +308,9 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `PRODUCT_TRANSLATION_FILE` | unset | `{"products":[{"networkProductId","sku"}]}` |
 | `NETWORK_SEED_FILE` | unset | stub demand, `{"demands":[...]}`; stub mode only |
 | `POLL_INTERVAL` | `1m` | Go duration; poller and reconciliation cadence |
-| `SWEEP_INTERVAL` | `1m` | Go duration; sweep and overdue-rejection cadence |
+| `SWEEP_INTERVAL` | `1m` | Go duration; cadence of the deadline sweep, the overdue rejection and the orphaned-hold sweep |
+| `ORPHAN_HOLD_SWEEP_ENABLED` | `true` | orphaned-hold sweep (ADR 0024); `false` turns it off (a hold nobody decides then stays reserved in `order-management`); an unparseable value keeps it on |
+| `ORPHAN_HOLD_GRACE` | `1h` | Go duration added to `acknowledgeBy` before a hold counts as orphaned; `0` = no grace; malformed or negative uses the default |
 | `PORT` | `8080` | HTTP listen port |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5188` | comma-separated; methods GET, POST, OPTIONS |
 | `EVENT_PUBLISHER` | `log` (default) | `kafka` publishes to both topics; with `DATABASE_URL` set this activates the transactional outbox (ADR 0003) instead of publishing directly |
@@ -347,7 +369,7 @@ but nothing publishes to it today.
 
 | Repo | ADR | Why it matters here |
 | --- | --- | --- |
-| `order-management` | 0020 | The companion: `releaseOnAllocation` hold, `PromisePolicy.FeasibleBy`, `Network` promise basis |
+| `order-management` | 0020 | The companion: `releaseOnAllocation` hold, `PromisePolicy.FeasibleBy`, `Network` promise basis. Its accepted deferral ("sweep orphaned holds past the acknowledgement window") is closed here by ADR 0024 |
 | `order-management` | 0014 | The promise is a CPT window derived from fulfillment capability |
 | `order-management` | 0004 | Release is the cancellation boundary — why network demand must be held, not optimistically released |
 | `order-management` | 0017 | Per-shipment-group promising — the rule network demand must *not* use |
