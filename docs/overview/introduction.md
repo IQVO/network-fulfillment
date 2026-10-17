@@ -29,7 +29,9 @@ quantities, a site and a deadline.
   `NEW` or `SUBMITTED`. Acknowledged in full or rejected in full, within 24 h
   of receipt.
 - **The 24 h acknowledgement clock**: the fleet's only external SLA. A sweep
-  reports overdue orders and a separate job rejects them.
+  reports overdue orders and a separate job rejects them. A third pass is the
+  backstop for the `order-management` hold each order raises: it cancels a hold
+  nobody decided once the window plus a grace has passed (ADR 0024).
 - **`CapabilityOffer`** (opt-in): the quantity per SKU and site this context
   would advertise, `min(physicalAvailable, throughputFeasible)`, so the
   network is never offered more than the building can move before the next
@@ -47,9 +49,10 @@ of `order-management` through a held order (ADR 0001 §7).
 | Receive demand | poll the network every `POLL_INTERVAL`, translate, raise a held order in order-management, answer | [use cases](../ddd/use-cases.md#receivenetworkdemand) |
 | Settle answers | reconcile each `SUBMITTED` order with the network's transaction status, then release or cancel the hold | [use cases](../ddd/use-cases.md#reconcilesubmittedorders) |
 | Guard the SLA | report and reject orders still unanswered after 24 h | [use cases](../ddd/use-cases.md#sweepacknowledgementdeadlines) |
+| Free orphaned holds | cancel the order-management hold of an order nobody decided, after `acknowledgeBy + ORPHAN_HOLD_GRACE` | [use cases](../ddd/use-cases.md#sweeporphanedholds), [runbook](../operations/runbook.md#a-held-order-is-stuck-in-order-management) |
 | Confirm shipment | `POST /network-orders/{networkRef}/shipment-confirmation` | [use cases](../ddd/use-cases.md#confirmnetworkordershipment) |
 | Advertise capability | recompute offers from inventory-storage stock and path capacity | [use cases](../ddd/use-cases.md#recomputecapabilityoffers) |
-| Publish facts | six CloudEvents types on `warehouse.network-fulfillment.events` | [integration](../ecosystem/integration.md#events-published) |
+| Publish facts | seven CloudEvents types on `warehouse.network-fulfillment.events` | [integration](../ecosystem/integration.md#events-published) |
 | Report | acknowledgement and translation report from an analytics data product | [runbook](../operations/runbook.md#reports-api-netfulfil-reports) |
 | Answer agents | read-only MCP tools | [MCP tools](../mcp/tools.md) |
 

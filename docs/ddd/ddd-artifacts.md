@@ -32,7 +32,7 @@ from these paths on `develop`:
   `internal/adapters/outbound/*/`, `internal/adapters/kafka/cloudevents/`.
 - Composition roots: `cmd/netfulfil`, `cmd/mcp`, `cmd/netfulfil-projector`,
   `cmd/netfulfil-reports`.
-- Schema: `migrations/0001`–`0004` (OLTP) and `migrations/analytics/0001`–`0002`.
+- Schema: `migrations/0001`–`0005` (OLTP) and `migrations/analytics/0001`–`0002`.
 - Contracts: `apis/openapi.yaml`, `apis/asyncapi.yaml` (aligned with the code
   on 2026-10-06, ADR 0015; open design notes are listed on
   [domain-events.md](domain-events.md) and

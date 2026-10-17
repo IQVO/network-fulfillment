@@ -89,8 +89,8 @@ flowchart LR
     BC -.->|"qry - REST<br/>Usable quantity per SKU"| out1
     BC -->|"cmd - port NetworkGateway<br/>Acknowledge / reject in full,<br/>Shipment confirmation"| out2
     BC -.->|"qry - port NetworkGateway<br/>Transaction status"| out2
-    BC ==>|"evt - Kafka<br/>warehouse.network-fulfillment.events<br/>NetworkOrderReceived,<br/>NetworkOrderSubmitted,<br/>NetworkOrderAcknowledged (v2),<br/>NetworkOrderRejected,<br/>NetworkOrderShipmentConfirmed,<br/>AcknowledgementDeadlineAtRisk"| out3
-    BC ==>|"evt - Kafka<br/>warehouse.network-fulfillment.analytics<br/>the same 6 events"| out4
+    BC ==>|"evt - Kafka<br/>warehouse.network-fulfillment.events<br/>NetworkOrderReceived,<br/>NetworkOrderSubmitted,<br/>NetworkOrderAcknowledged (v2),<br/>NetworkOrderRejected,<br/>NetworkOrderShipmentConfirmed,<br/>AcknowledgementDeadlineAtRisk,<br/>OrphanedHoldCancelled"| out3
+    BC ==>|"evt - Kafka<br/>warehouse.network-fulfillment.analytics<br/>the same 7 events"| out4
     linkStyle 0 stroke:#1971c2,stroke-width:1.5px
     linkStyle 1 stroke:#2f9e44,stroke-width:1.5px
     linkStyle 2 stroke:#1971c2,stroke-width:1.5px
@@ -170,14 +170,14 @@ ship-to PII enters this context at all.
 | --- | --- | --- | --- | --- |
 | `order-management` | Raise held order + feasibility verdict | Command | REST `POST /orders` (`releaseOnAllocation: false`, `allowPartialShipment: false`, `requiredShipBy`) | Customer/Supplier (we are the Customer; OM ADR 0020) |
 | `order-management` | Release held order | Command | REST `POST /orders/{id}/release` | Customer/Supplier |
-| `order-management` | Cancel held order | Command | REST `DELETE /orders/{id}` | Customer/Supplier |
+| `order-management` | Cancel held order | Command | REST `DELETE /orders/{id}` (also the orphaned-hold sweep, which reads 404 and 409/422 as answers) | Customer/Supplier |
 | `inventory-storage` | Usable quantity per SKU | Query | REST `GET /inventory/{sku}/usable` (opt-in) | Conformist to its Open Host |
 | External network | Acknowledge / reject in full | Command | `ports.NetworkGateway.SubmitAcknowledgement(ref, accepted)` (stub) | Conformist |
 | External network | Transaction status | Query | `ports.NetworkGateway.SubmissionStatus(ref)` (stub) | Conformist |
 | External network | Shipment confirmation | Command | `ports.NetworkGateway.SubmitShipmentConfirmation(ref)` (stub) | Conformist |
 | External network | Availability, capability declaration, label | Command / Query | `SubmitAvailability`, `DeclareCapability`, `RequestLabel`: **on the port and in the stub, called by no use case** | Conformist (wired, unused) |
-| Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (with `EVENT_PUBLISHER=kafka`) | Open Host / Published Language |
-| Analytics projector | The same 6 events | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
+| Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`, `OrphanedHoldCancelled` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (with `EVENT_PUBLISHER=kafka`) | Open Host / Published Language |
+| Analytics projector | The same 7 events (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
 
 Full message details: [domain-events.md](domain-events.md). Relationship
 evidence: [context-map.md](context-map.md).
@@ -206,12 +206,18 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
    after `SubmissionStatus` reports `SUCCESS` (`ReconcileSubmittedOrders`).
    `FAILURE` cancels the hold and rejects (`SUBMISSION_FAILED`).
 5. **Free the hold first.** Every rejection path cancels the held order
-   before it mutates the aggregate.
+   before it mutates the aggregate, and records the outcome in the same save
+   as the rejection. A hold nobody decided is cancelled by a backstop sweep
+   (`SweepOrphanedHolds`) once `acknowledgeBy + ORPHAN_HOLD_GRACE` has passed,
+   because `order-management` has no timeout of its own and a second TTL there
+   would race the clock this context owns (ADR 0024). A hold found already
+   released is not cancelled and is never retried.
 6. **A missed deadline is reported, then refused, and never answered
    late.** The sweep only publishes `AcknowledgementDeadlineAtRisk`.
    `RejectOverdueOrders` rejects with `ACKNOWLEDGEMENT_DEADLINE_MISSED`.
-7. **Correlation is a persisted mapping** (`local_order_id`, guarded by a
-   `CHECK` constraint). It is never a string convention, and that is why
+7. **Correlation is a persisted mapping** (`local_order_id`, recorded when the
+   hold is raised; the hold's outcome is `hold_outcome`, guarded by `CHECK`
+   constraints). It is never a string convention, and that is why
    shipment confirmation is an explicit call (ADR 0014), not a
    `PackageManifested` join.
 8. **Advertise what the floor can move.** `advertisedQuantity` is
@@ -248,6 +254,8 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 - Share of `THROUGHPUT_CONSTRAINED` offers per recompute pass (logged as
   `throughput_constrained`).
 - `circuit_breaker_state` gauge for the `order-management` dependency.
+- `network_fulfillment.orphaned_holds.swept` by `outcome`, and any
+  `OrphanedHoldCancelled` event: a hold that leaked and had to be swept.
 - Engineering gates: arch-go hexagonal tests, 90% coverage, gremlins on
   `./internal/domain/networkorder`.
 
@@ -262,10 +270,17 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
   reconciliation settles it `ACKNOWLEDGED`, published as the `.v2` type and
   dataschema. No fleet consumer exists, and the projector still replays
   historic v1 messages with the same report numbers.
-- **Orphaned hold after a crash.** If the process dies after
-  `RaiseHeldOrder` but before the answer is saved, the order stays `NEW`
-  with no `localOrderId`. `RejectOverdueOrders` then cannot cancel the hold
-  in `order-management`. ADR 0001 names the orphaned hold as an open gap.
+- **Decided 2026-10-17: the orphaned hold is recorded and swept (ADR 0024,
+  gap OM-0020).** The hold id is stored on the order as soon as
+  `RaiseHeldOrder` returns, and `SweepOrphanedHolds` cancels a hold nobody
+  decided once `acknowledgeBy + ORPHAN_HOLD_GRACE` has passed
+  (`OrphanedHoldCancelled`), so `RejectOverdueOrders`' cancel now has a hold to
+  find. What stays open by design: a hold never named because the process
+  stopped between order-management's commit and the id being saved (only when
+  the window closes before a re-delivery repeats the raise), a `SUBMITTED` order
+  whose network status stays `PENDING`, and an `ACKNOWLEDGED` order whose
+  release failed (not a cancel case; release it by hand, see the
+  [runbook](../operations/runbook.md#a-held-order-is-stuck-in-order-management)).
 - **Decided 2026-10-06: cycle time gates eligibility (ADR 0017).** A path is
   eligible for a cutoff only if `CycleTimeP95 <= cutoff - now`; a missing or
   zero cycle time stays eligible (fail-open); capacity is not scaled.

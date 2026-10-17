@@ -122,7 +122,7 @@ status into two sentinel errors in `internal/application/contract`:
 |---|---|---|
 | 2xx (204) | cancelled | outcome `CANCELLED`, publish `OrphanedHoldCancelled` (`answer=CANCELLED`) |
 | 404 | the hold does not exist | outcome `CANCELLED`, publish `OrphanedHoldCancelled` (`answer=NOT_FOUND`) |
-| 409 / 422 | already released (BR6) | **not an orphan**: outcome `ALREADY_RELEASED`, logged, no event, never retried |
+| 409 / 422 | already released (BR6) | **not an orphan**: outcome `ALREADY_RELEASED`, counted in the pass's `orphaned holds swept` WARN line (`alreadyReleased`) and the `already_released` metric outcome, no event, never retried |
 | 5xx, timeout, transport error, open breaker | unknown | outcome untouched, retried on the next pass, never marked done |
 
 The circuit breaker counts 404 and 409/422 as successful calls (they are

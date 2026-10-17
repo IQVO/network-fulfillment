@@ -54,18 +54,21 @@ capacity, promises) is owned elsewhere.
 
 **Model complexity is low to moderate (x ≈ 0.30–0.40).**
 
-- There are two aggregates. `NetworkOrder` has 5 states, 6 state-changing
+- There are two aggregates. `NetworkOrder` has 5 states, 8 state-changing
   methods (`Submit`, `ConfirmAcknowledgement`, `Acknowledge`, `Reject`,
-  `LinkLocalOrder`, `ConfirmShipment`) plus 2 constructors (`Receive`,
-  `ReceiveUntranslatable`), and 5 aggregate errors plus 6 value-object
-  errors in `shared`.
+  `LinkLocalOrder`, `RecordHold`, `SettleHold`, `ConfirmShipment`) plus 2
+  constructors (`Receive`,
+  `ReceiveUntranslatable`), and 5 aggregate errors (plus the 3 the hold adds:
+  `ErrNoHold`, `ErrUnknownHoldOutcome`, `ErrHoldAlreadySettled`) plus 6
+  value-object errors in `shared`.
   `CapabilityOffer` has no lifecycle and 5 validation errors.
 - The real complexity is in the integration, not in the model: the
   asynchronous submission and reconciliation (`SUBMITTED`,
   `ReconcileSubmittedOrders`), the 24h clock (the sweep plus
-  `RejectOverdueOrders`), the transactional outbox (ADR 0003), and two
+  `RejectOverdueOrders`, with `SweepOrphanedHolds` as the backstop for the
+  `order-management` hold), the transactional outbox (ADR 0003), and two
   replay-from-first-offset Kafka caches.
-- There are 14 ADRs (index: [../adr/README.md](../adr/README.md)). Most of
+- ADRs 0001–0024 (index: [../adr/README.md](../adr/README.md)). Most of
   them record infrastructure decisions (0003–0008, 0010–0013), not domain
   rules.
 

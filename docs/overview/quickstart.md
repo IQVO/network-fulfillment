@@ -109,10 +109,10 @@ What you should see (checked against a local build on 2026-10-09):
 
 To take `po-local-1` through `SUBMITTED` and `ACKNOWLEDGED` you need an
 order-management that answers `POST /orders`. Point `ORDER_MANAGEMENT_URL`
-at the cluster's order-management (port-forward its Service). On `develop`
-this call fails with status 400 because order-management requires an
-`Idempotency-Key` header this client does not send yet (open PR #63). The
-BDD suite (`make bdd`) exercises the full lifecycle with a fake planner.
+at the cluster's order-management (port-forward its Service). The raise sends
+the `Idempotency-Key` header order-management requires (`netful-raise-<networkRef>`),
+so a retry replays the same order. The BDD suite (`make bdd`) exercises the full
+lifecycle, including the orphaned-hold sweep, with a fake planner.
 
 ## Add Postgres
 

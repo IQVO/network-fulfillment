@@ -11,9 +11,11 @@ is no transaction. `Publisher` is the wired `ports.EventPublisher`:
 - the direct Kafka fan-out, when there is no database;
 - the log publisher, when `EVENT_PUBLISHER` is unset.
 
-There is no idempotency-key middleware and no optimistic-concurrency
+There is no idempotency-key middleware on this context's own routes and no
+optimistic-concurrency
 version check anywhere in this context. Idempotency comes from the state
-checks shown below.
+checks shown below. (The one `Idempotency-Key` in play is outbound: the raise
+to order-management carries `netful-raise-<networkRef>`.)
 
 ## 1. ReceiveNetworkDemand (poller)
 
@@ -34,9 +36,12 @@ sequenceDiagram
     loop each demand
         P->>UC: Execute(demand)
         UC->>R: FindByRef(networkRef)
-        alt already known
+        alt known, answered or overdue
             R-->>UC: existing order
             UC-->>P: existing order, no new answer
+        else known, still NEW inside its window
+            R-->>UC: existing order
+            Note over UC: resumes at RaiseHeldOrder, the same Idempotency-Key replays the same order
         else new demand
             UC->>TR: ToSKU(productId) per line
             alt ErrUnknownProduct
@@ -50,8 +55,11 @@ sequenceDiagram
                 UC->>U: Execute: Save NEW + Publish NetworkOrderReceived
                 UC->>OM: RaiseHeldOrder(siteId, requiredShipBy, SKUQuantities)
                 OM-->>UC: LocalOrderId, Feasible
+                UC->>A: RecordHold(localOrderId)
+                UC->>R: Save, hold recorded and order still NEW
                 alt not feasible
                     UC->>OM: CancelHeldOrder(localOrderId)
+                    UC->>A: SettleHold(CANCELLED)
                     UC->>A: Reject()
                     UC->>U: Execute: Save REJECTED + Publish NetworkOrderRejected INFEASIBLE_DEADLINE
                     UC->>GW: SubmitAcknowledgement(ref, false)
@@ -74,11 +82,17 @@ Source: `internal/application/usecases/receive_network_demand.go`,
 `internal/application/usecases/unit_of_work.go`.
 
 Omitted: the error branches return early. A failed `RaiseHeldOrder` returns
-`raise held order: ...` with the order already saved `NEW`. A failed submit
+`raise held order: ...` with the order already saved `NEW`; the next poll finds
+it still `NEW` inside its window and resumes (first `alt` above). A failed
+`CancelHeldOrder` returns `cancel held order: ...` with the hold already
+recorded, so the order stays `NEW` and the poller, `RejectOverdueOrders` and
+`SweepOrphanedHolds` can all still free it. A failed submit
 returns `submit acknowledgement` or `submit rejection` after the record has
 committed. Any error leaves the demand to be re-polled; the stub keeps it
 pending until `SubmitAcknowledgement`. A non-`ErrUnknownProduct`
-translation error aborts without saving anything.
+translation error aborts without saving anything. The untranslatable branch
+and a lineless resumed order call no order-management method, so they have no
+hold to free.
 
 ## 2. ReconcileSubmittedOrders (ticker, POLL_INTERVAL)
 
@@ -105,6 +119,7 @@ sequenceDiagram
             UC->>OM: ReleaseHeldOrder(localOrderId)
         else FAILURE
             UC->>OM: CancelHeldOrder(localOrderId)
+            UC->>A: SettleHold(CANCELLED)
             UC->>A: Reject()
             UC->>U: Execute: Save REJECTED + Publish NetworkOrderRejected SUBMISSION_FAILED
         else PENDING
@@ -123,7 +138,7 @@ is always the case on this path. The stub reconciles any acknowledged
 ref to `SUCCESS` immediately, so in stub mode `FAILURE` never occurs. A
 per-order error is skipped and not counted.
 
-## 3. SweepAcknowledgementDeadlines and RejectOverdueOrders (tickers, SWEEP_INTERVAL)
+## 3. SweepAcknowledgementDeadlines, RejectOverdueOrders and SweepOrphanedHolds (tickers, SWEEP_INTERVAL)
 
 ```mermaid
 sequenceDiagram
@@ -132,6 +147,8 @@ sequenceDiagram
     participant SW as SweepAcknowledgementDeadlines
     participant TR as runRejectOverdue ticker
     participant RO as RejectOverdueOrders
+    participant TH as runSweepOrphanedHolds ticker
+    participant SH as SweepOrphanedHolds
     participant R as NetworkOrderRepo
     participant A as NetworkOrder
     participant U as UoW
@@ -150,22 +167,46 @@ sequenceDiagram
     loop each NEW order
         RO->>A: AcknowledgementOverdue(now)
         opt overdue
-            opt localOrderId linked
+            opt hold recorded and still open
                 RO->>OM: CancelHeldOrder(localOrderId)
+                RO->>A: SettleHold(CANCELLED)
             end
             RO->>A: Reject()
             RO->>U: Execute: Save REJECTED + Publish NetworkOrderRejected ACKNOWLEDGEMENT_DEADLINE_MISSED
         end
     end
+    TH->>SH: Execute()
+    SH->>R: ListOpenHolds()
+    loop each NEW or REJECTED order with an open hold
+        SH->>A: HoldOrphaned(now, ORPHAN_HOLD_GRACE)
+        opt orphaned
+            SH->>OM: CancelHeldOrder(localOrderId)
+            alt 2xx or 404
+                SH->>A: SettleHold(CANCELLED)
+                SH->>U: Execute: Save + Publish OrphanedHoldCancelled CANCELLED or NOT_FOUND
+            else 409 or 422
+                SH->>A: SettleHold(ALREADY_RELEASED)
+                SH->>U: Execute: Save, no event
+            else any other error
+                Note over SH: counted failed, left open for the next pass
+            end
+        end
+    end
 ```
 
 Source: `internal/application/usecases/sweep_acknowledgement_deadlines.go`,
-`reject_overdue_orders.go`, `cmd/netfulfil/main.go` (`runSweep`,
-`runRejectOverdue`).
+`reject_overdue_orders.go`, `sweep_orphaned_holds.go`, `hold.go`,
+`cmd/netfulfil/workers.go` (`runSweep`, `runRejectOverdue`,
+`runSweepOrphanedHolds`).
 
-Omitted: the sweep's publish is **not** wrapped in a UoW, because it is not
-a state change. A per-order failure in either pass is skipped and retried
-on the next pass. Nothing is sent to the network.
+Omitted: the deadline sweep's publish is **not** wrapped in a UoW, because it is
+not a state change. A per-order failure in any pass is skipped and retried on
+the next pass. Nothing is sent to the network. `RejectOverdueOrders` calls the
+cancel only while the hold is open, and fails the order for this pass on any
+non-2xx answer; the orphaned-hold sweep is the one that reads `404` and
+`409`/`422` as answers, and only after `acknowledgeBy + ORPHAN_HOLD_GRACE`
+(default `1h`), so it normally finds nothing. It never calls `Reject()`. It is
+not started when `ORPHAN_HOLD_SWEEP_ENABLED=false`.
 
 ## 4. ConfirmNetworkOrderShipment (REST)
 

@@ -63,8 +63,8 @@ inside the diagram for `{id}` / `{sku}`.
 | `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | `CAPABILITY_OFFER_ENABLED=true` only | SKU skipped for that recompute pass |
 | `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | `CAPABILITY_OFFER_ENABLED=true` only | bad message logged and skipped, no DLQ |
 | `wes-work-planning` | upstream | Kafka, CloudEvents | `PathCapacityChanged` on `warehouse.work-planning.events` | `CAPABILITY_OFFER_ENABLED=true` only | bad message logged and skipped, no DLQ |
-| any subscriber | downstream | Kafka, CloudEvents | 6 event types on `warehouse.network-fulfillment.events` | `EVENT_PUBLISHER=kafka` only | outbox keeps unsent rows |
-| own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 6 types on `warehouse.network-fulfillment.analytics` | `EVENT_PUBLISHER=kafka` only | retry 3 times, then `.dlq` |
+| any subscriber | downstream | Kafka, CloudEvents | 7 event types on `warehouse.network-fulfillment.events` | `EVENT_PUBLISHER=kafka` only | outbox keeps unsent rows |
+| own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | `EVENT_PUBLISHER=kafka` only | retry 3 times, then `.dlq` |
 | `warehouse-console` (via `web/` remote) | downstream | REST | `GET /network-orders`, `GET /inbound-status` | on | n/a |
 | MCP clients | downstream | MCP, Streamable HTTP | 4 read-only tools | `mcp.enabled` | n/a |
 
@@ -115,8 +115,8 @@ Client: `internal/adapters/outbound/ordermanagement/planner.go`, wrapped by
 
 | Call | When | Body / meaning |
 | --- | --- | --- |
-| `POST /orders` | `ReceiveNetworkDemand`, after the order is saved `NEW` | `{"lines":[{"sku","quantity"}],"releaseOnAllocation":false,"allowPartialShipment":false,"requiredShipBy":"<RFC 3339>"}`. A response with `promiseDate` means feasible; `promiseDate: null` means the deadline cannot be met (a verdict, not an error). The response `id` becomes the order's `localOrderId`. |
-| `DELETE /orders/{id}` | rejecting an infeasible order, `SUBMISSION_FAILED`, `RejectOverdueOrders` | cancels the hold and frees the reservations |
+| `POST /orders` | `ReceiveNetworkDemand`, after the order is saved `NEW` | `{"lines":[{"sku","quantity"}],"releaseOnAllocation":false,"allowPartialShipment":false,"requiredShipBy":"<RFC 3339>"}` with header `Idempotency-Key: netful-raise-<networkRef>`. A response with `promiseDate` means feasible; `promiseDate: null` means the deadline cannot be met (a verdict, not an error). The response `id` is recorded on the order as its hold (`local_order_id`) as soon as the call returns, before the verdict is acted on (ADR 0024); REST and MCP show it as `localOrderId` from `SUBMITTED` on. |
+| `DELETE /orders/{id}` | rejecting an infeasible order, `SUBMISSION_FAILED`, `RejectOverdueOrders`, and `SweepOrphanedHolds` for a hold nobody decided | cancels the hold and frees the reservations. order-management's cancel is idempotent (a second cancel of a cancelled order is a 204). The sweep reads the answer as: 2xx or `404` = the hold is gone (outcome `CANCELLED`, event `OrphanedHoldCancelled`), `409` or `422` = already released (outcome `ALREADY_RELEASED`, no event, not retried), anything else = failure, retried on the next pass. |
 | `POST /orders/{id}/release` | `ReconcileSubmittedOrders`, when the network confirms | puts the held order on the floor |
 
 Feasibility is asked, never computed here (ADR 0001 §7). The contract is the
@@ -126,19 +126,25 @@ Failure behaviour:
 
 - Any status `>= 300`, transport error or decode error is returned as
   `order-management <METHOD> <path>: status <n>` and fails the use case. No
-  call is retried by the client (they are all mutations).
+  call is retried by the client (they are all mutations). For the cancel only,
+  `404` and `409`/`422` come back wrapped as two sentinel errors
+  (`contract.ErrHeldOrderNotFound`, `contract.ErrHeldOrderAlreadyReleased`)
+  with the same message; `SweepOrphanedHolds` treats them as answers, every
+  other caller still treats them as failures.
 - One gobreaker instance guards all three calls (ADR 0004). It opens after 5
   consecutive failures or more than 50 % failures over at least 10 calls in
   a 30 s window, stays open 30 s, then lets one probe through. While open,
   calls fail with `order-management: circuit breaker open, call not attempted`.
-  There is no fallback. The state is the `circuit_breaker_state` gauge on
+  A `404`, `409` or `422` on the cancel counts as a successful call, not a
+  dependency failure. There is no fallback. The state is the
+  `circuit_breaker_state` gauge on
   `GET /metrics` (see [observability](../operations/observability.md)).
 - Each call has a 10 s `http.Client` timeout and a context deadline capped at
   30 s.
-- `POST /orders` is sent without an `Idempotency-Key` header on `develop`.
-  order-management now requires one, so intake fails with status 400 until
-  this repo's open PR #63 lands (see
-  [troubleshooting](../operations/troubleshooting.md#network-orders)).
+- `POST /orders` is sent with a stable `Idempotency-Key`,
+  `netful-raise-<networkRef>`, which order-management requires and replays
+  for 24 hours, so the poller's retry of a raise returns the same order id
+  instead of reserving stock twice.
 
 ## inventory-storage
 
@@ -242,11 +248,15 @@ own analytics projector).
 | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` | v1 | `ReceiveNetworkDemand`, `ReconcileSubmittedOrders`, `RejectOverdueOrders` | `networkRef`, `siteId`, `reason` (`UNTRANSLATABLE_SKU`, `INFEASIBLE_DEADLINE`, `ACKNOWLEDGEMENT_DEADLINE_MISSED`, `SUBMISSION_FAILED`), `at` |
 | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` | v1 | `ConfirmNetworkOrderShipment` | `networkRef`, `siteId`, `localOrderId`, `at` |
 | `com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk` | v1 | `SweepAcknowledgementDeadlines`, every pass while an order stays overdue and `NEW` | `networkRef`, `siteId`, `acknowledgeBy`, `at` |
+| `com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled` | v1 | `SweepOrphanedHolds`, once per order-management hold it cancels after `acknowledgeBy + ORPHAN_HOLD_GRACE` (ADR 0024) | `networkRef`, `siteId`, `localOrderId`, `acknowledgeBy`, `answer` (`CANCELLED` or `NOT_FOUND`), `at` |
 
 `NetworkOrderAcknowledged` v2 means "settled"; before ADR 0016 the v1 type
 was published at submission. The projector still counts v1 events left on
 the analytics topic. `AcknowledgementDeadlineAtRisk` is level-triggered:
-expect repeats. The machine-readable catalogue is `apis/asyncapi.yaml`.
+expect repeats. `OrphanedHoldCancelled` is a reported fact with no state
+transition, published once per freed hold (a rare duplicate is possible with
+several replicas), and is additive at `v1`: a consumer that ignores unknown
+types is unaffected. The machine-readable catalogue is `apis/asyncapi.yaml`.
 
 No consumer of `warehouse.network-fulfillment.events` was found in the local
 fleet checkouts. The analytics topic's consumer and its DLQ

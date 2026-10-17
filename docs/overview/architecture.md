@@ -15,7 +15,7 @@ and `charts/network-fulfillment` on `develop`.
 
 | Binary | Role | Listens on | Reads / writes | Deployment (chart) |
 | --- | --- | --- | --- | --- |
-| `cmd/netfulfil` | OLTP service: REST API, inbound poller, four tickers, outbox relay, optional capability-offer pipeline | `:8080` (`PORT`); Service 80 -> 8080 | OLTP Postgres (`DATABASE_URL`, optional), Kafka (optional), order-management, inventory-storage | `network-fulfillment` |
+| `cmd/netfulfil` | OLTP service: REST API, inbound poller, background tickers (sweep, overdue rejection, orphaned-hold sweep, reconciliation, optional recompute), outbox relay, optional capability-offer pipeline | `:8080` (`PORT`); Service 80 -> 8080 | OLTP Postgres (`DATABASE_URL`, optional), Kafka (optional), order-management, inventory-storage | `network-fulfillment` |
 | `cmd/mcp` | read-only MCP server, Streamable HTTP at `/` and `/mcp`, `GET /healthz` | `:8090` (`MCP_ADDR`) | the same OLTP Postgres, read only; `netfulfil-reports` over REST | `network-fulfillment-mcp` (`mcp.enabled`) |
 | `cmd/netfulfil-projector` | analytics writer: consumes `warehouse.network-fulfillment.analytics` into the analytical database, DLQ on failure | `:8091` (`ADMIN_ADDR`), `GET /healthz` only | analytical Postgres (`ANALYTICS_DATABASE_URL`), Kafka | `network-fulfillment-projector` (`analytics.enabled`) |
 | `cmd/netfulfil-reports` | analytics reader: `GET /reports/acknowledgement`, `.../freshness` | `:8092` (`HTTP_ADDR`); Service 80 -> 8092 | analytical Postgres, read-only pool | `network-fulfillment-reports` (`analytics.enabled`) |
@@ -128,11 +128,11 @@ service segment equals the module name. See
 ## Data stores
 
 **OLTP Postgres** (`DATABASE_URL`, optional), migrations `migrations/0001`
-to `0004`, applied by `netfulfil` and by `mcp` at startup:
+to `0005`, applied by `netfulfil` and by `mcp` at startup:
 
 | Table | Holds |
 | --- | --- |
-| `network_orders` | one row per `NetworkOrder` (ref, site, deadlines, state, local order id) |
+| `network_orders` | one row per `NetworkOrder` (ref, site, deadlines, state, local order id, hold outcome and its settle time) |
 | `network_order_lines` | its lines, both vocabularies |
 | `outbox_events` | CloudEvent bytes waiting for (or already sent by) the relay |
 | `capability_offers` | latest offer per `(sku, site_id)` |
