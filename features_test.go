@@ -87,6 +87,7 @@ type world struct {
 	receive       *usecases.ReceiveNetworkDemand
 	reconcile     *usecases.ReconcileSubmittedOrders
 	sweep         *usecases.SweepAcknowledgementDeadlines
+	sweepHolds    *usecases.SweepOrphanedHolds
 	rejectOverdue *usecases.RejectOverdueOrders
 	recompute     *usecases.RecomputeCapabilityOffers
 	poller        *poller.Poller
@@ -138,6 +139,9 @@ func (w *world) reset() {
 	w.sweep = &usecases.SweepAcknowledgementDeadlines{Orders: w.orders, Events: w.bus, Clock: w.clock}
 	w.rejectOverdue = &usecases.RejectOverdueOrders{
 		Orders: w.orders, Planner: w.planner, Events: w.bus, Clock: w.clock,
+	}
+	w.sweepHolds = &usecases.SweepOrphanedHolds{
+		Orders: w.orders, Planner: w.planner, Events: w.bus, Clock: w.clock, Grace: time.Hour,
 	}
 	w.recompute = &usecases.RecomputeCapabilityOffers{
 		Translation: w.dict, Inventory: w.inventory, PathCap: w.pathCap, Capacity: w.capacity,
@@ -325,6 +329,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 
 	w.registerOrderSteps(sc)
 	w.registerLifecycleSteps(sc)
+	w.registerHoldSteps(sc)
 	w.registerOpsSteps(sc)
 	w.registerEventSteps(sc)
 	w.registerOfferSteps(sc)

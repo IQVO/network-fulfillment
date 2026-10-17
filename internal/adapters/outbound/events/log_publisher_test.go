@@ -30,6 +30,8 @@ func TestLogPublisher_GoldenOutput(t *testing.T) {
 		shared.NetworkOrderRejected{NetworkRef: "po-1", SiteId: "site-1", Reason: shared.RejectionReasonSubmissionFailed, At: at},
 		shared.NetworkOrderShipmentConfirmed{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1", At: at},
 		shared.AcknowledgementDeadlineAtRisk{NetworkRef: "po-1", SiteId: "site-1", AcknowledgeBy: at.Add(-time.Hour), At: at},
+		shared.OrphanedHoldCancelled{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1",
+			AcknowledgeBy: at.Add(-26 * time.Hour), Answer: shared.HoldAnswerNotFound, At: at},
 	}
 
 	var buf bytes.Buffer

@@ -56,24 +56,38 @@ type fakePlanner struct {
 	mu          sync.Mutex
 	feasible    bool
 	unavailable bool
-	seq         int
-	raised      []contract.HeldOrderRequest
-	released    []shared.LocalOrderId
-	cancelled   []shared.LocalOrderId
+	// cancelErr, when set, is what every CancelHeldOrder answers: the
+	// orphaned-hold scenarios (ADR 0024) drive order-management's answer.
+	cancelErr      error
+	seq            int
+	ids            map[shared.NetworkRef]shared.LocalOrderId
+	raised         []contract.HeldOrderRequest
+	released       []shared.LocalOrderId
+	cancelled      []shared.LocalOrderId
+	cancelAttempts []shared.LocalOrderId
 }
 
-func newFakePlanner() *fakePlanner { return &fakePlanner{feasible: true} }
+func newFakePlanner() *fakePlanner {
+	return &fakePlanner{feasible: true, ids: map[shared.NetworkRef]shared.LocalOrderId{}}
+}
 
+// RaiseHeldOrder is idempotent on the network ref, like order-management's
+// Idempotency-Key replay: a retried raise returns the same local order.
 func (p *fakePlanner) RaiseHeldOrder(_ context.Context, req contract.HeldOrderRequest) (contract.HeldOrderResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.unavailable {
 		return contract.HeldOrderResult{}, errPlannerDown
 	}
-	p.seq++
 	p.raised = append(p.raised, req)
+	id, replay := p.ids[req.NetworkRef]
+	if !replay {
+		p.seq++
+		id = shared.LocalOrderId(fmt.Sprintf("ord-%04d", p.seq))
+		p.ids[req.NetworkRef] = id
+	}
 	return contract.HeldOrderResult{
-		LocalOrderId:   shared.LocalOrderId(fmt.Sprintf("ord-%04d", p.seq)),
+		LocalOrderId:   id,
 		Feasible:       p.feasible,
 		PromisedCutoff: req.RequiredShipBy,
 	}, nil
@@ -89,6 +103,10 @@ func (p *fakePlanner) ReleaseHeldOrder(_ context.Context, id shared.LocalOrderId
 func (p *fakePlanner) CancelHeldOrder(_ context.Context, id shared.LocalOrderId) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.cancelAttempts = append(p.cancelAttempts, id)
+	if p.cancelErr != nil {
+		return p.cancelErr
+	}
 	p.cancelled = append(p.cancelled, id)
 	return nil
 }
