@@ -121,7 +121,7 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 // steps 3-6.
 func (uc *ReceiveNetworkDemand) resume(ctx context.Context, o *networkorder.NetworkOrder) (*networkorder.NetworkOrder, error) {
 	if len(o.Lines()) == 0 {
-		return uc.reject(ctx, o, nil, shared.RejectionReasonUntranslatableSKU)
+		return uc.reject(ctx, o, shared.RejectionReasonUntranslatableSKU)
 	}
 	return uc.answer(ctx, o)
 }
@@ -139,8 +139,22 @@ func (uc *ReceiveNetworkDemand) answer(ctx context.Context, o *networkorder.Netw
 		return nil, fmt.Errorf("raise held order: %w", err)
 	}
 
+	// Record the hold the moment it exists, BEFORE any decision depends on
+	// it (ADR 0024 §1). Until now the id was written only when the order
+	// moved to SUBMITTED, so a crash or a failed cancel here left a hold in
+	// order-management that nothing could name, and the acknowledgement
+	// window closing found nothing to free. A replay of this raise (the
+	// poller's retry) returns the same order id, so recording it again is a
+	// no-op.
+	if err := o.RecordHold(result.LocalOrderId); err != nil {
+		return nil, fmt.Errorf("record held order: %w", err)
+	}
+	if err := uc.Orders.Save(ctx, o); err != nil {
+		return nil, fmt.Errorf("record held order: %w", err)
+	}
+
 	if !result.Feasible {
-		return uc.reject(ctx, o, &result.LocalOrderId, shared.RejectionReasonInfeasibleDeadline)
+		return uc.reject(ctx, o, shared.RejectionReasonInfeasibleDeadline)
 	}
 	return uc.acknowledge(ctx, o, result)
 }
@@ -199,26 +213,25 @@ func (uc *ReceiveNetworkDemand) rejectUntranslatable(ctx context.Context, demand
 	if err := uc.saveAndPublishReceived(ctx, o, 0, now); err != nil {
 		return nil, err
 	}
-	return uc.reject(ctx, o, nil, shared.RejectionReasonUntranslatableSKU)
+	return uc.reject(ctx, o, shared.RejectionReasonUntranslatableSKU)
 }
 
 // reject answers the network in the negative and releases whatever we
 // were holding.
 //
-// CancelHeldOrder runs before the aggregate is even mutated, deliberately:
+// The hold is freed before the aggregate is even mutated, deliberately:
 // if the submission fails we will retry it and reach here again, whereas
 // a cancel skipped on an error path leaves inventory reserved for demand
 // we have already refused — the orphaned-hold failure both ADRs flagged
-// as their honest open gap. The state transition, its Save and its
-// Publish then commit together in one atomic scope: the network is only
-// ever told "no" (SubmitAcknowledgement below) once that record is
-// durable, so a submission failure can safely be retried without risking
-// a duplicate or contradictory event.
-func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.NetworkOrder, local *shared.LocalOrderId, reason shared.RejectionReason) (*networkorder.NetworkOrder, error) {
-	if local != nil {
-		if err := uc.Planner.CancelHeldOrder(ctx, *local); err != nil {
-			return nil, fmt.Errorf("cancel held order: %w", err)
-		}
+// as their honest open gap (closed by ADR 0024: the hold is recorded at
+// raise and freeHold records the outcome with the rejection). The state
+// transition, its Save and its Publish then commit together in one atomic
+// scope: the network is only ever told "no" (SubmitAcknowledgement below)
+// once that record is durable, so a submission failure can safely be
+// retried without risking a duplicate or contradictory event.
+func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.NetworkOrder, reason shared.RejectionReason) (*networkorder.NetworkOrder, error) {
+	if err := freeHold(ctx, uc.Planner, o, uc.Clock.Now()); err != nil {
+		return nil, fmt.Errorf("cancel held order: %w", err)
 	}
 	if err := o.Reject(); err != nil {
 		return nil, err

@@ -111,10 +111,8 @@ func (uc *ReconcileSubmittedOrders) confirm(ctx context.Context, o *networkorder
 // freeing the hold is the operationally important step and must not be
 // skipped by a later failure.
 func (uc *ReconcileSubmittedOrders) fail(ctx context.Context, o *networkorder.NetworkOrder) error {
-	if local := o.LocalOrderId(); local != nil {
-		if err := uc.Planner.CancelHeldOrder(ctx, *local); err != nil {
-			return err
-		}
+	if err := freeHold(ctx, uc.Planner, o, uc.Clock.Now()); err != nil {
+		return err
 	}
 	if err := o.Reject(); err != nil {
 		return err

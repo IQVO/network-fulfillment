@@ -144,8 +144,37 @@ func (p *Planner) ReleaseHeldOrder(ctx context.Context, id shared.LocalOrderId) 
 // OpenAPI spec on origin/develop rather than assumed, because this is the
 // call that releases inventory reserved for demand we refused, and a 404
 // here would silently recreate the orphaned-hold gap both ADRs flagged.
+//
+// Two of order-management's answers are ANSWERS, not failures (ADR 0024 §4),
+// and come back as the contract sentinels (wrapping the status error, so the
+// message is unchanged): 404 is contract.ErrHeldOrderNotFound (the hold is
+// gone) and 409/422 is contract.ErrHeldOrderAlreadyReleased (its BR6). Every
+// other non-2xx, a timeout or a transport error stays a plain error.
 func (p *Planner) CancelHeldOrder(ctx context.Context, id shared.LocalOrderId) error {
-	return p.do(ctx, http.MethodDelete, fmt.Sprintf("/orders/%s", id), nil, nil)
+	err := p.do(ctx, http.MethodDelete, fmt.Sprintf("/orders/%s", id), nil, nil)
+	var status *statusError
+	if !errors.As(err, &status) {
+		return err
+	}
+	if status.code == http.StatusNotFound {
+		return fmt.Errorf("%w: %w", contract.ErrHeldOrderNotFound, err)
+	}
+	if status.code == http.StatusConflict || status.code == http.StatusUnprocessableEntity {
+		return fmt.Errorf("%w: %w", contract.ErrHeldOrderAlreadyReleased, err)
+	}
+	return err
+}
+
+// statusError is a non-2xx answer from order-management. Its text is the
+// message this adapter has always returned, so logs and tests that match on
+// it are unaffected; the code is what CancelHeldOrder classifies.
+type statusError struct {
+	method, path string
+	code         int
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("order-management %s %s: status %d", e.method, e.path, e.code)
 }
 
 // idempotencyKeyHeader is the request header order-management's create
@@ -190,7 +219,7 @@ func (p *Planner) doWithHeaders(ctx context.Context, method, path string, header
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("order-management %s %s: status %d", method, path, resp.StatusCode)
+		return &statusError{method: method, path: path, code: resp.StatusCode}
 	}
 	if out == nil {
 		return nil
