@@ -104,6 +104,49 @@ func sweepInterval() time.Duration {
 	return time.Minute
 }
 
+// defaultOrphanHoldGrace is how long past acknowledgeBy the orphaned-hold
+// sweep (ADR 0024) waits before it counts a hold as orphaned. It leaves room
+// for RejectOverdueOrders, which runs on the same ticker, to do its own work
+// first, so the sweep is a backstop and never a second actor racing it.
+const defaultOrphanHoldGrace = time.Hour
+
+// orphanHoldSweepEnabled reports ORPHAN_HOLD_SWEEP_ENABLED (ADR 0024 §5).
+// Unlike CAPABILITY_OFFER_ENABLED this is ON by default: a leaked hold keeps
+// real inventory reserved forever, which is the worse failure. Anything
+// strconv.ParseBool accepts is honoured case-insensitively; an unparseable
+// value keeps it ON and logs a warning, so a typo can never switch the safety
+// net off silently.
+func orphanHoldSweepEnabled(logger *slog.Logger) bool {
+	raw := strings.TrimSpace(os.Getenv("ORPHAN_HOLD_SWEEP_ENABLED"))
+	if raw == "" {
+		return true
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		logger.Warn("invalid ORPHAN_HOLD_SWEEP_ENABLED, keeping the orphaned-hold sweep on", "value", raw, "error", err)
+		return true
+	}
+	return enabled
+}
+
+// orphanHoldGrace parses ORPHAN_HOLD_GRACE (ADR 0024 §5), a Go duration added
+// to acknowledgeBy. Unset yields defaultOrphanHoldGrace. "0" (or "0s") is valid
+// and means no grace, which is why this cannot reuse durationEnv: that treats a
+// zero duration as malformed. A negative or malformed value logs a warning and
+// yields the default.
+func orphanHoldGrace(logger *slog.Logger) time.Duration {
+	raw := strings.TrimSpace(os.Getenv("ORPHAN_HOLD_GRACE"))
+	if raw == "" {
+		return defaultOrphanHoldGrace
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		logger.Warn("invalid ORPHAN_HOLD_GRACE, using the default", "value", raw, "default", defaultOrphanHoldGrace, "error", err)
+		return defaultOrphanHoldGrace
+	}
+	return d
+}
+
 func addr() string {
 	if p := os.Getenv("PORT"); p != "" {
 		return ":" + p

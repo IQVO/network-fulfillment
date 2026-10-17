@@ -94,6 +94,7 @@ func run() int {
 
 	receive, sweep, rejectOverdue := wireUseCases(in.orders, in.gateway, planner, in.translation, eventPublisher, in.pool)
 	reconcile := wireReconcile(in.orders, in.gateway, planner, eventPublisher, in.pool)
+	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
 
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
@@ -116,7 +117,7 @@ func run() int {
 		serviceName: serviceName,
 	})
 
-	serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
+	serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
 	return 0
 }
 

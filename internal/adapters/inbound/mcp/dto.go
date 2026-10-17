@@ -67,7 +67,7 @@ func toNetworkOrderDTO(o *networkorder.NetworkOrder, now time.Time) networkOrder
 	}
 
 	var localOrderId *string
-	if id := o.LocalOrderId(); id != nil {
+	if id := o.CommittedLocalOrderId(); id != nil {
 		s := string(*id)
 		localOrderId = &s
 	}

@@ -127,15 +127,32 @@ func TestSweepOrphanedHolds_CancelsAnOrphanedHoldAndReportsIt(t *testing.T) {
 		t.Fatalf("the sweep made calls other than cancel: %v", f.planner.other)
 	}
 
-	o := f.stored(t, "po-1")
+	assertHoldSettledCancelled(t, f, "po-1")
+	assertOrphanedHoldReported(t, f)
+	if len(f.metrics.outcomes) != 1 || f.metrics.outcomes[0] != contract.HoldSweepCancelled {
+		t.Fatalf("metrics = %v, want [cancelled]", f.metrics.outcomes)
+	}
+}
+
+// assertHoldSettledCancelled checks the sweep recorded the CANCELLED outcome at
+// the sweep clock and left the protocol state alone: it frees the hold, it
+// never decides the state (that is RejectOverdueOrders').
+func assertHoldSettledCancelled(t *testing.T, f *sweepFx, ref shared.NetworkRef) {
+	t.Helper()
+	o := f.stored(t, ref)
 	if o.HoldOutcome() != networkorder.HoldCancelled || !o.HoldSettledAt().Equal(now()) {
 		t.Fatalf("outcome/at = %q/%v, want CANCELLED/%v", o.HoldOutcome(), o.HoldSettledAt(), now())
 	}
-	// The sweep frees the hold; it never decides the protocol state (that is RejectOverdueOrders').
 	if o.State() != networkorder.StateNew {
 		t.Fatalf("state = %v, want the sweep to leave it NEW", o.State())
 	}
+}
 
+// assertOrphanedHoldReported checks exactly one OrphanedHoldCancelled fact was
+// published, with the expected content, inside the committed unit of work that
+// settled the hold (transactional outbox).
+func assertOrphanedHoldReported(t *testing.T, f *sweepFx) {
+	t.Helper()
 	if len(f.pub.events) != 1 {
 		t.Fatalf("events = %d, want exactly OrphanedHoldCancelled: %+v", len(f.pub.events), f.pub.events)
 	}
@@ -148,12 +165,8 @@ func TestSweepOrphanedHolds_CancelsAnOrphanedHoldAndReportsIt(t *testing.T) {
 	if ev != want {
 		t.Fatalf("event = %+v, want %+v", ev, want)
 	}
-	// The settle and the report commit together (transactional outbox).
 	if !f.pub.inScope[0] || f.uow.committed != 1 {
 		t.Fatalf("publish inScope=%v committed=%d, want inside one committed unit of work", f.pub.inScope, f.uow.committed)
-	}
-	if len(f.metrics.outcomes) != 1 || f.metrics.outcomes[0] != contract.HoldSweepCancelled {
-		t.Fatalf("metrics = %v, want [cancelled]", f.metrics.outcomes)
 	}
 }
 
@@ -229,18 +242,7 @@ func TestSweepOrphanedHolds_OrderManagementFailuresAreRetriedNeverMarkedDone(t *
 			if err != nil {
 				t.Fatalf("one failing hold must not fail the pass: %v", err)
 			}
-			if res.Failed != 1 || res.Cancelled != 0 || res.AlreadyReleased != 0 {
-				t.Fatalf("result = %+v, want Failed=1", res)
-			}
-			if got := f.stored(t, "po-1").HoldOutcome(); got != "" {
-				t.Fatalf("outcome = %q, want the hold left open", got)
-			}
-			if len(f.pub.events) != 0 {
-				t.Fatalf("nothing may be reported for a cancel that did not happen: %+v", f.pub.events)
-			}
-			if len(f.metrics.outcomes) != 1 || f.metrics.outcomes[0] != contract.HoldSweepFailed {
-				t.Fatalf("metrics = %v, want [failed]", f.metrics.outcomes)
-			}
+			assertFailureLeftHoldOpen(t, f, res)
 
 			// Order-management recovers: the next pass retries and completes.
 			f.planner.cancelErr = nil
@@ -252,6 +254,25 @@ func TestSweepOrphanedHolds_OrderManagementFailuresAreRetriedNeverMarkedDone(t *
 				t.Fatalf("cancel calls = %d, want 2 (one failed, one retried)", len(f.planner.cancelled))
 			}
 		})
+	}
+}
+
+// assertFailureLeftHoldOpen checks a pass whose cancel failed counted one
+// failure, recorded no outcome (so the next pass retries), reported nothing and
+// counted the failure in the metric.
+func assertFailureLeftHoldOpen(t *testing.T, f *sweepFx, res usecases.SweepOrphanedHoldsResult) {
+	t.Helper()
+	if res.Failed != 1 || res.Cancelled != 0 || res.AlreadyReleased != 0 {
+		t.Fatalf("result = %+v, want Failed=1", res)
+	}
+	if got := f.stored(t, "po-1").HoldOutcome(); got != "" {
+		t.Fatalf("outcome = %q, want the hold left open", got)
+	}
+	if len(f.pub.events) != 0 {
+		t.Fatalf("nothing may be reported for a cancel that did not happen: %+v", f.pub.events)
+	}
+	if len(f.metrics.outcomes) != 1 || f.metrics.outcomes[0] != contract.HoldSweepFailed {
+		t.Fatalf("metrics = %v, want [failed]", f.metrics.outcomes)
 	}
 }
 

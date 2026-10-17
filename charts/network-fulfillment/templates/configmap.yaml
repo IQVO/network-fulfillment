@@ -40,6 +40,14 @@ data:
   # block every later event forever. 0 = unlimited.
   OUTBOX_MAX_ATTEMPTS: {{ .Values.config.outboxMaxAttempts | quote }}
 
+  # Orphaned-hold sweep (ADR 0024). ON unless config.orphanHoldSweepEnabled is
+  # false; the grace is added to each order's acknowledgeBy before a hold
+  # nobody decided is cancelled in order-management. Both are rendered with
+  # quote and no "if", so false and "0" reach the process instead of being
+  # dropped as empty.
+  ORPHAN_HOLD_SWEEP_ENABLED: {{ .Values.config.orphanHoldSweepEnabled | quote }}
+  ORPHAN_HOLD_GRACE: {{ .Values.config.orphanHoldGrace | quote }}
+
   # How often the network is polled for new demand. Inbound is a poll and
   # nothing else (ADR 0001 section 5): the network offers no push, so this
   # interval is the ONLY thing that brings demand into this context. It

@@ -17,7 +17,8 @@ info:
       `ACKNOWLEDGED`, ADR 0016), `NetworkOrderRejected`,
       `NetworkOrderShipmentConfirmed` and (from the
       acknowledgement sweep, without a state transition)
-      `AcknowledgementDeadlineAtRisk`.
+      `AcknowledgementDeadlineAtRisk`; and (from the orphaned-hold sweep,
+      ADR 0024, also without a state transition) `OrphanedHoldCancelled`.
 
     **Envelope (mandatory, ADR 0008).** Every message on every channel of
     this service is a CloudEvents 1.0 event in *structured content mode*
@@ -107,12 +108,13 @@ channels:
           - $ref: "#/components/messages/NetworkOrderRejected"
           - $ref: "#/components/messages/NetworkOrderShipmentConfirmed"
           - $ref: "#/components/messages/AcknowledgementDeadlineAtRisk"
+          - $ref: "#/components/messages/OrphanedHoldCancelled"
 
   warehouse.network-fulfillment.analytics:
     description: |
       The internal analytics topic (the `AnalyticsTopic` constant in
       `internal/adapters/outbound/kafka/analytics_publisher.go`). Carries the
-      same six occurrences with the same `type` and payload, but a distinct
+      same seven occurrences with the same `type` and payload, but a distinct
       `id` per occurrence and dataschema
       `urn:warehouse:network-fulfillment:analytics:<EventName>:v<N>` (v1,
       except `NetworkOrderAcknowledged` which is v2). There is
@@ -123,8 +125,8 @@ channels:
       `NetworkOrderAcknowledged` v1 still on the topic (unsuffixed type,
       published before ADR 0016, counted as before so a replay keeps the
       report numbers) and `NetworkOrderRejected`, ignores other types
-      (`NetworkOrderShipmentConfirmed` and `AcknowledgementDeadlineAtRisk`
-      today), and dead-letters to
+      (`NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and
+      `OrphanedHoldCancelled` today), and dead-letters to
       `warehouse.network-fulfillment.analytics.dlq` anything that is not a
       valid CloudEvent.
     subscribe:
@@ -143,6 +145,7 @@ channels:
           - $ref: "#/components/messages/NetworkOrderRejectedAnalytics"
           - $ref: "#/components/messages/NetworkOrderShipmentConfirmedAnalytics"
           - $ref: "#/components/messages/AcknowledgementDeadlineAtRiskAnalytics"
+          - $ref: "#/components/messages/OrphanedHoldCancelledAnalytics"
 
 components:
   messages:
@@ -398,6 +401,51 @@ components:
               acknowledgeBy: "2026-09-24T08:00:00Z"
               at: "2026-09-24T08:00:00Z"
 
+    OrphanedHoldCancelled:
+      name: OrphanedHoldCancelled
+      title: Orphaned order-management hold cancelled
+      summary: "A hold order-management made for demand nobody decided was found past the acknowledgement window plus the grace and cancelled — a reported fact, not a state transition."
+      description: |
+        Raised by `SweepOrphanedHolds` (ADR 0024) once per hold it frees: the order-management order raised for this demand was still held after `acknowledgeBy` plus `ORPHAN_HOLD_GRACE`, the `NetworkOrder` was never committed to (still `NEW`, or `REJECTED` with the cancel never confirmed), and order-management confirmed the hold is gone. The sweep NEVER changes the order's state — `RejectOverdueOrders` owns that and publishes `NetworkOrderRejected` — and it raises this event only when the hold was actually freed: a hold order-management reports as already released (409/422) was not an orphan and raises nothing. The outcome is recorded in the same transaction as the event, so it fires once per hold and is not re-raised on later passes.
+
+        `answer` is what order-management said to the cancel: `CANCELLED` (2xx) or `NOT_FOUND` (404, the hold no longer existed — still done). `localOrderId` is the order-management order that was held; it is published here and nowhere else for an order that was never submitted, because `GET /network-orders/{networkRef}` exposes `localOrderId` only from `SUBMITTED` on.
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled` — `dataschema`: `urn:warehouse:network-fulfillment:events:OrphanedHoldCancelled:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: network-fulfillment
+      payload:
+        $ref: "#/components/schemas/OrphanedHoldCancelledEvent"
+      examples:
+        - name: orphanedHoldCancelled
+          summary: "The hold order-management made for network order po-1 was cancelled two hours after its window closed."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "2b3c4d5e-6f70-4899-8011-bbccddeeff00"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:events:OrphanedHoldCancelled:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              localOrderId: "ord-1"
+              acknowledgeBy: "2026-09-22T06:00:00Z"
+              answer: "CANCELLED"
+              at: "2026-09-23T08:00:00Z"
+
     NetworkOrderReceivedAnalytics:
       name: NetworkOrderReceivedAnalytics
       title: Network order received (analytics)
@@ -650,6 +698,53 @@ components:
               acknowledgeBy: "2026-09-24T08:00:00Z"
               at: "2026-09-24T08:00:00Z"
 
+    OrphanedHoldCancelledAnalytics:
+      name: OrphanedHoldCancelledAnalytics
+      title: Orphaned order-management hold cancelled (analytics)
+      summary: "A hold order-management made for demand nobody decided was found past the acknowledgement window plus the grace and cancelled — a reported fact, not a state transition."
+      description: |
+        Raised by `SweepOrphanedHolds` (ADR 0024) once per hold it frees: the order-management order raised for this demand was still held after `acknowledgeBy` plus `ORPHAN_HOLD_GRACE`, the `NetworkOrder` was never committed to (still `NEW`, or `REJECTED` with the cancel never confirmed), and order-management confirmed the hold is gone. The sweep NEVER changes the order's state — `RejectOverdueOrders` owns that and publishes `NetworkOrderRejected` — and it raises this event only when the hold was actually freed: a hold order-management reports as already released (409/422) was not an orphan and raises nothing. The outcome is recorded in the same transaction as the event, so it fires once per hold and is not re-raised on later passes.
+
+        `answer` is what order-management said to the cancel: `CANCELLED` (2xx) or `NOT_FOUND` (404, the hold no longer existed — still done). `localOrderId` is the order-management order that was held; it is published here and nowhere else for an order that was never submitted, because `GET /network-orders/{networkRef}` exposes `localOrderId` only from `SUBMITTED` on.
+
+        Published on the analytics topic like every other event (the composition root's fan-out publishes each event to both topics). Not used by the analytics projector today (ignored as an unknown type).
+
+        `type`: `com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled` — `dataschema`: `urn:warehouse:network-fulfillment:analytics:OrphanedHoldCancelled:v1`.
+      contentType: application/cloudevents+json
+      headers:
+        $ref: "#/components/schemas/KafkaHeaders"
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: Network order reference (networkRef), identical to `subject`.
+      tags:
+        - name: networkorder
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/OrphanedHoldCancelledAnalyticsEvent"
+      examples:
+        - name: orphanedHoldCancelledAnalytics
+          summary: "The hold order-management made for network order po-1 was cancelled two hours after its window closed."
+          headers:
+            content-type: "application/cloudevents+json; charset=UTF-8"
+          payload:
+            specversion: "1.0"
+            id: "3c4d5e6f-7081-4900-9122-ccddeeff0011"
+            source: "/warehouse/network-fulfillment"
+            type: "com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled"
+            subject: "po-1"
+            time: "2026-09-23T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:network-fulfillment:analytics:OrphanedHoldCancelled:v1"
+            data:
+              networkRef: "po-1"
+              siteId: "site-1"
+              localOrderId: "ord-1"
+              acknowledgeBy: "2026-09-22T06:00:00Z"
+              answer: "CANCELLED"
+              at: "2026-09-23T08:00:00Z"
+
   schemas:
     KafkaHeaders:
       type: object
@@ -891,6 +986,39 @@ components:
           format: date-time
           description: "When this sweep pass observed the risk (same instant as `time`). Re-fires on every pass for as long as the order stays unanswered — not edge-triggered."
 
+    OrphanedHoldCancelledData:
+      type: object
+      title: OrphanedHoldCancelled payload
+      required:
+        - networkRef
+        - siteId
+        - localOrderId
+        - acknowledgeBy
+        - answer
+        - at
+      properties:
+        networkRef:
+          type: string
+          description: "Network order reference; also the `subject`."
+        siteId:
+          type: string
+          description: "Fulfilling site."
+        localOrderId:
+          type: string
+          description: "The order-management order that was held for this demand and is now freed."
+        acknowledgeBy:
+          type: string
+          format: date-time
+          description: "The order's acknowledgement deadline. The hold was freed after this instant plus `ORPHAN_HOLD_GRACE`."
+        answer:
+          type: string
+          enum: [CANCELLED, NOT_FOUND]
+          description: "What order-management answered to the cancel: `CANCELLED` (2xx) or `NOT_FOUND` (404, the hold no longer existed). A hold already released (409/422) raises no event."
+        at:
+          type: string
+          format: date-time
+          description: "When the sweep freed the hold (same instant as `time`)."
+
     NetworkOrderReceivedEvent:
       title: NetworkOrderReceived CloudEvent (events)
       allOf:
@@ -981,6 +1109,21 @@ components:
             data:
               $ref: "#/components/schemas/AcknowledgementDeadlineAtRiskData"
 
+    OrphanedHoldCancelledEvent:
+      title: OrphanedHoldCancelled CloudEvent (events)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:events:OrphanedHoldCancelled:v1"
+            data:
+              $ref: "#/components/schemas/OrphanedHoldCancelledData"
+
     NetworkOrderReceivedAnalyticsEvent:
       title: NetworkOrderReceived CloudEvent (analytics)
       allOf:
@@ -1070,3 +1213,18 @@ components:
               const: "urn:warehouse:network-fulfillment:analytics:AcknowledgementDeadlineAtRisk:v1"
             data:
               $ref: "#/components/schemas/AcknowledgementDeadlineAtRiskData"
+
+    OrphanedHoldCancelledAnalyticsEvent:
+      title: OrphanedHoldCancelled CloudEvent (analytics)
+      allOf:
+        - $ref: "#/components/schemas/CloudEvent"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled"
+            dataschema:
+              type: string
+              const: "urn:warehouse:network-fulfillment:analytics:OrphanedHoldCancelled:v1"
+            data:
+              $ref: "#/components/schemas/OrphanedHoldCancelledData"
