@@ -83,6 +83,13 @@ func goldenCases(at time.Time) []goldenCase {
 			data:    `{"networkRef":"po-1","siteId":"site-1","acknowledgeBy":"2026-09-23T07:00:00Z","at":"2026-09-23T08:00:00Z"}`,
 			version: 1,
 		},
+		{
+			// ADR 0024: the fact the orphaned-hold sweep reports. New, additive, v1.
+			name:    "OrphanedHoldCancelled",
+			event:   shared.OrphanedHoldCancelled{NetworkRef: "po-1", SiteId: "site-1", LocalOrderId: "ord-1", AcknowledgeBy: at.Add(-26 * time.Hour), Answer: shared.HoldAnswerCancelled, At: at},
+			data:    `{"networkRef":"po-1","siteId":"site-1","localOrderId":"ord-1","acknowledgeBy":"2026-09-22T06:00:00Z","answer":"CANCELLED","at":"2026-09-23T08:00:00Z"}`,
+			version: 1,
+		},
 	}
 }
 

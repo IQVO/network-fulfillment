@@ -3,3 +3,4 @@
 {"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","reason":"SUBMISSION_FAILED","at":"2026-09-23T08:00:00Z"}}
 {"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","localOrderId":"ord-1","at":"2026-09-23T08:00:00Z"}}
 {"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","acknowledgeBy":"2026-09-23T07:00:00Z","at":"2026-09-23T08:00:00Z"}}
+{"level":"INFO","msg":"integration event","event":{"networkRef":"po-1","siteId":"site-1","localOrderId":"ord-1","acknowledgeBy":"2026-09-22T06:00:00Z","answer":"NOT_FOUND","at":"2026-09-23T08:00:00Z"}}

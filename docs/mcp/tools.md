@@ -60,11 +60,15 @@ Shared by `get_network_order`, `list_network_orders` and the resource below
 | `requiredShipBy` | RFC 3339 | the network's deadline |
 | `acknowledgeBy` | RFC 3339 | receipt + 24 h |
 | `receivedAt` | RFC 3339 | when the demand was turned into an order |
-| `localOrderId` | string, omitted when absent | order-management's held order id, set from `SUBMITTED` on |
+| `localOrderId` | string, omitted when absent | order-management's held order id, shown from `SUBMITTED` on (`NetworkOrder.CommittedLocalOrderId`). Since ADR 0024 the hold is recorded on the order as soon as it is raised and kept on a `REJECTED` one, but this shape (and the REST one) still omits it for `NEW` and `REJECTED` orders, so its absence says nothing about whether a hold exists |
 | `acknowledgementOverdue` | bool | `true` only for a `NEW` order past `acknowledgeBy` (the sweep's own rule) |
 | `lines[]` | `{networkLineRef, networkProductId, sku, quantity}` | both vocabularies; empty for an order rejected as untranslatable |
 
-No ship-to PII exists in this shape (ADR 0009).
+No ship-to PII exists in this shape (ADR 0009). The hold outcome
+(`hold_outcome`, `hold_settled_at`) is not part of it either: it is in the
+`network_orders` table and, for a freed hold, in the `OrphanedHoldCancelled`
+event; see the
+[runbook](../operations/runbook.md#a-held-order-is-stuck-in-order-management).
 
 ## Resource
 

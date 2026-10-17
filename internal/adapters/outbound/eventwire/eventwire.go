@@ -68,6 +68,18 @@ type acknowledgementDeadlineAtRisk struct {
 	At            time.Time         `json:"at"`
 }
 
+// orphanedHoldCancelled is the wire shape of shared.OrphanedHoldCancelled
+// (ADR 0024). Additive at v1: a consumer that ignores unknown event types is
+// unaffected, and no existing event changed.
+type orphanedHoldCancelled struct {
+	NetworkRef    shared.NetworkRef   `json:"networkRef"`
+	SiteId        shared.SiteId       `json:"siteId"`
+	LocalOrderId  shared.LocalOrderId `json:"localOrderId"`
+	AcknowledgeBy time.Time           `json:"acknowledgeBy"`
+	Answer        shared.HoldAnswer   `json:"answer"`
+	At            time.Time           `json:"at"`
+}
+
 // Payload maps a domain event to its wire DTO. Every event type the domain
 // raises must be listed here; an unmapped type is an error rather than a
 // silent fallback to reflection over the (untagged) domain struct, which
@@ -101,6 +113,11 @@ func Payload(event shared.DomainEvent) (any, error) {
 	case shared.AcknowledgementDeadlineAtRisk:
 		return acknowledgementDeadlineAtRisk{
 			NetworkRef: e.NetworkRef, SiteId: e.SiteId, AcknowledgeBy: e.AcknowledgeBy, At: e.At,
+		}, nil
+	case shared.OrphanedHoldCancelled:
+		return orphanedHoldCancelled{
+			NetworkRef: e.NetworkRef, SiteId: e.SiteId, LocalOrderId: e.LocalOrderId,
+			AcknowledgeBy: e.AcknowledgeBy, Answer: e.Answer, At: e.At,
 		}, nil
 	default:
 		return nil, fmt.Errorf("eventwire: no wire payload for event %T (%s)", event, event.EventName())

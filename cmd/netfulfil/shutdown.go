@@ -36,6 +36,7 @@ func serve(
 	srv *http.Server,
 	sweep *usecases.SweepAcknowledgementDeadlines,
 	rejectOverdue *usecases.RejectOverdueOrders,
+	orphanHolds *usecases.SweepOrphanedHolds,
 	reconcile *usecases.ReconcileSubmittedOrders,
 	inbound *poller.Poller,
 	relay *postgres.OutboxRelay,
@@ -48,6 +49,9 @@ func serve(
 
 	go runSweep(ctx, sweep, logger)
 	go runRejectOverdue(ctx, rejectOverdue, logger)
+	if orphanHolds != nil {
+		go runSweepOrphanedHolds(ctx, orphanHolds, logger)
+	}
 	go runReconcile(ctx, reconcile, logger)
 	go runRecompute(ctx, recompute, logger)
 

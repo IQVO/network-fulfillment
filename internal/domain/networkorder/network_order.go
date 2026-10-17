@@ -147,6 +147,11 @@ type NetworkOrder struct {
 	state          State
 	localOrderId   *shared.LocalOrderId
 	receivedAt     time.Time
+
+	// holdOutcome and holdSettledAt record how the order-management hold
+	// ended (ADR 0024, see hold.go). Zero while the hold is open.
+	holdOutcome   HoldOutcome
+	holdSettledAt time.Time
 }
 
 // AcknowledgementWindow is how long the network gives us to answer. ADR
@@ -281,6 +286,11 @@ func (o *NetworkOrder) LinkLocalOrder(id shared.LocalOrderId) error {
 		return ErrNotAcknowledged
 	}
 	if o.localOrderId != nil {
+		// The hold is recorded when it is raised (RecordHold), so linking the
+		// same order at SUBMITTED is a no-op, not a conflict.
+		if *o.localOrderId == id {
+			return nil
+		}
 		return ErrLocalOrderAlreadyLinked
 	}
 	o.localOrderId = &id

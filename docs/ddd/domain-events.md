@@ -46,6 +46,18 @@ same transaction as the aggregate (ADR 0003), and the relay drains them.
 | `NetworkOrderRejected` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderRejected` | `networkRef`, `siteId`, `reason` (`UNTRANSLATABLE_SKU` \| `INFEASIBLE_DEADLINE` \| `ACKNOWLEDGEMENT_DEADLINE_MISSED` \| `SUBMISSION_FAILED`), `at` | `ReceiveNetworkDemand.reject` (first two reasons), `RejectOverdueOrders`, `ReconcileSubmittedOrders.fail` | own analytics projector (counters by reason, including `SUBMISSION_FAILED` -> `orders_rejected_submission_failed`) |
 | `NetworkOrderShipmentConfirmed` | `com.warehouse.wes.network-fulfillment.networkorder.NetworkOrderShipmentConfirmed` | `networkRef`, `siteId`, `localOrderId`, `at` | `ConfirmNetworkOrderShipment` | none (the projector ignores it) |
 | `AcknowledgementDeadlineAtRisk` | `com.warehouse.wes.network-fulfillment.networkorder.AcknowledgementDeadlineAtRisk` | `networkRef`, `siteId`, `acknowledgeBy`, `at` | `SweepAcknowledgementDeadlines`, re-fired every pass while the order is overdue | none (the projector ignores it) |
+| `OrphanedHoldCancelled` | `com.warehouse.wes.network-fulfillment.networkorder.OrphanedHoldCancelled` | `networkRef`, `siteId`, `localOrderId`, `acknowledgeBy`, `answer` (`CANCELLED` \| `NOT_FOUND`), `at` | `SweepOrphanedHolds` (ADR 0024), once per hold it frees; a hold found already released raises nothing | none (the projector ignores it) |
+
+`OrphanedHoldCancelled` is a reported fact, not a state transition: the order
+keeps its state (`RejectOverdueOrders` rejects it and publishes
+`NetworkOrderRejected`). `localOrderId` is the `order-management` order that was
+held; for an order never submitted it is published here and nowhere else,
+because REST and MCP expose `localOrderId` only from `SUBMITTED` on. `answer`
+is what `order-management` replied to the cancel: `CANCELLED` (2xx) or
+`NOT_FOUND` (404, the hold no longer existed). The outcome and the event are
+saved in one transaction, so it is published once per hold; with several
+`netfulfil` replicas a rare duplicate is possible, so dedupe on the CloudEvents
+`id`. It is additive at `v1` on both streams.
 
 **Fleet consumers:** none found. A search of the local fleet checkouts
 found no other context referencing `warehouse.network-fulfillment.events`.
@@ -54,7 +66,7 @@ yet.
 
 Partition key and `subject` are always `networkRef`
 (`kafka.aggregateKey`). The default branch, which keys by event name, is
-never reached by these six types.
+never reached by these seven types.
 
 `CapabilityOffer` raises no events.
 

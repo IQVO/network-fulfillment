@@ -161,3 +161,34 @@ type AcknowledgementDeadlineAtRisk struct {
 
 func (e AcknowledgementDeadlineAtRisk) EventName() string     { return "AcknowledgementDeadlineAtRisk" }
 func (e AcknowledgementDeadlineAtRisk) OccurredAt() time.Time { return e.At }
+
+// HoldAnswer is what order-management answered to the cancel that freed an
+// orphaned hold.
+type HoldAnswer string
+
+const (
+	// HoldAnswerCancelled: a 2xx, the hold was cancelled by this cancel.
+	HoldAnswerCancelled HoldAnswer = "CANCELLED"
+
+	// HoldAnswerNotFound: a 404, the hold no longer existed. Done all the
+	// same: the reservations the hold stood for are gone.
+	HoldAnswerNotFound HoldAnswer = "NOT_FOUND"
+)
+
+// OrphanedHoldCancelled is raised by SweepOrphanedHolds once per hold it freed
+// (ADR 0024): the order-management order raised for this demand was still held
+// past acknowledgeBy plus the grace, nobody decided it, and order-management
+// confirmed it is gone. It is a REPORTED FACT about a hold that leaked, not a
+// state transition of the protocol: the order keeps its state (RejectOverdueOrders
+// owns that). A hold found already released raises nothing: it was not an orphan.
+type OrphanedHoldCancelled struct {
+	NetworkRef    NetworkRef
+	SiteId        SiteId
+	LocalOrderId  LocalOrderId
+	AcknowledgeBy time.Time
+	Answer        HoldAnswer
+	At            time.Time
+}
+
+func (e OrphanedHoldCancelled) EventName() string     { return "OrphanedHoldCancelled" }
+func (e OrphanedHoldCancelled) OccurredAt() time.Time { return e.At }

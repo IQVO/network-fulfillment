@@ -35,6 +35,12 @@ type NetworkOrderRepo interface {
 	// wants "just the working set" cannot be silently widened by a
 	// future change here.
 	ListAll(ctx context.Context) ([]*networkorder.NetworkOrder, error)
+	// ListOpenHolds returns every order whose order-management hold is
+	// recorded and has no outcome, in NEW or REJECTED (ADR 0024 §3): the
+	// candidates of SweepOrphanedHolds. It is a narrowing, not the orphan
+	// rule: the use case still asks the domain (NetworkOrder.HoldOrphaned)
+	// whether acknowledgeBy plus the grace has passed.
+	ListOpenHolds(ctx context.Context) ([]*networkorder.NetworkOrder, error)
 }
 
 // NetworkGateway is the ONLY route to the external network. Every call
@@ -214,6 +220,13 @@ type EventPublisher interface {
 // cases stay adapter-agnostic either way.
 type UnitOfWork interface {
 	Execute(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
+// OrphanHoldMetrics counts what the orphaned-hold sweep did with each hold
+// (ADR 0024 §7), one call per hold. A nil implementation is valid: the sweep
+// then counts nothing.
+type OrphanHoldMetrics interface {
+	Swept(ctx context.Context, outcome contract.HoldSweepOutcome)
 }
 
 // Clock is the only source of time in the application layer, so the

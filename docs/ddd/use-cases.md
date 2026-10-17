@@ -6,7 +6,7 @@ sidebar_label: Use cases
 
 # Application use cases
 
-The six application services in `internal/application/usecases`, as they are
+The seven application services in `internal/application/usecases`, as they are
 on `develop`: what triggers each one, what it takes, which invariants it
 relies on, what it calls and which events it raises. The step-by-step
 sequence diagrams are in [sequence-diagrams.md](sequence-diagrams.md); the
@@ -26,6 +26,7 @@ tools read the repositories directly (`internal/adapters/inbound/http/server.go`
 | `ReconcileSubmittedOrders` | ticker | every `POLL_INTERVAL` | `cmd/netfulfil/workers.go` |
 | `SweepAcknowledgementDeadlines` | ticker | every `SWEEP_INTERVAL` | `cmd/netfulfil/workers.go` |
 | `RejectOverdueOrders` | ticker | every `SWEEP_INTERVAL` (its own ticker) | `cmd/netfulfil/workers.go` |
+| `SweepOrphanedHolds` | ticker | every `SWEEP_INTERVAL` (its own ticker, the same interval as the two passes above); not started when `ORPHAN_HOLD_SWEEP_ENABLED=false` | `cmd/netfulfil/workers.go` (`runSweepOrphanedHolds`), built in `cmd/netfulfil/wiring.go` (`wireOrphanHoldSweep`) |
 | `ConfirmNetworkOrderShipment` | REST | `POST /network-orders/{networkRef}/shipment-confirmation` | `internal/adapters/inbound/http/server.go` |
 | `RecomputeCapabilityOffers` | ticker | every `RECOMPUTE_INTERVAL`, only with `CAPABILITY_OFFER_ENABLED=true` | `cmd/netfulfil/capability.go` |
 
@@ -69,8 +70,12 @@ answered order.
   `networkRef`, `siteId`, `requiredShipBy`, `lines[]` (`networkLineRef`,
   `networkProductId`, `quantity`).
 - **Steps**:
-  1. Idempotency: if an order with this `networkRef` exists, return it
-     unchanged. Nothing is re-answered.
+  1. Idempotency: if an order with this `networkRef` exists and is not `NEW`,
+     or its window has closed, return it unchanged. Nothing is re-answered. An
+     order still `NEW` inside its window was recorded but never answered
+     (order-management was down, or the process stopped after the save), so it
+     **resumes** at step 5 instead (a lineless one is rejected
+     `UNTRANSLATABLE_SKU`).
   2. Translate every line's `networkProductId` to a SKU through
      `ProductTranslation`. One unknown product rejects the whole order.
   3. Untranslatable: build a lineless order (`ReceiveUntranslatable`), save
@@ -79,30 +84,45 @@ answered order.
   4. Otherwise build the order (`Receive`), save it `NEW` and publish
      `NetworkOrderReceived` in one scope.
   5. `FulfillmentPlanner.RaiseHeldOrder`: `POST /orders` with
-     `releaseOnAllocation: false`, `allowPartialShipment: false` and
-     `requiredShipBy`. A `promiseDate` means feasible, `null` means not.
-  6. Not feasible: `DELETE /orders/{id}` (cancel the hold), `Reject`, save and
-     publish `NetworkOrderRejected` (`INFEASIBLE_DEADLINE`) in one scope,
-     then `SubmitAcknowledgement(ref, false)`.
-  7. Feasible: `Submit` (to `SUBMITTED`), `LinkLocalOrder(id)`, save and
-     publish `NetworkOrderSubmitted` in one scope, then
-     `SubmitAcknowledgement(ref, true)`. The hold is **not** released here;
-     `ReconcileSubmittedOrders` does that once the network settles it.
+     `releaseOnAllocation: false`, `allowPartialShipment: false`,
+     `requiredShipBy` and `Idempotency-Key: netful-raise-<networkRef>`, so a
+     retry replays the same order-management order. A `promiseDate` means
+     feasible, `null` means not.
+  6. Record the hold: `NetworkOrder.RecordHold(id)` and `Save`, right after the
+     raise returns and before any decision (ADR 0024 §1). The order stays `NEW`
+     but now names its hold, so a failure from here on leaves something the
+     cancel paths and `SweepOrphanedHolds` can find.
+  7. Not feasible: `freeHold` (`DELETE /orders/{id}`, then the hold outcome
+     `CANCELLED` is set on the order), `Reject`, save and publish
+     `NetworkOrderRejected` (`INFEASIBLE_DEADLINE`) in one scope, then
+     `SubmitAcknowledgement(ref, false)`.
+  8. Feasible: `Submit` (to `SUBMITTED`), `LinkLocalOrder(id)` (a no-op, the id
+     is already recorded), save and publish `NetworkOrderSubmitted` in one
+     scope, then `SubmitAcknowledgement(ref, true)`. The hold is **not**
+     released here; `ReconcileSubmittedOrders` does that once the network
+     settles it.
 - **Invariants** (domain): `networkRef` not empty; at least one line
   (`ErrNoLines`) except for the untranslatable constructor; each line has a
   line ref, a product id and a positive quantity; `acknowledgeBy` is
   `receivedAt + 24h` (`AcknowledgementWindow`); `Submit` and `Reject` only
-  from `NEW` (`ErrAlreadyAnswered`); a local order can be linked once, and
-  only from `SUBMITTED` on.
+  from `NEW` (`ErrAlreadyAnswered`); the hold is recorded only on a `NEW` order
+  (`RecordHold`, `ErrAlreadyAnswered` otherwise), idempotent for the same id and
+  `ErrLocalOrderAlreadyLinked` for another; `LinkLocalOrder` only from
+  `SUBMITTED` on, also idempotent for the same id.
 - **Events**: `NetworkOrderReceived`, then either `NetworkOrderSubmitted` or
   `NetworkOrderRejected` (`UNTRANSLATABLE_SKU` or `INFEASIBLE_DEADLINE`).
 - **Failure**: any error is returned to the poller, which logs
   `receive network demand failed`, counts it in `/inbound-status` `failed`
-  and keeps the watermark, so the unit is fetched again. Because step 1
-  returns an existing order early, an order saved `NEW` before step 5 failed
-  is not retried on the next poll: it stays `NEW` until
-  `RejectOverdueOrders` rejects it 24 h later (`@known-bug` in
-  `features/network_order_intake.feature`).
+  and keeps the watermark, so the unit is fetched again. An order saved `NEW`
+  before step 5 failed is found on the next poll and resumed (step 1), as long
+  as its window is open; the raise replays the same order. If the cancel in
+  step 7 fails, the order stays `NEW` with its hold recorded: the poller
+  retries inside the window, `RejectOverdueOrders` after it, and
+  `SweepOrphanedHolds` after `ORPHAN_HOLD_GRACE`. A process stop between
+  order-management committing the raise and step 6 is healed inside the window
+  (the re-delivery replays the raise and records the id); only if the window
+  closes first does nothing name the hold, see the
+  [runbook](../operations/runbook.md#a-held-order-is-stuck-in-order-management).
 
 ## ReconcileSubmittedOrders
 
@@ -114,8 +134,11 @@ answered order.
   - `SUCCESS`: `ConfirmAcknowledgement` (to `ACKNOWLEDGED`), save and publish
     `NetworkOrderAcknowledged` (v2) in one scope, then
     `POST /orders/{localOrderId}/release`.
-  - `FAILURE`: `DELETE /orders/{localOrderId}` first, then `Reject`, save and
-    publish `NetworkOrderRejected` (`SUBMISSION_FAILED`).
+  - `FAILURE`: `freeHold` first (`DELETE /orders/{localOrderId}`, then the hold
+    outcome `CANCELLED` is recorded), then `Reject`, save and publish
+    `NetworkOrderRejected` (`SUBMISSION_FAILED`). The outcome is saved in the
+    same write as the rejection; before ADR 0024 that write was refused by a
+    database CHECK and the order stayed `SUBMITTED`.
   - `PENDING` or a lookup error: left for the next pass.
 - **Invariants**: `ConfirmAcknowledgement` only from `SUBMITTED`
   (`ErrNotSubmitted`); `Reject` from `NEW` or `SUBMITTED`.
@@ -148,15 +171,59 @@ closed unanswered (ADR 0001 §6).
 whose window closed. It never acknowledges late.
 
 - **Input**: none; same `ListUnanswered` listing and the same overdue rule.
-- **Per overdue order**: cancel the local hold if one is linked
-  (`DELETE /orders/{id}`), `Reject`, save and publish `NetworkOrderRejected`
+- **Per overdue order**: `freeHold`: cancel the recorded hold if it is still
+  open (`DELETE /orders/{id}`) and record the outcome `CANCELLED`, or skip the
+  call when the order has no hold or the orphaned-hold sweep already settled
+  it; then `Reject`, save and publish `NetworkOrderRejected`
   (`ACKNOWLEDGEMENT_DEADLINE_MISSED`) in one scope.
 - **Events**: `NetworkOrderRejected`.
-- **Failure**: one failing order is skipped; the next pass retries it.
-- Note from the code: only `NEW` orders are overdue, and a local order is
-  linked only from `SUBMITTED` on, so in practice the cancel branch finds no
-  linked order. A hold created by a `RaiseHeldOrder` call whose order then
-  stayed `NEW` is not cancelled by this use case.
+- **Failure**: one failing order is skipped; the next pass retries it. Any
+  non-2xx answer to the cancel (a `404` or a `409`/`422` included) is a failure
+  here and the order is retried; `SweepOrphanedHolds` classifies those answers
+  and, once `ORPHAN_HOLD_GRACE` has passed, records the outcome so this use
+  case can skip the cancel and reject.
+- Note from the code: since ADR 0024 the hold is recorded on the order when it
+  is raised, so the cancel branch now fires for an order that stayed `NEW`.
+  Before it, the id was written only from `SUBMITTED` on and this branch never
+  found a hold to cancel.
+
+## SweepOrphanedHolds
+
+`sweep_orphaned_holds.go` (ADR 0024, gap OM-0020). Frees an
+`order-management` hold nobody decided. `order-management` has no timeout on a
+held order, so the clock lives here; this is the backstop for
+`RejectOverdueOrders`. Independent of the other two sweeps: none depends on
+another having run.
+
+- **Input**: none; it lists `NetworkOrderRepo.ListOpenHolds` (hold recorded,
+  no outcome, state `NEW` or `REJECTED`).
+- **Rule** (domain, `NetworkOrder.HoldOrphaned(now, grace)`): the hold is open,
+  the state is `NEW` or `REJECTED`, and `now` is strictly after
+  `acknowledgeBy + grace`. `grace` is `ORPHAN_HOLD_GRACE` (default `1h`).
+  `SUBMITTED`, `ACKNOWLEDGED` and `CONFIRMED` are never orphaned.
+- **Per orphaned hold**: `FulfillmentPlanner.CancelHeldOrder`
+  (`DELETE /orders/{id}`) and classify order-management's answer (the planner
+  turns the status into two sentinel errors in `internal/application/contract`):
+
+  | Answer | Meaning | Action |
+  | --- | --- | --- |
+  | 2xx | cancelled | `SettleHold(CANCELLED)`, save and publish `OrphanedHoldCancelled` (`answer` `CANCELLED`) in one scope |
+  | 404 (`ErrHeldOrderNotFound`) | the hold no longer exists | the same, `answer` `NOT_FOUND` |
+  | 409 or 422 (`ErrHeldOrderAlreadyReleased`) | already released: not an orphan | `SettleHold(ALREADY_RELEASED)`, saved, **no event**, never retried |
+  | anything else (5xx, timeout, transport error, open breaker) | unknown | nothing recorded, counted `failed`, retried next pass |
+
+- **Never**: changes the order's state (`RejectOverdueOrders` owns that), or
+  reads anything from order-management except the answer to the cancel.
+- **Events**: `OrphanedHoldCancelled`, once per freed hold. It is a reported
+  fact, not a state transition.
+- **Metric**: `network_fulfillment.orphaned_holds.swept` by `outcome`
+  (`cancelled`, `already_released`, `failed`), through `ports.OrphanHoldMetrics`.
+- **Failure**: one bad hold never aborts the pass; the pass result is
+  `Examined`, `Cancelled`, `AlreadyReleased`, `Failed`, logged as WARN
+  `orphaned holds swept` when any of the last three is non-zero. A failed save
+  is retried safely because order-management's cancel is idempotent. With
+  several `netfulfil` replicas two can both cancel the same hold and both
+  publish the event.
 
 ## ConfirmNetworkOrderShipment
 

@@ -29,19 +29,28 @@ inside the cluster, like every context in the fleet.
     `POLL_INTERVAL` and `SWEEP_INTERVAL`. A malformed value falls back to the
     default, but a **zero or negative value is accepted** and is then handed to
     `time.NewTicker`, which panics. Always set these to a positive duration.
+  - `orphanHoldGrace` (same file) is used for `ORPHAN_HOLD_GRACE` and is the
+    one duration where `0` (or `0s`) is valid and means "no grace", which is why
+    it cannot use `durationEnv`. A malformed or negative value logs a WARN
+    (`invalid ORPHAN_HOLD_GRACE, using the default`) and uses `1h`.
 - **Integers**: `envInt` (`cmd/netfulfil/config.go`) is used for
   `OUTBOX_MAX_ATTEMPTS`. `0` is valid; a malformed or negative value logs a
   WARN (`invalid integer env var, using default`) and falls back to the
   default.
-- **Booleans**: only `CAPABILITY_OFFER_ENABLED` is boolean. It is `true` only
-  for the string `true` (case-insensitive, surrounding spaces trimmed).
+- **Booleans**: two are boolean. `CAPABILITY_OFFER_ENABLED` is `true` only for
+  the string `true` (case-insensitive, surrounding spaces trimmed), default
+  off. `ORPHAN_HOLD_SWEEP_ENABLED` is **on by default**: unset or empty is on,
+  anything `strconv.ParseBool` accepts (`true`, `false`, `1`, `0`, `t`, `f`, ...,
+  case-insensitive) is honoured, and an unparseable value logs a WARN
+  (`invalid ORPHAN_HOLD_SWEEP_ENABLED, keeping the orphaned-hold sweep on`) and
+  keeps it on, so a typo can never switch the safety net off.
 - **`EVENT_PUBLISHER`** is compared exactly: only the lower-case string
   `kafka` enables Kafka. Any other value, including `Kafka`, keeps the log
   publisher.
 
 ## `cmd/netfulfil` (the OLTP service)
 
-The REST API, the inbound poller, the four background tickers and the outbox
+The REST API, the inbound poller, the background tickers and the outbox
 relay all run in this one process. Its env surface lives in
 `cmd/netfulfil/config.go` plus the wiring files named below.
 
@@ -57,7 +66,9 @@ relay all run in this one process. Its env surface lives in
 | `PRODUCT_TRANSLATION_FILE` | unset | no, but see meaning | The Anti-Corruption Layer dictionary, `{"products":[{"networkProductId","sku"}]}`. Unknown keys, empty fields and a product mapped twice fail boot. Unset: the dictionary is empty, a `WARN` is logged, and **every** network order is rejected as `UNTRANSLATABLE_SKU` (ADR 0013). | `cmd/netfulfil/wiring.go` (`loadProductTranslation`), `internal/adapters/outbound/memory/translation_file.go` |
 | `ORDER_MANAGEMENT_URL` | `http://localhost:8080` | yes in any real deployment | Base URL for the held-order calls `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}`. | `cmd/netfulfil/wiring.go` (`wirePlanner`) |
 | `POLL_INTERVAL` | `1m` | no | Cadence of the inbound poller **and** of `ReconcileSubmittedOrders`. Must be positive (see above). | `cmd/netfulfil/config.go` (`pollInterval`), `cmd/netfulfil/workers.go` |
-| `SWEEP_INTERVAL` | `1m` | no | Cadence of `SweepAcknowledgementDeadlines` and of `RejectOverdueOrders` (two separate tickers). Must be positive. The chart sets `5m`. | `cmd/netfulfil/config.go` (`sweepInterval`), `cmd/netfulfil/workers.go` |
+| `SWEEP_INTERVAL` | `1m` | no | Cadence of `SweepAcknowledgementDeadlines`, of `RejectOverdueOrders` and of `SweepOrphanedHolds` (three separate tickers). Must be positive. The chart sets `5m`. | `cmd/netfulfil/config.go` (`sweepInterval`), `cmd/netfulfil/workers.go` |
+| `ORPHAN_HOLD_SWEEP_ENABLED` | `true` | no | Turns the orphaned-hold sweep (ADR 0024) on or off. `false` skips wiring it: no ticker, and a boot WARN `orphaned-hold sweep disabled by ORPHAN_HOLD_SWEEP_ENABLED: a hold nobody decides stays reserved in order-management`. Anything else `strconv.ParseBool` rejects keeps it on. The hold id and outcome are still recorded when it is off. | `cmd/netfulfil/config.go` (`orphanHoldSweepEnabled`), `cmd/netfulfil/wiring.go` (`wireOrphanHoldSweep`) |
+| `ORPHAN_HOLD_GRACE` | `1h` | no | Go duration added to each order's `acknowledgeBy` before its undecided hold counts as orphaned (`now > acknowledgeBy + grace`). It lets `RejectOverdueOrders` free the hold first, so the sweep is a backstop and not a second actor. `0` means no grace; a malformed or negative value logs a WARN and uses `1h`. Read once at boot. | `cmd/netfulfil/config.go` (`orphanHoldGrace`) |
 | `EVENT_PUBLISHER` | unset (log) | no | `kafka` publishes every domain event to both topics. With `DATABASE_URL` set this goes through the transactional outbox and starts the relay (ADR 0003); without it both topics are written directly. Anything else logs events only. | `cmd/netfulfil/publishing.go` (`wireEventPublisher`) |
 | `KAFKA_BROKERS` | `localhost:9092` | when Kafka is used | Comma-separated broker list for the two publishers and the two capability-offer caches. The caches read their start-up offsets from the first broker only. | `cmd/netfulfil/config.go` (`kafkaBrokers`), `internal/adapters/outbound/processpathcache/consumer.go` |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | no | Sleep between outbox relay passes that found nothing to publish (outbox mode only). A full batch of 100 is followed immediately by another pass. | `cmd/netfulfil/publishing.go`, `internal/adapters/outbound/postgres/outbox_relay.go` |
@@ -152,6 +163,8 @@ values key (`CAPABILITY_OFFER_ENABLED`, `SITE_ID`, `RECOMPUTE_INTERVAL`,
 | `config.orderManagementUrl` | `ORDER_MANAGEMENT_URL` | api |
 | `config.pollInterval` | `POLL_INTERVAL` (ConfigMap) | api |
 | `config.sweepInterval` | `SWEEP_INTERVAL` | api |
+| `config.orphanHoldSweepEnabled` | `ORPHAN_HOLD_SWEEP_ENABLED` (default `true`; rendered with `quote` and no `if`, so `false` reaches the process) | api |
+| `config.orphanHoldGrace` | `ORPHAN_HOLD_GRACE` (default `"1h"`; `"0"` reaches the process too) | api |
 | `config.corsAllowedOrigins` | `CORS_ALLOWED_ORIGINS` | api |
 | `config.eventPublisher` | `EVENT_PUBLISHER` | api |
 | `config.outboxMaxAttempts` | `OUTBOX_MAX_ATTEMPTS` (ConfigMap and env) | api |

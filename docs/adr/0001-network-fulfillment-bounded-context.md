@@ -26,6 +26,10 @@ fleet's own ecosystem service playing that structural role — and
 Decision section records exactly what changes and what, in this
 record's reasoning and shape, stands unmodified.
 
+Amended by ADR-0024 (`orphaned order-management hold sweep`): the
+"orphaned-hold sweep as an open gap" named under Consequences is closed
+there, and the hold id is now recorded as soon as the hold exists.
+
 ## Context
 
 ### What "selling capability to a network" actually means

@@ -34,6 +34,8 @@ func TestPayload_FieldNamesPerEvent(t *testing.T) {
 			[]string{"networkRef", "siteId", "localOrderId", "at"}},
 		{shared.AcknowledgementDeadlineAtRisk{NetworkRef: "n", At: at},
 			[]string{"networkRef", "siteId", "acknowledgeBy", "at"}},
+		{shared.OrphanedHoldCancelled{NetworkRef: "n", At: at},
+			[]string{"networkRef", "siteId", "localOrderId", "acknowledgeBy", "answer", "at"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.event.EventName(), func(t *testing.T) {

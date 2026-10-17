@@ -33,7 +33,7 @@ flowchart LR
     T["Poll timer<br/>POLL_INTERVAL"]:::actor
     NW["retail-network<br/>stub gateway"]:::external
     C1["Receive network demand"]:::command
-    POL0["Policy: already known NetworkRef<br/>returns existing order"]:::policy
+    POL0["Policy: answered or overdue NetworkRef<br/>returns existing order,<br/>an unanswered NEW one resumes"]:::policy
     PT["Product translation<br/>dictionary"]:::readmodel
     G1["NetworkOrder"]:::aggregate
     E1["NetworkOrderReceived"]:::event
@@ -46,7 +46,7 @@ flowchart LR
     E2["NetworkOrderSubmitted"]:::event
     E3["NetworkOrderRejected"]:::event
     C5["Cancel held order"]:::command
-    H2["Hotspot: crash after raising hold<br/>leaves NEW order with no localOrderId"]:::hotspot
+    POL4["Policy: record the hold on the order<br/>the moment it exists<br/>(decided 2026-10-17, ADR 0024)"]:::policy
 
     T --> C1
     NW --> C1
@@ -67,7 +67,8 @@ flowchart LR
     C4 --> G1
     G1 --> E2
     G1 --> E3
-    C2 --- H2
+    C2 --> POL4
+    POL4 --> G1
 
     classDef actor fill:#fff59d,stroke:#b59f00,color:#000,font-size:11px
     classDef command fill:#4aa3df,stroke:#1f6f9f,color:#fff
@@ -86,7 +87,11 @@ Source: `internal/adapters/inbound/poller/poller.go`,
 
 Omitted: the submission to the network that follows each answer
 (`SubmitAcknowledgement(ref, true|false)`), shown in
-[sequence-diagrams.md](sequence-diagrams.md); and the outbox write.
+[sequence-diagrams.md](sequence-diagrams.md); and the outbox write. The
+ex-hotspot "crash after raising hold leaves a NEW order with no localOrderId"
+is resolved by recording the hold right after the raise and by the
+orphaned-hold sweep (diagram 2); what remains open is listed in the sticky
+inventory.
 
 ## 2. Reconciliation and the acknowledgement clock
 
@@ -108,6 +113,10 @@ flowchart LR
     POL2["Policy: overdue NEW order<br/>is reported, never mutated"]:::policy
     E4["AcknowledgementDeadlineAtRisk"]:::event
     POL3["Policy: overdue NEW order<br/>is refused, never answered late"]:::policy
+    T3["Orphan sweep timer<br/>SWEEP_INTERVAL"]:::actor
+    RM3["Open holds<br/>ListOpenHolds"]:::readmodel
+    POL4["Policy: an open hold past<br/>acknowledgeBy + grace is cancelled,<br/>the order state is never touched<br/>(decided 2026-10-17, ADR 0024)"]:::policy
+    E6["OrphanedHoldCancelled"]:::event
     OM["order-management"]:::external
     H5["Hotspot: at-risk fires only after<br/>the deadline, ADR says approaching"]:::hotspot
 
@@ -129,6 +138,10 @@ flowchart LR
     POL2 --> E4
     RM2 --> POL3
     POL3 --> C3
+    T3 --> RM3
+    RM3 --> POL4
+    POL4 --> C3
+    POL4 -->|cancelled or gone| E6
     E4 --- H5
 
     classDef actor fill:#fff59d,stroke:#b59f00,color:#000,font-size:11px
@@ -142,13 +155,16 @@ flowchart LR
 ```
 
 Source: `internal/application/usecases/reconcile_submitted_orders.go`,
-`sweep_acknowledgement_deadlines.go`, `reject_overdue_orders.go`;
+`sweep_acknowledgement_deadlines.go`, `reject_overdue_orders.go`,
+`sweep_orphaned_holds.go`;
 `internal/adapters/outbound/analyticsstore/postgres_projection.go`;
 `docs/adr/0001-network-fulfillment-bounded-context.md` §5, §6.
 
 Omitted: the per-order "skip on error, retry next pass" behaviour of all
-three passes. The overdue reject cancels the held order only when one is
-linked.
+three passes (four, with the orphaned-hold sweep). The overdue reject cancels the held order only when a
+hold is recorded and still open. The orphaned-hold sweep also reads `409`/`422`
+as "already released" (outcome recorded, no event) and `404` as "gone"; a 5xx or
+an open breaker leaves the hold for the next pass.
 
 ## 3. Shipment confirmation
 
@@ -242,28 +258,32 @@ event, so there is no orange sticky.
 
 | Sticky | Kind | Code evidence |
 | --- | --- | --- |
-| Poll / sweep / recompute timers | Actor | `poller.Run`, `runSweep`, `runRejectOverdue`, `runReconcile`, `runRecompute` in `cmd/netfulfil/main.go` |
+| Poll / sweep / recompute timers | Actor | `poller.Run`, `runSweep`, `runRejectOverdue`, `runSweepOrphanedHolds`, `runReconcile` in `cmd/netfulfil/workers.go`; `runRecompute` in `cmd/netfulfil/capability.go` |
 | Operator or upstream caller | Actor | `POST /network-orders/{networkRef}/shipment-confirmation` |
 | Receive network demand | Command | `ReceiveNetworkDemand.Execute` |
 | Raise / release / cancel held order | Command | `FulfillmentPlanner.RaiseHeldOrder` / `ReleaseHeldOrder` / `CancelHeldOrder` |
 | Submit acceptance | Command | `NetworkOrder.Submit` + `LinkLocalOrder` |
+| Record / settle the hold | Command | `NetworkOrder.RecordHold` / `SettleHold` |
 | Reject | Command | `NetworkOrder.Reject` |
 | Confirm acknowledgement | Command | `NetworkOrder.ConfirmAcknowledgement` |
 | Confirm shipment | Command | `NetworkOrder.ConfirmShipment`, `ConfirmNetworkOrderShipment` |
 | Compute capability offer | Command | `capabilityoffer.Compute` |
 | NetworkOrder | Aggregate | `internal/domain/networkorder` |
 | CapabilityOffer | Aggregate | `internal/domain/capabilityoffer` |
-| NetworkOrderReceived / Submitted / Acknowledged / Rejected / ShipmentConfirmed / AcknowledgementDeadlineAtRisk | Domain Event | `internal/domain/shared/events.go` |
-| Already-known NetworkRef | Policy | `ReceiveNetworkDemand.Execute` (`FindByRef`) |
+| NetworkOrderReceived / Submitted / Acknowledged / Rejected / ShipmentConfirmed / AcknowledgementDeadlineAtRisk / OrphanedHoldCancelled | Domain Event | `internal/domain/shared/events.go` |
+| Already-answered or overdue NetworkRef returns existing order; an unanswered one resumes | Policy | `ReceiveNetworkDemand.Execute` (`FindByRef`, `resume`) |
 | Unknown product rejects whole order | Policy | `ReceiveNetworkDemand.translate` → `rejectUntranslatable` |
 | Null promiseDate means infeasible | Policy | `ordermanagement.Planner.RaiseHeldOrder` |
 | SUCCESS / FAILURE / PENDING | Policy | `ReconcileSubmittedOrders.Execute` |
 | Overdue reported, never mutated | Policy | `SweepAcknowledgementDeadlines` |
 | Overdue refused, never answered late | Policy | `RejectOverdueOrders` |
+| Open hold past acknowledgeBy + grace is cancelled, state untouched | Policy | `SweepOrphanedHolds`, `NetworkOrder.HoldOrphaned` (ADR 0024) |
+| Hold recorded the moment it exists | Policy | `ReceiveNetworkDemand.answer` → `NetworkOrder.RecordHold` (ADR 0024) |
 | Already CONFIRMED returns unchanged | Policy | `ConfirmNetworkOrderShipment.Execute` |
 | Unknown capacity falls back to physical | Policy | `capabilityoffer.Compute` (`throughputKnown=false`) |
 | Product translation dictionary | Read Model | `memory.ProductTranslation` (`PRODUCT_TRANSLATION_FILE`) |
 | Submitted / unanswered orders | Read Model | `NetworkOrderRepo.ListSubmitted` / `ListUnanswered` |
+| Open holds | Read Model | `NetworkOrderRepo.ListOpenHolds` (partial index `network_orders_open_holds`) |
 | Process-path capability cache | Read Model | `processpathcache.Consumer.NextCutoff` |
 | Path capacity cache | Read Model | `pathcapacitycache.Consumer.RemainingCapacity` |
 | Capability offers | Read Model | `CapabilityOfferRepo.ListAll`, `GET /capability-offers` |
@@ -273,7 +293,7 @@ event, so there is no orange sticky.
 | process-path-management, wes-work-planning | External System | the two Kafka caches |
 | fulfillment-execution | External System | named in ADR 0014 as the deliberately unused trigger |
 | Decided 2026-10-06: Submitted at SUBMITTED, Acknowledged only on settle (ADR 0016) | Policy | `ReceiveNetworkDemand.acknowledge` publishes `NetworkOrderSubmitted`; `ReconcileSubmittedOrders.confirm` publishes `NetworkOrderAcknowledged` (v2) with the save (ex-hotspots "Acknowledged at SUBMITTED" and "No event on settle") |
-| Orphaned hold after crash | Hotspot | `ReceiveNetworkDemand` saves `NEW` before `RaiseHeldOrder`; `RejectOverdueOrders` cancels only a linked hold; ADR 0001 Consequences ("orphaned-hold sweep as an open gap") |
+| Orphaned hold after crash | Hotspot, resolved 2026-10-17 (ADR 0024, gap OM-0020) | The hold id is recorded right after `RaiseHeldOrder` (`RecordHold`) and `SweepOrphanedHolds` cancels the ones nobody decided, so `RejectOverdueOrders`'s cancel now has a hold to find. Still open, on purpose (ADR 0024): a hold never named because the process stopped between order-management's commit and the id being saved, if the window closes before a re-delivery repeats the raise; a `SUBMITTED` order whose network status stays `PENDING`; an `ACKNOWLEDGED` order whose release failed (not a cancel case); rows rejected before migration `0005` whose raise had succeeded |
 | SUBMISSION_FAILED counted | Policy | `PostgresProjection.ApplyNetworkOrderRejected` increments `orders_rejected_submission_failed` (analytics migration 0002, ADR 0015; resolved 2026-10-06) |
 | At-risk only after the deadline | Hotspot | `AcknowledgementOverdue` vs ADR 0001 §6 "approaching" |
 | No WorkUnitId → NetworkRef mapping | Hotspot | ADR 0014 |

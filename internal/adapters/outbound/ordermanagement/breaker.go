@@ -109,7 +109,12 @@ func newBreakerClient(inner FulfillmentPlanner, recorder resilience.StateRecorde
 			// The caller giving up (request cancelled) is not this
 			// dependency's fault; don't let it count as a failure
 			// against the breaker either way.
-			IsExcluded:    func(err error) bool { return errors.Is(err, context.Canceled) },
+			IsExcluded: func(err error) bool { return errors.Is(err, context.Canceled) },
+			// order-management ANSWERING the cancel with "not found" or
+			// "already released" is not a dependency failure (ADR 0024 §4):
+			// a backlog of holds that were released or never existed must
+			// not trip the breaker that guards every other call to it.
+			IsSuccessful:  isDependencyAnswer,
 			OnStateChange: resilience.RecordStateChange(DependencyName, recorder),
 		}),
 		inner: inner,
@@ -167,6 +172,15 @@ func (c *BreakerClient) CancelHeldOrder(ctx context.Context, id shared.LocalOrde
 		return fmt.Errorf("%w: %v", ErrCircuitOpen, err)
 	}
 	return err
+}
+
+// isDependencyAnswer reports whether err is order-management answering rather
+// than failing: no error at all, or one of the two classified answers to the
+// cancel (404 not found, 409/422 already released).
+func isDependencyAnswer(err error) bool {
+	return err == nil ||
+		errors.Is(err, contract.ErrHeldOrderNotFound) ||
+		errors.Is(err, contract.ErrHeldOrderAlreadyReleased)
 }
 
 // isBreakerRejection reports whether err is gobreaker refusing to even

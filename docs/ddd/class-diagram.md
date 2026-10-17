@@ -20,6 +20,8 @@ classDiagram
         -state State
         -localOrderId LocalOrderId nullable
         -receivedAt time.Time
+        -holdOutcome HoldOutcome nullable
+        -holdSettledAt time.Time nullable
         +Receive(ref, siteId, requiredShipBy, lines, receivedAt)$ NetworkOrder
         +ReceiveUntranslatable(ref, siteId, requiredShipBy, receivedAt)$ NetworkOrder
         +Rehydrate(...)$ NetworkOrder
@@ -28,10 +30,20 @@ classDiagram
         +Acknowledge() error
         +Reject() error
         +LinkLocalOrder(id LocalOrderId) error
+        +RecordHold(id LocalOrderId) error
+        +SettleHold(outcome HoldOutcome, at time.Time) error
+        +HoldOpen() bool
+        +HoldOrphaned(now, grace) bool
+        +CommittedLocalOrderId() LocalOrderId nullable
         +ConfirmShipment() error
         +AcknowledgementOverdue(now) bool
         +SKUQuantities() Map~SKU,int~
         +Lines() Line[]
+    }
+    class HoldOutcome {
+        <<Enumeration>>
+        CANCELLED
+        ALREADY_RELEASED
     }
     class Line {
         <<Entity>>
@@ -80,10 +92,12 @@ classDiagram
         +ListUnanswered(ctx) NetworkOrder[]
         +ListSubmitted(ctx) NetworkOrder[]
         +ListAll(ctx) NetworkOrder[]
+        +ListOpenHolds(ctx) NetworkOrder[]
     }
 
     NetworkOrder "1" *-- "0..*" Line : lines
     NetworkOrder --> State : state
+    NetworkOrder --> HoldOutcome : holdOutcome 0..1
     NetworkOrder --> NetworkRef : identity
     NetworkOrder --> SiteId
     NetworkOrder --> LocalOrderId : 0..1
@@ -94,11 +108,17 @@ classDiagram
 ```
 
 Source: `internal/domain/networkorder/network_order.go`,
+`internal/domain/networkorder/hold.go`,
 `internal/domain/shared/shared.go`, `internal/application/ports/ports.go`.
 
-Omitted: the read accessors (`NetworkRef()`, `State()` and so on), the
-`AcknowledgementWindow` constant (24h), and the error variables (listed on
-[aggregate-design-canvas.md](aggregate-design-canvas.md)). A `Line` is
+Omitted: the read accessors (`NetworkRef()`, `State()`, `HoldOutcome()`,
+`HoldSettledAt()` and so on), `RestoreHold` (the repository's way to rebuild a
+persisted outcome), the `AcknowledgementWindow` constant (24h), and the error
+variables (listed on
+[aggregate-design-canvas.md](aggregate-design-canvas.md)). The hold is not a
+`State`: `HoldOutcome` is orthogonal to it (ADR 0024), and unset means the hold
+is open. `ListOpenHolds` only narrows the sweep's candidates; the orphan rule is
+the domain's `HoldOrphaned`. A `Line` is
 modelled as an entity because it has a local identity, `networkLineRef`,
 which is unique within its order. In Go it is a struct value owned by the
 aggregate. `0..*` lines reflects `ReceiveUntranslatable`; `Receive`
@@ -208,6 +228,20 @@ classDiagram
         +AcknowledgeBy time.Time
         +At time.Time
     }
+    class OrphanedHoldCancelled {
+        <<DomainEvent>>
+        +NetworkRef NetworkRef
+        +SiteId SiteId
+        +LocalOrderId LocalOrderId
+        +AcknowledgeBy time.Time
+        +Answer HoldAnswer
+        +At time.Time
+    }
+    class HoldAnswer {
+        <<Enumeration>>
+        CANCELLED
+        NOT_FOUND
+    }
     class RejectionReason {
         <<Enumeration>>
         UNTRANSLATABLE_SKU
@@ -221,7 +255,9 @@ classDiagram
     DomainEvent <|.. NetworkOrderRejected
     DomainEvent <|.. NetworkOrderShipmentConfirmed
     DomainEvent <|.. AcknowledgementDeadlineAtRisk
+    DomainEvent <|.. OrphanedHoldCancelled
     NetworkOrderRejected --> RejectionReason
+    OrphanedHoldCancelled --> HoldAnswer
 ```
 
 Source: `internal/domain/shared/events.go`.
@@ -246,6 +282,7 @@ flowchart LR
         UC2["ReconcileSubmittedOrders"]
         UC3["SweepAcknowledgementDeadlines"]
         UC4["RejectOverdueOrders"]
+        UC7["SweepOrphanedHolds"]
         UC5["ConfirmNetworkOrderShipment"]
         UC6["RecomputeCapabilityOffers"]
     end
@@ -265,6 +302,7 @@ flowchart LR
         P9["EventPublisher"]
         P10["UnitOfWork"]
         P11["Clock"]
+        P12["OrphanHoldMetrics"]
     end
     subgraph OUT["Outbound adapters"]
         A1["postgres.NetworkOrderRepo<br/>memory.NetworkOrderRepo"]
@@ -277,6 +315,7 @@ flowchart LR
         A8["inventoryclient.Client"]
         A9["kafka.Publisher + AnalyticsPublisher<br/>postgres.OutboxPublisher<br/>events.LogPublisher"]
         A10["postgres.UnitOfWork"]
+        A11["telemetry.OrphanHoldMetrics<br/>OTel counter"]
     end
     POLL --> UC1
     HTTP --> UC5
@@ -296,6 +335,7 @@ flowchart LR
     P8 --- A8
     P9 --- A9
     P10 --- A10
+    P12 --- A11
 ```
 
 Source: `internal/application/ports/ports.go`, `cmd/netfulfil/main.go`
@@ -305,7 +345,8 @@ Source: `internal/application/ports/ports.go`, `cmd/netfulfil/main.go`
 
 Omitted: `Clock` is satisfied by a `systemClock` in each composition root,
 so it has no adapter package. The tickers in `cmd/netfulfil` drive
-UC2, UC3, UC4 and UC6, and are not drawn. The analytics consumer and the
+UC2, UC3, UC4, UC7 and UC6, and are not drawn. UC7 (`SweepOrphanedHolds`) is
+built only when `ORPHAN_HOLD_SWEEP_ENABLED` is not `false`. The analytics consumer and the
 reports handlers bypass `application/` and use `internal/analytics/report`
 ports (`ProjectionStore`, `ReportStore`) implemented by
 `internal/adapters/outbound/analyticsstore`. `postgres.OutboxRelay` drains

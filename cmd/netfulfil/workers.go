@@ -62,6 +62,31 @@ func runRejectOverdue(ctx context.Context, rejectOverdue *usecases.RejectOverdue
 	}
 }
 
+// runSweepOrphanedHolds drives the orphaned-hold sweep (ADR 0024) on the same
+// SWEEP_INTERVAL as the two passes above: it frees the order-management hold
+// of an order nobody decided once acknowledgeBy plus ORPHAN_HOLD_GRACE has
+// passed. A failed cancel is counted and retried on the next tick.
+func runSweepOrphanedHolds(ctx context.Context, sweep *usecases.SweepOrphanedHolds, logger *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := sweep.Execute(ctx)
+			if err != nil {
+				logger.Error("orphaned-hold sweep failed", "err", err)
+				continue
+			}
+			if res.Cancelled > 0 || res.AlreadyReleased > 0 || res.Failed > 0 {
+				logger.Warn("orphaned holds swept", "examined", res.Examined,
+					"cancelled", res.Cancelled, "alreadyReleased", res.AlreadyReleased, "failed", res.Failed)
+			}
+		}
+	}
+}
+
 // runReconcile drives the submitted-order reconciliation pass (ADR 0001
 // §5) on its own ticker, reusing POLL_INTERVAL as the cadence: a
 // submission is meaningless to re-check faster than new demand can even

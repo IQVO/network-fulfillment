@@ -15,9 +15,36 @@
 package contract
 
 import (
+	"errors"
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
+)
+
+// Errors a FulfillmentPlanner returns for the two answers of
+// order-management's cancel (DELETE /orders/{id}) that are ANSWERS and not
+// failures (ADR 0024 §4). Anything else it returns is a failure to retry.
+var (
+	// ErrHeldOrderNotFound: order-management does not know the order (404).
+	// For a cancel that is done: the hold, and its reservations, are gone.
+	ErrHeldOrderNotFound = errors.New("order-management: held order not found")
+
+	// ErrHeldOrderAlreadyReleased: order-management refused the cancel
+	// because the order was already released (409, or 422). It is not an
+	// orphan: someone committed it to the floor.
+	ErrHeldOrderAlreadyReleased = errors.New("order-management: held order already released")
+)
+
+// HoldSweepOutcome is the label of the orphaned-hold sweep's counter.
+type HoldSweepOutcome string
+
+const (
+	// HoldSweepCancelled: the orphaned hold was cancelled (or found gone).
+	HoldSweepCancelled HoldSweepOutcome = "cancelled"
+	// HoldSweepAlreadyReleased: not an orphan, order-management had released it.
+	HoldSweepAlreadyReleased HoldSweepOutcome = "already_released"
+	// HoldSweepFailed: the cancel or its record failed; retried next pass.
+	HoldSweepFailed HoldSweepOutcome = "failed"
 )
 
 // InboundDemand is one unit of demand as it arrives from the network,
