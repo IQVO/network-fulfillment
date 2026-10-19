@@ -1,6 +1,6 @@
 # Network Fulfillment
 
-harness-template: v3
+harness-template: v4
 
 Supporting bounded context: the anti-corruption layer between the fleet and
 an external retail fulfillment network. **Conformist** upstream, **ACL**
