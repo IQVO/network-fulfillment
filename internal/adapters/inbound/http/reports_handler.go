@@ -177,6 +177,7 @@ func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger, serviceName strin
 	r.Use(otelchimetric.NewServerActiveRequests(metricCfg))
 	r.Use(RequestLogger(logger))
 	r.Use(middleware.Recoverer)
+	r.Use(rejectNUL)
 
 	r.Get("/healthz", h.GetReportsHealthz)
 
