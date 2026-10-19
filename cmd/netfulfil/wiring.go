@@ -10,10 +10,10 @@ import (
 
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
@@ -78,7 +78,7 @@ func seedStubDemand(gateway ports.NetworkGateway, logger *slog.Logger) error {
 // negative every time, and the cause is invisible because refusing
 // unknown products is also correct behaviour.
 func loadProductTranslation(logger *slog.Logger) (ports.ProductTranslation, error) {
-	translation := memory.NewProductTranslation()
+	translation := producttranslation.New()
 	path := os.Getenv("PRODUCT_TRANSLATION_FILE")
 	if path == "" {
 		// WARN, not INFO: a deployment with no dictionary is running, and
@@ -86,7 +86,7 @@ func loadProductTranslation(logger *slog.Logger) (ports.ProductTranslation, erro
 		logger.Warn("no PRODUCT_TRANSLATION_FILE set; every network order will be rejected as untranslatable")
 		return translation, nil
 	}
-	n, err := memory.LoadProductTranslationFile(translation, path)
+	n, err := producttranslation.LoadFile(translation, path)
 	if err != nil {
 		return nil, err
 	}

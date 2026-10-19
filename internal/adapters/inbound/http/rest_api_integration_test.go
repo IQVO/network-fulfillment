@@ -45,10 +45,10 @@ import (
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
@@ -237,7 +237,7 @@ func newRESTAPI(t *testing.T, feasible bool) *restAPI {
 	gateway := network.NewStubGateway(nil)
 	planner := ordermanagement.NewPlanner(newPlannerStub(t, feasible).url, nil)
 
-	translation := memory.NewProductTranslation()
+	translation := producttranslation.New()
 	translation.Add("NPROD-A", "SKU-A")
 
 	clock := restClock{restNow}
