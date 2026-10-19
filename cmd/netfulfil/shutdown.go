@@ -87,15 +87,10 @@ func startPoller(ctx context.Context, inbound *poller.Poller) chan struct{} {
 }
 
 // startRelay runs the outbox relay (ADR 0003) alongside the HTTP server in
-// the same process, draining outbox_events onto Kafka. It is only wired
-// (non-nil) when both DATABASE_URL and EVENT_PUBLISHER=kafka are set; with
-// no relay the returned channel is already closed.
+// the same process, draining outbox_events onto Kafka. The relay is always
+// wired (the real-wiring ADR): there is no mode without one.
 func startRelay(ctx context.Context, logger *slog.Logger, relay *postgres.OutboxRelay) chan struct{} {
 	relayDone := make(chan struct{})
-	if relay == nil {
-		close(relayDone)
-		return relayDone
-	}
 	go func() {
 		defer close(relayDone)
 		logger.Info("outbox relay running", "topic", outboundkafka.Topic, "analytics_topic", outboundkafka.AnalyticsTopic,
@@ -162,9 +157,7 @@ func shutdownGracefully(
 	// for the in-flight pass (if any) to finish before main returns.
 	waitStopped(shutdownCtx, logger, pollerDone, "poller did not stop before the shutdown deadline")
 
-	// capabilityCacheDone is empty when CAPABILITY_OFFER_ENABLED is not
-	// set (wireCapabilityOffer's zero-value return), so this loop is a
-	// no-op in that case.
+	// capabilityCacheDone holds the two Kafka cache consumers' Run channels.
 	for _, done := range capabilityCacheDone {
 		waitStopped(shutdownCtx, logger, done, "a capability-offer cache consumer did not stop before the shutdown deadline")
 	}
