@@ -77,7 +77,7 @@ capacity, promises) is owned elsewhere.
 | Part | Evolution stage | Why |
 | --- | --- | --- |
 | ACL and acknowledgement protocol | **Custom-built** | Translation (`ProductTranslation`), the hold/answer sequence and the 24h clock are specific to this fleet. The pattern itself is well known. |
-| `CapabilityOffer` | **Genesis → Custom** | New to this fleet (ADR 0001 §8). It is opt-in (`CAPABILITY_OFFER_ENABLED`), not yet published outward, and single-site (`SITE_ID`). |
+| `CapabilityOffer` | **Genesis → Custom** | New to this fleet (ADR 0001 §8). It is always on (`CAPABILITY_OFFER_ENABLED` is only a boot guard, ADR 0025), not yet published outward, and single-site (`SITE_ID`). |
 | The counterpart's API | **Product** | The network's protocol is a given that this context conforms to. `retail-network` stands in for it (ADR 0009). |
 | Plumbing (outbox, CloudEvents, breaker, MCP) | **Commodity** | Fleet-wide standard building blocks, copied from sibling contexts. |
 

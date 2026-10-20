@@ -289,8 +289,8 @@ Source: `internal/application/usecases/recompute_capability_offers.go`,
 `internal/domain/capabilityoffer/capability_offer.go`,
 `cmd/netfulfil/main.go` (`wireCapabilityOffer`, `runRecompute`).
 
-Omitted: there is no UoW and no event. The whole use case is wired only
-with `CAPABILITY_OFFER_ENABLED=true`, after both caches pass `WaitReady`.
+Omitted: there is no UoW and no event. The whole use case is always wired
+at boot, after both caches pass `WaitReady`.
 When `NextCutoff` reports no schedule, the capacity loop is skipped and
 `known=false`.
 

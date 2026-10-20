@@ -246,7 +246,7 @@ another having run.
 ## RecomputeCapabilityOffers
 
 `recompute_capability_offers.go` (ADR 0001 §8, ADR 0017). Computes what this
-context would advertise per SKU at `SITE_ID`. Opt-in.
+context would advertise per SKU at `SITE_ID`. Always on.
 
 - **Input**: none; the SKU list is `ProductTranslation.KnownSKUs` (every SKU
   the dictionary maps to).
