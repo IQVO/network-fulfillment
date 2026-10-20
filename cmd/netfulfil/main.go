@@ -26,6 +26,7 @@ import (
 
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
+	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/system"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
@@ -106,7 +107,13 @@ func run(ctx context.Context) int {
 	// itself stops accepting connections, so a Kubernetes readinessProbe
 	// has a chance to observe the flip and stop routing new traffic
 	// during the drain window that follows.
-	readiness := &inboundhttp.Readiness{}
+	//
+	// The gate also requires Postgres and Kafka to answer: /readyz is 503
+	// dependency-unavailable while either is down, /healthz stays 200.
+	readiness := inboundhttp.NewReadiness(inboundhttp.DefaultReadinessTTL, inboundhttp.DefaultReadinessTimeout,
+		inboundhttp.Dependency{Name: "postgres", Check: in.pool.Ping},
+		inboundhttp.Dependency{Name: "kafka", Check: outboundkafka.NewBrokerCheck(cfg.kafkaBrokers).Check},
+	)
 
 	eventPublisher, relay, closeEventPublisher := wireEventPublisher(in.pool, cfg.kafkaBrokers, logger)
 	defer closeEventPublisher()
