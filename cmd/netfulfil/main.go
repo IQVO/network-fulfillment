@@ -128,8 +128,7 @@ func run() int {
 		serviceName: serviceName,
 	})
 
-	serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
-	return 0
+	return serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
 }
 
 // bootInfra builds the pieces that must exist before any use case, in

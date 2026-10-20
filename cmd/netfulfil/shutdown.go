@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -28,8 +29,10 @@ func newHTTPServer(api *inboundhttp.Server) *http.Server {
 }
 
 // serve runs the inbound poller, the acknowledgement sweep and the HTTP
-// server until SIGINT/SIGTERM arrives, then gives in-flight requests a
-// bounded grace period before the process winds down.
+// server until SIGINT/SIGTERM arrives (exit code 0) or until the relay or a
+// Kafka cache consumer dies on its own (exit code 1, so the pod restarts),
+// then gives in-flight requests a bounded grace period before the process
+// winds down.
 func serve(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -43,7 +46,7 @@ func serve(
 	readiness *inboundhttp.Readiness,
 	recompute *usecases.RecomputeCapabilityOffers,
 	capabilityCacheDone []chan struct{},
-) {
+) int {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -63,9 +66,53 @@ func serve(
 
 	startHTTP(logger, srv)
 
-	<-ctx.Done()
+	watched := []namedDone{{"outbox relay", relayDone}}
+	for i, done := range capabilityCacheDone {
+		watched = append(watched, namedDone{fmt.Sprintf("capability-offer cache consumer %d", i+1), done})
+	}
+	died := watchDeaths(ctx, watched)
+
+	exitCode := 0
+	select {
+	case <-ctx.Done():
+	case name := <-died:
+		// The relay or a Kafka consumer stopped on its own while the process
+		// was meant to be running: staying up would leave a pod that answers
+		// HTTP but silently publishes or consumes nothing. Exit non-zero so
+		// Kubernetes restarts it.
+		logger.Error("a background component stopped on its own; shutting down", "component", name)
+		exitCode = 1
+	}
+	stop() // cancels the poller and tickers when the cause was not a signal
 
 	shutdownGracefully(logger, srv, readiness, stopRelay, relayDone, pollerDone, capabilityCacheDone)
+	return exitCode
+}
+
+// namedDone pairs a long-lived goroutine's completion channel with a name
+// for the log line.
+type namedDone struct {
+	name string
+	done <-chan struct{}
+}
+
+// watchDeaths reports, on the returned channel, the name of every watched
+// goroutine that finishes while ctx is still live — that is, one that died
+// on its own instead of being stopped by shutdown.
+func watchDeaths(ctx context.Context, watched []namedDone) <-chan string {
+	died := make(chan string, len(watched))
+	for _, w := range watched {
+		go func() {
+			select {
+			case <-w.done:
+				if ctx.Err() == nil {
+					died <- w.name
+				}
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return died
 }
 
 // startPoller runs the inbound poller and returns a channel that closes

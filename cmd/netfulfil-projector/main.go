@@ -49,6 +49,10 @@ import (
 // cannot start without it.
 var errMissingAnalyticsURL = errors.New("ANALYTICS_DATABASE_URL is required")
 
+// errConsumerStopped is the exit error when the analytics consumer returns
+// while the process was meant to keep running.
+var errConsumerStopped = errors.New("analytics consumer stopped on its own")
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("netfulfil-projector exited with error", "error", err)
@@ -109,22 +113,36 @@ func run() error {
 	}()
 
 	consumerCtx, cancelConsumer := context.WithCancel(context.Background())
+	consumerErr := make(chan error, 1)
 	go func() {
 		logger.Info("analytics consumer starting", "topic", outboundkafka.AnalyticsTopic, "group", group, "brokers", kafkaBrokers)
-		if err := consumer.Run(consumerCtx); err != nil {
+		err := consumer.Run(consumerCtx)
+		if err != nil {
 			logger.Error("analytics consumer stopped", "error", err)
 		}
+		consumerErr <- err
 	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	var exitErr error
+	select {
+	case <-stop:
+	case <-consumerErr:
+		// The consumer died on its own (its error is logged above): exit
+		// non-zero so the pod restarts instead of staying up and projecting
+		// nothing.
+		exitErr = errConsumerStopped
+	}
 
 	cancelConsumer()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil && exitErr == nil {
+		exitErr = err
+	}
+	return exitErr
 }
 
 // setupTelemetry installs Go runtime metrics only (ADR-0013 Tier 1 item
