@@ -67,7 +67,7 @@ runs the sweep.
 
 ## Ports (`internal/application/ports`, interfaces only)
 
-`NetworkOrderRepo` (memory + postgres), `NetworkGateway` (stub only —
+`NetworkOrderRepo` (postgres; memory is a test double), `NetworkGateway` (stub only —
 `sandbox`/`live` refuse to boot), `FulfillmentPlanner` (order-management
-REST), `ProductTranslation` (file-backed in-memory map), `EventPublisher`,
+REST), `ProductTranslation` (file-backed map, `adapters/outbound/producttranslation`), `EventPublisher`,
 `Clock`.

@@ -66,7 +66,7 @@ tags:
     description: >
       What this context would advertise to the network it can ship for each
       (SKU, site): physical availability capped by throughput feasibility
-      (ADR 0001 §8). Served only when `CAPABILITY_OFFER_ENABLED` is set.
+      (ADR 0001 §8). Always served (ADR 0025).
   - name: operations
     description: >
       Liveness, and whether the inbound polling leg is actually working.
@@ -116,6 +116,13 @@ paths:
         Kubernetes `readinessProbe` pointed here gets a window to stop
         routing new traffic before the drain that follows. `/healthz`
         stays a pure liveness signal and is never flipped by this.
+
+
+        Readiness also reflects the two runtime dependencies (ADR 0025):
+        Postgres (a ping) and Kafka (broker metadata reachable). Topics
+        are never checked. While either is unreachable the answer is a
+        503 `dependency-unavailable` problem naming the failing
+        dependency, and `/healthz` stays 200.
       responses:
         "200":
           description: Ready to receive traffic.
@@ -130,10 +137,13 @@ paths:
                     example: ready
         "503":
           description: >
-            Not ready -- graceful shutdown is in progress. A
-            `readinessProbe` observing this should stop routing new
-            requests to this pod; already-established connections are
-            unaffected.
+            Not ready. Either graceful shutdown is in progress
+            (`application/json`, `{"status":"not_ready"}`), or Postgres
+            or Kafka is unreachable (`application/problem+json`, type
+            `dependency-unavailable`, `detail` naming the failing
+            dependency, e.g. `not ready: postgres`). A `readinessProbe`
+            observing this should stop routing new requests to this pod;
+            already-established connections are unaffected.
           content:
             application/json:
               schema:
@@ -143,6 +153,15 @@ paths:
                   status:
                     type: string
                     example: not_ready
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.network-fulfillment.warehouse-systems.dev/dependency-unavailable
+                title: A runtime dependency is unavailable
+                status: 503
+                detail: "not ready: kafka"
+                instance: /readyz
 
   /metrics:
     get:
@@ -294,7 +313,7 @@ paths:
           description: >
             Shipment confirmed (or the order was already `CONFIRMED`).
         "404":
-          description: No network order with that `networkRef` (`network-order-not-found`).
+          description: No network order with that `networkRef` (`network-order-not-found`), or a path that carries a NUL character (`resource-not-found`).
           content:
             application/problem+json:
               schema:
@@ -337,8 +356,8 @@ paths:
         network.
 
 
-        Registered only when `CAPABILITY_OFFER_ENABLED` is set; otherwise
-        the route does not exist and the API answers 404.
+        Always registered: the capability-offer recompute loop and its
+        Kafka-fed caches are part of the runtime (ADR 0025).
       responses:
         "200":
           description: All current capability offers (empty array when none).
@@ -436,7 +455,12 @@ paths:
 components:
   responses:
     Problem:
-      description: An RFC 7807 problem document.
+      description: >
+        An RFC 7807 problem document. A NUL character (U+0000) is never
+        valid input (PostgreSQL text cannot hold it): in the request path
+        it is a 404 `resource-not-found`, in a query parameter a 400
+        `invalid-request`, and in a request body a 400
+        `malformed-request-body`.
       content:
         application/problem+json:
           schema:

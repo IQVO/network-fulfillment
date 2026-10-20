@@ -10,6 +10,8 @@ description: "ADR 0002 — network-fulfillment ships a read-only MCP server (thr
 
 ## Status
 
+> Status pointer: ADR 0025 made `DATABASE_URL` (mcp) and `KAFKA_BROKERS` (projector) mandatory and removed the in-memory store and the opt-in `EVENT_PUBLISHER=kafka` run described below.
+
 **Accepted (2026-09-26).** Companion to [ADR 0001](./0001-network-fulfillment-bounded-context.md);
 neither introduces a new domain concept, and both build entirely on facts
 that ADR 0001 already established — the four domain events this context

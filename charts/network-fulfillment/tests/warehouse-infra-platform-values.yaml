@@ -1,0 +1,44 @@
+# Platform facts every application chart reads (ADR 0002 D2,
+# docs/adr/0002-application-delivery-boundary.md). The first value file of every
+# ArgoCD Application, lowest precedence:
+#
+#   1. helm-values/_platform.yaml          (this file)
+#   2. helm-values/<app>.yaml              (the application's configuration)
+#   3. helm-values/kind-resources/<app>.yaml (the kind CPU-request overlay)
+#   4. the Application's valuesObject      (image tags, set by Terraform)
+#
+# A key here is harmless for a chart that does not read it, and an application
+# overrides one only on exception, in its own file. Terraform reads these facts
+# back where it installs the platform piece they describe (locals.platform in
+# terraform/locals.tf), so each has one source: change the Gateway, the brokers or
+# the collector here, never in HCL.
+
+# The shared Kong Gateway (terraform/10-platform/gateway-api.tf) every route attaches to: the
+# API routes, the MCP routes and the analytics reports routes.
+gatewayApi:
+  parentRefs: &gateway
+    - name: warehouse-gateway
+      namespace: kong
+      sectionName: http
+
+mcp:
+  route:
+    parentRefs: *gateway
+
+analytics:
+  reports:
+    route:
+      parentRefs: *gateway
+
+kongPlugins:
+  # The page origin the Nginx web gateway serves from (localhost:80): the ONLY
+  # origin Kong grants CORS to.
+  cors:
+    origin: http://localhost
+  # Kong's spans go to the in-cluster OpenTelemetry Collector (terraform/otel.tf).
+  opentelemetry:
+    tracesEndpoint: http://otel-collector.observability.svc.cluster.local:4318/v1/traces
+
+# The one Kafka broker set for the whole platform (terraform/10-platform/kafka.tf).
+kafka:
+  brokers: kafka.warehouse-systems.svc.cluster.local:9092

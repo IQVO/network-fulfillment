@@ -44,6 +44,7 @@ jobs:
       - run: python3 scripts/harness/guide_lint.py
       - run: python3 scripts/harness/repo_lint.py
       - run: python3 scripts/harness/test_hook.py
+      - run: python3 scripts/harness/test_red_issue.py
       - run: python3 scripts/harness/test_repo_lint.py
 
 
@@ -224,13 +225,16 @@ jobs:
           python-version: "3.x"
           check-latest: true
       - name: helm lint
-        run: helm lint charts/network-fulfillment
+        # Postgres and Kafka are mandatory, so the chart renders only with the
+        # real-wiring values (database.url, kafka.brokers).
+        run: helm lint charts/network-fulfillment -f charts/network-fulfillment/ci/real-wiring-values.yaml
       - name: Chart wiring tests
         # Both suites run on every PR, deliberately. process-path-management
         # has a render-assertion script that is NOT wired to CI and only
         # runs if somebody remembers — which is how it rots.
         run: |
           pip install --require-hashes -r .github/requirements/chart-tests.txt
+          bash charts/network-fulfillment/tests/render_test.sh
           python3 charts/network-fulfillment/tests/test_credential_wiring.py
           python3 charts/network-fulfillment/tests/test_data_files.py
           python3 charts/network-fulfillment/tests/test_kong_config.py

@@ -57,11 +57,9 @@ file on `warehouse-infra` `develop`, the overlay sets:
   `/api/network-fulfillment/reports` rewritten to `/reports` on the reports
   Service.
 
-That overlay does **not** set `kafka.enabled` or `config.eventPublisher`, so
-the API pod runs with the log publisher: no event reaches either topic and
-the projector consumes an empty analytics topic. Turn on `kafka.enabled=true`
-and `config.eventPublisher=kafka` in the overlay to get events and the
-analytics report in the cluster.
+Postgres and Kafka are mandatory (ADR 0025): the chart refuses to render
+without a Postgres DSN and Kafka brokers, so the overlay must set
+`kafka.enabled=true` (or `kafka.brokers`) and the database Secret.
 
 ### Releases
 
@@ -82,12 +80,12 @@ from the sibling checkout and loads it into kind.
 3. Load `NETWORK_SEED_FILE` into the stub gateway, if set.
 4. Load `PRODUCT_TRANSLATION_FILE`, or log the "every network order will be
    rejected" warning.
-5. With `DATABASE_URL`: run OLTP migrations against `MIGRATIONS_DATABASE_URL`,
+5. Run OLTP migrations against `MIGRATIONS_DATABASE_URL`,
    open the pool, ping it. Both steps are retried.
-6. With `CAPABILITY_OFFER_ENABLED=true`: dial both Kafka caches (retried),
+6. Dial both Kafka caches (retried),
    start them, and wait until both have replayed their topic.
-7. Wire the circuit-broken order-management client, the event publisher (log,
-   direct Kafka, or outbox + relay) and the use cases.
+7. Wire the circuit-broken order-management client, the outbox event publisher
+   and the relay and the use cases.
 8. Start the tickers, the poller (which polls once immediately), the outbox
    relay, then the HTTP listener.
 
@@ -169,7 +167,7 @@ the host through the kind cluster's external access). Every message is a
 CloudEvents 1.0 structured-mode event with header
 `content-type: application/cloudevents+json; charset=UTF-8` (ADR 0008).
 
-### Produced (only when `EVENT_PUBLISHER=kafka`)
+### Produced
 
 | Topic | Producer | Key | Content |
 | --- | --- | --- | --- |
@@ -185,8 +183,8 @@ Both writers set `AllowAutoTopicCreation: true`. Event types are listed in
 | Topic | Consumer | Group id | Start | Purpose |
 | --- | --- | --- | --- | --- |
 | `warehouse.network-fulfillment.analytics` | `netfulfil-projector` | `network-fulfillment-analytics-<hostname>-<pid>-<unix-nanos>`, new on every start | earliest | analytics read model |
-| `warehouse.process-path-management.events` | `netfulfil` (only with `CAPABILITY_OFFER_ENABLED=true`) | `network-fulfillment-process-path-capability-cache-<hostname>-<pid>-<unix-nanos>` | earliest | path cycle times and the site CPT schedule |
-| `warehouse.work-planning.events` | `netfulfil` (same flag) | `network-fulfillment-path-capacity-cache-<hostname>-<pid>-<unix-nanos>` | earliest | remaining path capacity per `(pathId, cutoffAt)` |
+| `warehouse.process-path-management.events` | `netfulfil` | `network-fulfillment-process-path-capability-cache-<hostname>-<pid>-<unix-nanos>` | earliest | path cycle times and the site CPT schedule |
+| `warehouse.work-planning.events` | `netfulfil` | `network-fulfillment-path-capacity-cache-<hostname>-<pid>-<unix-nanos>` | earliest | remaining path capacity per `(pathId, cutoffAt)` |
 
 Every group id is unique per process on purpose: each process rebuilds its
 state from the whole topic, and a shared group would resume from an old
@@ -214,7 +212,7 @@ pile up on the broker; they hold no partitions and can be deleted.
 
 ## Transactional outbox (ADR 0003)
 
-Active when `DATABASE_URL` is set **and** `EVENT_PUBLISHER=kafka`.
+Always active (ADR 0025).
 
 - Each use case saves the aggregate and inserts its event rows in one
   transaction: one `outbox_events` row per (event x topic), so two rows per
@@ -468,10 +466,7 @@ SWEEP_INTERVAL` means the sweep is off, failing or not running. Then check:
   something other than 2xx, 404, 409 or 422 (see [observability](observability.md#orphaned-hold-sweep-metric)).
 - **Breaker.** `circuit_breaker_state{dependency="order-management"}` = `2`
   (open) makes every cancel fail without a call.
-- **Event.** `OrphanedHoldCancelled` on both topics. In outbox mode:
-  `SELECT created_at, topic FROM outbox_events WHERE event_type LIKE '%OrphanedHoldCancelled';`
-  With the log publisher the event is logged as `integration event` with
-  `answer`.
+- **Event.** `OrphanedHoldCancelled` on both topics. `SELECT created_at, topic FROM outbox_events WHERE event_type LIKE '%OrphanedHoldCancelled';`
 
 **What `OrphanedHoldCancelled` means.** A hold leaked, and the sweep freed it.
 It is a reported fact, not a state change: the order keeps its state. `data`:

@@ -1,4 +1,4 @@
-package memory_test
+package producttranslation_test
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -19,7 +19,7 @@ func writeTranslations(t *testing.T, body string) string {
 	return path
 }
 
-func TestLoadProductTranslationFile_MakesTranslationWork(t *testing.T) {
+func TestLoadFile_MakesTranslationWork(t *testing.T) {
 	path := writeTranslations(t, `{
 	  "products": [
 	    {"networkProductId": "ASIN-1", "sku": "sku-aaa"},
@@ -27,10 +27,10 @@ func TestLoadProductTranslationFile_MakesTranslationWork(t *testing.T) {
 	  ]
 	}`)
 
-	tr := memory.NewProductTranslation()
-	n, err := memory.LoadProductTranslationFile(tr, path)
+	tr := producttranslation.New()
+	n, err := producttranslation.LoadFile(tr, path)
 	if err != nil {
-		t.Fatalf("LoadProductTranslationFile: %v", err)
+		t.Fatalf("LoadFile: %v", err)
 	}
 	if n != 2 {
 		t.Fatalf("loaded %d mappings, want 2", n)
@@ -47,10 +47,10 @@ func TestLoadProductTranslationFile_MakesTranslationWork(t *testing.T) {
 
 // An unmapped product must still be ErrUnknownProduct: loading a
 // dictionary must not turn a genuine gap into a fabricated SKU.
-func TestLoadProductTranslationFile_UnmappedProductStillFails(t *testing.T) {
+func TestLoadFile_UnmappedProductStillFails(t *testing.T) {
 	path := writeTranslations(t, `{"products":[{"networkProductId":"ASIN-1","sku":"sku-aaa"}]}`)
-	tr := memory.NewProductTranslation()
-	if _, err := memory.LoadProductTranslationFile(tr, path); err != nil {
+	tr := producttranslation.New()
+	if _, err := producttranslation.LoadFile(tr, path); err != nil {
 		t.Fatalf("load: %v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestLoadProductTranslationFile_UnmappedProductStillFails(t *testing.T) {
 	}
 }
 
-func TestLoadProductTranslationFile_FailuresAreReturned(t *testing.T) {
+func TestLoadFile_FailuresAreReturned(t *testing.T) {
 	cases := []struct{ name, body, want string }{
 		{"empty product id", `{"products":[{"networkProductId":"","sku":"s"}]}`, "networkProductId must not be empty"},
 		{"empty sku", `{"products":[{"networkProductId":"ASIN-1","sku":""}]}`, "sku must not be empty"},
@@ -70,8 +70,8 @@ func TestLoadProductTranslationFile_FailuresAreReturned(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr := memory.NewProductTranslation()
-			_, err := memory.LoadProductTranslationFile(tr, writeTranslations(t, tc.body))
+			tr := producttranslation.New()
+			_, err := producttranslation.LoadFile(tr, writeTranslations(t, tc.body))
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -85,7 +85,7 @@ func TestLoadProductTranslationFile_FailuresAreReturned(t *testing.T) {
 // A bad entry must leave NOTHING loaded. A half-loaded dictionary would
 // translate some lines of an order and reject others, and the network's
 // protocol cannot express a partial acknowledgement.
-func TestLoadProductTranslationFile_PartialFailureLoadsNothing(t *testing.T) {
+func TestLoadFile_PartialFailureLoadsNothing(t *testing.T) {
 	path := writeTranslations(t, `{
 	  "products": [
 	    {"networkProductId": "ASIN-GOOD", "sku": "sku-good"},
@@ -93,8 +93,8 @@ func TestLoadProductTranslationFile_PartialFailureLoadsNothing(t *testing.T) {
 	  ]
 	}`)
 
-	tr := memory.NewProductTranslation()
-	if _, err := memory.LoadProductTranslationFile(tr, path); err == nil {
+	tr := producttranslation.New()
+	if _, err := producttranslation.LoadFile(tr, path); err == nil {
 		t.Fatal("expected an error")
 	}
 	if _, err := tr.ToSKU(t.Context(), "ASIN-GOOD"); err == nil {
@@ -102,9 +102,9 @@ func TestLoadProductTranslationFile_PartialFailureLoadsNothing(t *testing.T) {
 	}
 }
 
-func TestLoadProductTranslationFile_MissingFileIsAnError(t *testing.T) {
-	tr := memory.NewProductTranslation()
-	_, err := memory.LoadProductTranslationFile(tr, filepath.Join(t.TempDir(), "absent.json"))
+func TestLoadFile_MissingFileIsAnError(t *testing.T) {
+	tr := producttranslation.New()
+	_, err := producttranslation.LoadFile(tr, filepath.Join(t.TempDir(), "absent.json"))
 	if err == nil {
 		t.Fatal("a missing file must be an error, not a silent empty dictionary")
 	}

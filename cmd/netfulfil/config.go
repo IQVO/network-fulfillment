@@ -6,6 +6,8 @@ package main
 // the environment inline.
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -16,11 +18,71 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-func kafkaBrokers() string {
-	if v := os.Getenv("KAFKA_BROKERS"); v != "" {
-		return v
+// bootConfig is the mandatory configuration of the OLTP service: the two
+// real dependencies it cannot run without. loadBootConfig refuses to
+// return one that is incomplete, so the process exits before it binds the
+// listener or dials anything (the real-wiring ADR).
+type bootConfig struct {
+	databaseURL  string
+	kafkaBrokers []string
+}
+
+// loadBootConfig reads and validates the mandatory configuration through
+// get (os.Getenv in production, a map lookup in the tests). Every problem
+// is an error that names the variable.
+func loadBootConfig(get func(string) string) (bootConfig, error) {
+	var cfg bootConfig
+	cfg.databaseURL = strings.TrimSpace(get("DATABASE_URL"))
+	if cfg.databaseURL == "" {
+		return bootConfig{}, errors.New("DATABASE_URL is required: this context runs on a real Postgres")
 	}
-	return "localhost:9092"
+	cfg.kafkaBrokers = splitBrokers(get("KAFKA_BROKERS"))
+	if len(cfg.kafkaBrokers) == 0 {
+		return bootConfig{}, errors.New("KAFKA_BROKERS is required: this context runs on a real Kafka (comma-separated host:port list)")
+	}
+	if err := checkEventPublisher(get("EVENT_PUBLISHER")); err != nil {
+		return bootConfig{}, err
+	}
+	if err := checkCapabilityOffer(get("CAPABILITY_OFFER_ENABLED")); err != nil {
+		return bootConfig{}, err
+	}
+	return cfg, nil
+}
+
+// splitBrokers splits a comma-separated broker list, dropping blanks.
+func splitBrokers(raw string) []string {
+	var brokers []string
+	for _, b := range strings.Split(raw, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			brokers = append(brokers, b)
+		}
+	}
+	return brokers
+}
+
+// checkEventPublisher keeps EVENT_PUBLISHER accepted (warehouse-infra sets
+// it) but only with the value kafka: events always leave through the
+// transactional outbox and its relay. The old default (unset = log) and
+// log itself are refused so a stale deployment fails loudly instead of
+// silently dropping every event.
+func checkEventPublisher(raw string) error {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" || v == "kafka" {
+		return nil
+	}
+	return fmt.Errorf("EVENT_PUBLISHER=%s is not supported: this context publishes through the transactional outbox to real Kafka (unset it or use kafka)", raw)
+}
+
+// checkCapabilityOffer keeps CAPABILITY_OFFER_ENABLED accepted
+// (warehouse-infra sets it to true) but the capability-offer pipeline and
+// its two Kafka cache consumers are always on now: anything that turns it
+// off is a boot error, never a silently disabled consumer.
+func checkCapabilityOffer(raw string) error {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" || v == "true" {
+		return nil
+	}
+	return fmt.Errorf("CAPABILITY_OFFER_ENABLED=%s is not supported: the capability-offer Kafka caches always run on this context (unset it or use true)", raw)
 }
 
 // durationEnv parses key as a time.Duration, falling back on absence or a
@@ -60,13 +122,6 @@ func envInt(logger *slog.Logger, key string, def int) int {
 		return def
 	}
 	return n
-}
-
-// capabilityOfferEnabled reports whether CAPABILITY_OFFER_ENABLED=true
-// (default false). See wireCapabilityOffer's own doc comment for why
-// this feature is opt-in rather than always-on.
-func capabilityOfferEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("CAPABILITY_OFFER_ENABLED")), "true")
 }
 
 // siteId is the single site CapabilityOffer recompute targets (ADR 0001

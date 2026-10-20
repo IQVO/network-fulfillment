@@ -1,7 +1,8 @@
-// Package memory holds in-memory outbound adapters. They back the unit
-// tests and the zero-configuration local run: with no DATABASE_URL the
-// service is fully functional over REST on these, matching the
-// convention every sibling service in this fleet follows.
+// Package memory holds in-memory outbound adapters. They are TEST DOUBLES
+// for the unit and BDD tests only: no production binary (cmd/**) may
+// import this package, and the architecture sensor
+// TestRuntimeBinaryHasNoInMemoryAdapters fails the build if one does.
+// The service runs on the Postgres adapters.
 package memory
 
 import (
@@ -42,10 +43,9 @@ func (r *NetworkOrderRepo) FindByRef(_ context.Context, ref shared.NetworkRef) (
 // ListUnanswered returns every order still in NEW, soonest acknowledgement
 // deadline first (ties broken by networkRef so the order is total and
 // stable). apis/openapi.yaml promises "soonest deadline first" and the
-// Postgres adapter does `ORDER BY acknowledge_by`; without sorting here the
-// zero-configuration in-memory run returned Go's randomised map order. The
-// sweep must still not depend on the order — it does not — but the REST
-// surface does.
+// Postgres adapter does `ORDER BY acknowledge_by`; this double sorts the
+// same way so tests see the same contract. The sweep must still not
+// depend on the order — it does not — but the REST surface does.
 func (r *NetworkOrderRepo) ListUnanswered(_ context.Context) ([]*networkorder.NetworkOrder, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -114,54 +114,6 @@ func (r *NetworkOrderRepo) ListOpenHolds(_ context.Context) ([]*networkorder.Net
 		}
 		return out[i].NetworkRef() < out[j].NetworkRef()
 	})
-	return out, nil
-}
-
-// ProductTranslation is an in-memory ports.ProductTranslation: the
-// Anti-Corruption Layer's dictionary, seeded explicitly.
-//
-// A static table is the correct v1. The mapping is a business fact
-// somebody must curate, and pretending it can be derived — by string
-// convention, or by asking a catalogue that does not know the network's
-// identifiers — is how an ACL quietly stops being one.
-type ProductTranslation struct {
-	mu  sync.RWMutex
-	skm map[shared.NetworkProductId]shared.SKU
-}
-
-func NewProductTranslation() *ProductTranslation {
-	return &ProductTranslation{skm: make(map[shared.NetworkProductId]shared.SKU)}
-}
-
-func (t *ProductTranslation) Add(id shared.NetworkProductId, sku shared.SKU) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.skm[id] = sku
-}
-
-func (t *ProductTranslation) ToSKU(_ context.Context, id shared.NetworkProductId) (shared.SKU, error) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	sku, ok := t.skm[id]
-	if !ok {
-		return "", shared.ErrUnknownProduct
-	}
-	return sku, nil
-}
-
-// KnownSKUs lists every distinct SKU this dictionary maps to.
-func (t *ProductTranslation) KnownSKUs(_ context.Context) ([]shared.SKU, error) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	seen := make(map[shared.SKU]struct{}, len(t.skm))
-	out := make([]shared.SKU, 0, len(t.skm))
-	for _, sku := range t.skm {
-		if _, dup := seen[sku]; dup {
-			continue
-		}
-		seen[sku] = struct{}{}
-		out = append(out, sku)
-	}
 	return out, nil
 }
 
