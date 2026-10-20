@@ -18,6 +18,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,7 +34,7 @@ import (
 )
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(context.Background()))
 }
 
 // infra is what bootInfra builds before any use case exists: the
@@ -50,10 +52,16 @@ type infra struct {
 }
 
 // run wires every adapter and use case in startup order, serves until a
-// signal arrives, and returns the process exit code. Deferred closers run
-// when run returns, after serve's graceful shutdown has stopped every
-// goroutine touching the pool.
-func run() int {
+// signal arrives or ctx is cancelled (the integration test cancels it; main
+// passes a background context), and returns the process exit code. Deferred
+// closers run when run returns, after serve's graceful shutdown has stopped
+// every goroutine touching the pool.
+func run(ctx context.Context) int {
+	// One signal-aware context for the whole process, so the Kafka cache
+	// consumers started during boot stop with the server on SIGTERM too.
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	logger := newLogger(getenv("LOG_LEVEL", "info"))
 
 	// Mandatory configuration FIRST: before telemetry, the listener or any
@@ -84,7 +92,7 @@ func run() int {
 		}
 	}()
 
-	in, closeInfra, ok := bootInfra(logger, cfg)
+	in, closeInfra, ok := bootInfra(ctx, logger, cfg)
 	if !ok {
 		return 1
 	}
@@ -128,7 +136,7 @@ func run() int {
 		serviceName: serviceName,
 	})
 
-	return serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
+	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
 }
 
 // bootInfra builds the pieces that must exist before any use case, in
@@ -137,7 +145,7 @@ func run() int {
 // open pool/reader at that point is irrelevant. On success the returned
 // closer releases the capability-offer caches first, then the order
 // repository (the reverse of their construction).
-func bootInfra(logger *slog.Logger, cfg bootConfig) (in infra, closeAll func(), ok bool) {
+func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig) (in infra, closeAll func(), ok bool) {
 	gateway, mode, err := wireGateway(logger)
 	if err != nil {
 		logger.Error("cannot wire network gateway", "mode", mode, "err", err)
@@ -177,7 +185,7 @@ func bootInfra(logger *slog.Logger, cfg bootConfig) (in infra, closeAll func(), 
 	// own doc comment for what it wires. A failure here exits without any
 	// closer registered (the process is terminating regardless of any open
 	// pool/reader).
-	offers, recompute, capDone, closeCapabilityOffer, err := wireCapabilityOffer(context.Background(), pool, cfg.kafkaBrokers, in.translation, logger)
+	offers, recompute, capDone, closeCapabilityOffer, err := wireCapabilityOffer(ctx, pool, cfg.kafkaBrokers, in.translation, logger)
 	if err != nil {
 		logger.Error("cannot wire capability offer pipeline", "err", err)
 		return infra{}, nil, false
