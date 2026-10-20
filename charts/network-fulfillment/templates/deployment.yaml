@@ -1,3 +1,4 @@
+{{- include "network-fulfillment.requireRealRuntime" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,6 +29,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      {{- with .Values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -70,15 +74,21 @@ spec:
               value: {{ .Values.config.eventPublisher | quote }}
             - name: OUTBOX_MAX_ATTEMPTS
               value: {{ .Values.config.outboxMaxAttempts | quote }}
-            {{- if .Values.kafka.enabled }}
+            # KAFKA_BROKERS is always set and required: Postgres and Kafka are
+            # the only runtime, so the render fails when kafka.brokers is
+            # empty. extraEnv wins: warehouse-infra also names KAFKA_BROKERS
+            # there and a duplicate env entry breaks ArgoCD's diff, so the
+            # chart value is rendered only when extraEnv does not name it.
+            {{- $extra := dict }}
+            {{- range .Values.extraEnv }}
+            {{- $_ := set $extra .name true }}
+            {{- end }}
+            {{- if not (hasKey $extra "KAFKA_BROKERS") }}
             - name: KAFKA_BROKERS
               value: {{ .Values.kafka.brokers | quote }}
             {{- end }}
-            {{- if or .Values.database.url .Values.database.existingSecret }}
-            # Set only when a database is configured. With no DATABASE_URL
-            # the binary runs on its in-memory repo, which is what keeps a
-            # zero-config local run and the unit suite infrastructure-free
-            # (ADR 0001 section 4).
+            # DATABASE_URL is always set and required (the render fails
+            # without database.url or database.existingSecret).
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -99,7 +109,6 @@ spec:
                   name: {{ include "network-fulfillment.databaseSecretName" . }}
                   key: {{ .Values.database.migrationsExistingSecretKey }}
                   optional: true
-            {{- end }}
             {{- end }}
             {{- if ne .Values.config.networkMode "stub" }}
             {{- if not (or .Values.credentials.existingSecret .Values.credentials.clientId) }}

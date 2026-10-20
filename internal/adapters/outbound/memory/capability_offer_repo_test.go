@@ -75,29 +75,3 @@ func TestCapabilityOfferRepo_ListAllOnEmptyRepoReturnsEmpty(t *testing.T) {
 		t.Fatalf("len(all) = %d, want 0", len(all))
 	}
 }
-
-func TestProductTranslation_KnownSKUsDeduplicates(t *testing.T) {
-	tr := memory.NewProductTranslation()
-	tr.Add("ASIN-1", "SKU-1")
-	tr.Add("ASIN-2", "SKU-1") // two network products map to the same SKU
-	tr.Add("ASIN-3", "SKU-2")
-
-	skus, err := tr.KnownSKUs(context.Background())
-	if err != nil {
-		t.Fatalf("KnownSKUs: %v", err)
-	}
-	if len(skus) != 2 {
-		t.Fatalf("len(skus) = %d, want 2 (deduplicated)", len(skus))
-	}
-}
-
-func TestProductTranslation_KnownSKUsEmptyWhenNoneLoaded(t *testing.T) {
-	tr := memory.NewProductTranslation()
-	skus, err := tr.KnownSKUs(context.Background())
-	if err != nil {
-		t.Fatalf("KnownSKUs: %v", err)
-	}
-	if len(skus) != 0 {
-		t.Fatalf("len(skus) = %d, want 0", len(skus))
-	}
-}

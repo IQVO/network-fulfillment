@@ -43,7 +43,7 @@ flowchart LR
     subgraph BC["network-fulfillment - Supporting subdomain - WES tier"]
         direction TB
         purpose["<b>Purpose</b><br/>The one place where the fleet meets an external retail<br/>fulfillment network: poll its demand, answer in full<br/>inside the 24-hour window using order-management's<br/>feasibility verdict, reconcile each submission before<br/>releasing work, confirm shipment, compute the capability<br/>offer."]:::card
-        roles["<b>Domain roles</b><br/>- Gateway / Anti-Corruption Layer (primary)<br/>- Execution (the answer protocol and its clock)<br/>- Analysis (opt-in capability offers)<br/>- Published Language / Open Host (partly)"]:::card
+        roles["<b>Domain roles</b><br/>- Gateway / Anti-Corruption Layer (primary)<br/>- Execution (the answer protocol and its clock)<br/>- Analysis (capability offers, always on)<br/>- Published Language / Open Host (partly)"]:::card
         rules["<b>Business decisions it enforces</b><br/>- Answer once, in full or not at all<br/>- One unknown product rejects the whole order, and the<br/>refusal is recorded<br/>- Feasibility is asked of order-management, never computed<br/>here<br/>- Hold, submit, reconcile, then release<br/>- Free the hold first on every rejection path<br/>- A missed deadline is reported, then refused, never<br/>answered late"]:::card
         purpose ~~~ roles ~~~ rules
     end
@@ -80,7 +80,7 @@ flowchart LR
     subgraph OUT["Outbound - whom it calls or notifies"]
         direction TB
         out0["order-management"]:::ctx
-        out1["inventory-storage (opt-in)"]:::ctx
+        out1["inventory-storage (always on)"]:::ctx
         out2[["External network (stub)"]]:::ext
         out3["Any subscriber (none found<br/>in the fleet)"]:::none
         out4["own analytics projector"]:::self
@@ -142,7 +142,7 @@ ship-to PII enters this context at all.
 | --- | --- | --- |
 | **Gateway / Anti-Corruption Layer** | **Yes, primary** | The network vocabulary stops at `internal/adapters/outbound/network/`. `ports.NetworkGateway` and `contract.*` are expressed in our terms, and `NetworkOrder.SKUQuantities()` is the only shape sent to `order-management`. |
 | **Execution (protocol)** | **Yes, narrow** | Owns the answer, the 24h clock (`acknowledgeBy`, the sweep, `RejectOverdueOrders`) and reconciliation. It does not own the fulfillment work, which belongs to `order-management`. |
-| **Analysis** | **Yes, opt-in** | `RecomputeCapabilityOffers` derives advertised availability from inventory, the CPT schedule and path capacity (`CAPABILITY_OFFER_ENABLED`). |
+| **Analysis** | **Yes, always on** | `RecomputeCapabilityOffers` derives advertised availability from inventory, the CPT schedule and path capacity (wired at boot; `CAPABILITY_OFFER_ENABLED` is only a boot guard, ADR 0025). |
 | **Published Language / Open Host** | **Partly** | Publishes 6 CloudEvents types on `warehouse.network-fulfillment.events` (documented in `apis/asyncapi.yaml`). No other fleet context was found consuming them. Read-only REST and MCP are exposed for operators and agents. |
 
 ## Inbound Communication
@@ -154,14 +154,14 @@ ship-to PII enters this context at all.
 | Operators, `web/` remote in `warehouse-console` | List unanswered orders | Query | REST `GET /network-orders` | Open Host |
 | Operators | Get one order | Query | REST `GET /network-orders/{networkRef}` | Open Host |
 | Operators, `web/` remote | Inbound leg health | Query | REST `GET /inbound-status` | Open Host |
-| Operators | Capability offers | Query | REST `GET /capability-offers` (only when `CAPABILITY_OFFER_ENABLED=true`) | Open Host |
+| Operators | Capability offers | Query | REST `GET /capability-offers` | Open Host |
 | Kubernetes / Prometheus | Liveness, readiness, metrics | Query | REST `GET /healthz`, `GET /readyz`, `GET /metrics` | — |
 | MCP clients (AI agents) | Get / list network orders | Query | MCP `get_network_order`, `list_network_orders`, resource `network-order://network-fulfillment/{networkRef}` | Open Host (read-only) |
 | MCP clients | List capability offers | Query | MCP `list_capability_offers` | Open Host (read-only) |
 | MCP clients | Acknowledgement report | Query | MCP `get_acknowledgement_report` (when `REPORTS_BASE_URL` is set) | Open Host (read-only) |
 | Report consumers | Acknowledgement & Translation report | Query | REST (`cmd/netfulfil-reports`) `GET /reports/acknowledgement`, `GET /reports/acknowledgement/freshness` | Open Host |
-| `process-path-management` | Path catalogue + CPT schedule | Event | Kafka `warehouse.process-path-management.events`: `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`, `...processpath.ProcessPathUpdated`, `...processpath.ProcessPathDeactivated`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | Conformist (opt-in cache) |
-| `wes-work-planning` | Remaining path capacity | Event | Kafka `warehouse.work-planning.events`: `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | Conformist (opt-in cache) |
+| `process-path-management` | Path catalogue + CPT schedule | Event | Kafka `warehouse.process-path-management.events`: `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`, `...processpath.ProcessPathUpdated`, `...processpath.ProcessPathDeactivated`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | Conformist (always-on cache) |
+| `wes-work-planning` | Remaining path capacity | Event | Kafka `warehouse.work-planning.events`: `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | Conformist (always-on cache) |
 | Itself (analytics projector) | Own events, for the report | Event | Kafka `warehouse.network-fulfillment.analytics`: `...networkorder.NetworkOrderReceived`, `...NetworkOrderSubmitted`, `...NetworkOrderAcknowledged.v2` (and the historic `...NetworkOrderAcknowledged` v1), `...NetworkOrderRejected` | Internal |
 
 ## Outbound Communication
@@ -171,12 +171,12 @@ ship-to PII enters this context at all.
 | `order-management` | Raise held order + feasibility verdict | Command | REST `POST /orders` (`releaseOnAllocation: false`, `allowPartialShipment: false`, `requiredShipBy`) | Customer/Supplier (we are the Customer; OM ADR 0020) |
 | `order-management` | Release held order | Command | REST `POST /orders/{id}/release` | Customer/Supplier |
 | `order-management` | Cancel held order | Command | REST `DELETE /orders/{id}` (also the orphaned-hold sweep, which reads 404 and 409/422 as answers) | Customer/Supplier |
-| `inventory-storage` | Usable quantity per SKU | Query | REST `GET /inventory/{sku}/usable` (opt-in) | Conformist to its Open Host |
+| `inventory-storage` | Usable quantity per SKU | Query | REST `GET /inventory/{sku}/usable` (always on) | Conformist to its Open Host |
 | External network | Acknowledge / reject in full | Command | `ports.NetworkGateway.SubmitAcknowledgement(ref, accepted)` (stub) | Conformist |
 | External network | Transaction status | Query | `ports.NetworkGateway.SubmissionStatus(ref)` (stub) | Conformist |
 | External network | Shipment confirmation | Command | `ports.NetworkGateway.SubmitShipmentConfirmation(ref)` (stub) | Conformist |
 | External network | Availability, capability declaration, label | Command / Query | `SubmitAvailability`, `DeclareCapability`, `RequestLabel`: **on the port and in the stub, called by no use case** | Conformist (wired, unused) |
-| Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`, `OrphanedHoldCancelled` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (with `EVENT_PUBLISHER=kafka`) | Open Host / Published Language |
+| Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`, `OrphanedHoldCancelled` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (published through the outbox relay, always on) | Open Host / Published Language |
 | Analytics projector | The same 7 events (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
 
 Full message details: [domain-events.md](domain-events.md). Relationship
@@ -239,7 +239,7 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
   accepted. Without it, every order is rejected.
 - Single site: `RecomputeCapabilityOffers` targets one `SITE_ID`, the same
   simplification as `order-management` ADR 0014.
-- The opt-in caches can fully replay their topics within
+- The always-on caches can fully replay their topics within
   `WaitReadyTimeout` (60s each) at boot.
 
 ## Verification Metrics

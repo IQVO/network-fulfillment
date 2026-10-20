@@ -120,6 +120,7 @@ func (s *Server) Routes() http.Handler {
 	r.Use(otelchimetric.NewServerActiveRequests(metricCfg))
 	r.Use(RequestLogger(logger))
 	r.Use(middleware.Recoverer)
+	r.Use(rejectNUL)
 	r.Use(corsMiddleware())
 
 	r.Get("/healthz", s.handleHealthz)

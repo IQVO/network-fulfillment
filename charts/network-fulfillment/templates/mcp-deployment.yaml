@@ -43,7 +43,8 @@ spec:
             # opening the same read repository cmd/netfulfil serves off of.
             - name: MIGRATIONS_PATH
               value: {{ .Values.config.migrationsPath | quote }}
-            {{- if or .Values.database.url .Values.database.existingSecret }}
+            # DATABASE_URL is always set and required: cmd/mcp exits at boot
+            # without it (the render fails without a database source).
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -60,7 +61,6 @@ spec:
                   name: {{ include "network-fulfillment.databaseSecretName" . }}
                   key: {{ .Values.database.migrationsExistingSecretKey }}
                   optional: true
-            {{- end }}
             {{- end }}
             {{- if .Values.mcp.reportsBaseUrl }}
             - name: REPORTS_BASE_URL

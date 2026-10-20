@@ -6,16 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/inventoryclient"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/pathcapacitycache"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/processpathcache"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/system"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 )
@@ -28,18 +27,10 @@ import (
 // package's own doc comment), the CapabilityOfferRepo, and the
 // RecomputeCapabilityOffers use case a ticker in serve() drives.
 //
-// Gated behind CAPABILITY_OFFER_ENABLED=true (default false): this
-// service's defining property is that it runs fully functional with NO
-// configuration at all (ADR 0001 §4), and two more mandatory Kafka
-// topics plus a mandatory inventory-storage dependency would break that
-// for every existing deployment that has not opted in — the same reason
-// EVENT_PUBLISHER=kafka is opt-in above. Disabled (the default), every
-// return value is its zero value and the caller leaves api.Offers nil,
-// which simply does not register the read endpoints/tools (the same
-// "nil means not registered" convention MetricsRegistry/Reports already
-// follow).
+// Always on: there is no flag that turns the pipeline off (the real-wiring
+// ADR; loadBootConfig refuses CAPABILITY_OFFER_ENABLED=false).
 //
-// When enabled, boot BLOCKS (bounded by each cache's own
+// Boot BLOCKS (bounded by each cache's own
 // WaitReadyTimeout) until BOTH caches have replayed their topic's full
 // history: an empty, not-yet-replayed cache would otherwise silently
 // advertise a zero or under-counted throughput figure, which is a worse
@@ -49,27 +40,24 @@ import (
 func wireCapabilityOffer(
 	ctx context.Context,
 	pool *pgxpool.Pool,
+	brokers []string,
 	translation ports.ProductTranslation,
 	logger *slog.Logger,
 ) (ports.CapabilityOfferRepo, *usecases.RecomputeCapabilityOffers, []chan struct{}, func(), error) {
-	noop := func() {}
-	if !capabilityOfferEnabled() {
-		return nil, nil, nil, noop, nil
-	}
-
-	pathCap, capacity, runDone, err := startCapabilityOfferCaches(ctx, logger)
+	pathCap, capacity, runDone, err := startCapabilityOfferCaches(ctx, brokers, logger)
 	if err != nil {
-		return nil, nil, nil, noop, err
+		return nil, nil, nil, func() {}, err
 	}
 
-	offers := wireOffersRepo(pool, logger)
+	logger.Info("capability offer repository wired", "backend", "postgres")
+	offers := postgres.NewCapabilityOfferRepo(pool)
 	recompute := &usecases.RecomputeCapabilityOffers{
 		Translation: translation,
 		Inventory:   wireInventoryClient(),
 		PathCap:     pathCap,
 		Capacity:    capacity,
 		Offers:      offers,
-		Clock:       systemClock{},
+		Clock:       system.Clock{},
 		Logger:      logger,
 		SiteId:      siteId(),
 	}
@@ -82,8 +70,8 @@ func wireCapabilityOffer(
 // Run goroutines, and blocks until both have replayed their topic's full
 // history. See wireCapabilityOffer's own doc comment for why boot blocks
 // here rather than serving traffic against an incomplete read model.
-func startCapabilityOfferCaches(ctx context.Context, logger *slog.Logger) (*processpathcache.Consumer, *pathcapacitycache.Consumer, []chan struct{}, error) {
-	pathCap, capacity, err := dialCapabilityOfferCaches(ctx, logger)
+func startCapabilityOfferCaches(ctx context.Context, brokers []string, logger *slog.Logger) (*processpathcache.Consumer, *pathcapacitycache.Consumer, []chan struct{}, error) {
+	pathCap, capacity, err := dialCapabilityOfferCaches(ctx, brokers, logger)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -105,9 +93,7 @@ func startCapabilityOfferCaches(ctx context.Context, logger *slog.Logger) (*proc
 // before any consuming begins, and that dial is exactly this fleet's
 // known ~10s post-start first-outbound-dial reset (Istio native
 // sidecars; docs/adr/0011-boot-retry-for-istio-first-dial-reset.md).
-func dialCapabilityOfferCaches(ctx context.Context, logger *slog.Logger) (*processpathcache.Consumer, *pathcapacitycache.Consumer, error) {
-	brokers := strings.Split(kafkaBrokers(), ",")
-
+func dialCapabilityOfferCaches(ctx context.Context, brokers []string, logger *slog.Logger) (*processpathcache.Consumer, *pathcapacitycache.Consumer, error) {
 	var pathCap *processpathcache.Consumer
 	if err := retry(ctx, logger, "dial process-path-management kafka topic", func() error {
 		c, err := processpathcache.NewConsumer(ctx, brokers, logger)
@@ -178,17 +164,6 @@ func wireInventoryClient() ports.InventoryAvailability {
 	return inventoryclient.NewClient(inventoryURL, nil)
 }
 
-// wireOffersRepo chooses the CapabilityOfferRepo backend, mirroring
-// wireOrders's own in-memory/Postgres choice.
-func wireOffersRepo(pool *pgxpool.Pool, logger *slog.Logger) ports.CapabilityOfferRepo {
-	if pool != nil {
-		logger.Info("capability offer repository wired", "backend", "postgres")
-		return postgres.NewCapabilityOfferRepo(pool)
-	}
-	logger.Info("capability offer repository wired", "backend", "memory")
-	return memory.NewCapabilityOfferRepo()
-}
-
 func closeCaches(pathCap *processpathcache.Consumer, capacity *pathcapacitycache.Consumer) {
 	if pathCap != nil {
 		_ = pathCap.Close()
@@ -199,13 +174,8 @@ func closeCaches(pathCap *processpathcache.Consumer, capacity *pathcapacitycache
 }
 
 // runRecompute drives RecomputeCapabilityOffers on a ticker, exactly
-// mirroring runSweep's shape. recompute is nil when CAPABILITY_OFFER_ENABLED
-// is not set, in which case this goroutine does nothing and returns
-// immediately once ctx is done.
+// mirroring runSweep's shape.
 func runRecompute(ctx context.Context, recompute *usecases.RecomputeCapabilityOffers, logger *slog.Logger) {
-	if recompute == nil {
-		return
-	}
 	ticker := time.NewTicker(recomputeInterval())
 	defer ticker.Stop()
 	for {

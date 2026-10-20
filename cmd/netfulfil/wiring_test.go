@@ -28,7 +28,7 @@ func TestWireOrders_RetriesTheDatabaseNotJustOnce(t *testing.T) {
 	t.Setenv("MIGRATIONS_PATH", migrationsDirForTest(t))
 
 	start := time.Now()
-	_, _, _, err := wireOrders(context.Background(), quietLogger())
+	_, _, _, err := wireOrders(context.Background(), quietLogger(), os.Getenv("DATABASE_URL"))
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -43,26 +43,6 @@ func TestWireOrders_RetriesTheDatabaseNotJustOnce(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "attempts") {
 		t.Fatalf("err = %v, want it to report how many attempts were made", err)
-	}
-}
-
-// With no DATABASE_URL the in-memory repo is correct and must cost
-// nothing: no dial, no backoff, no delay to a local run.
-func TestWireOrders_NoDatabaseURLUsesMemoryImmediately(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
-
-	start := time.Now()
-	repo, _, closeFn, err := wireOrders(context.Background(), quietLogger())
-	if err != nil {
-		t.Fatalf("wireOrders: %v", err)
-	}
-	defer closeFn()
-
-	if repo == nil {
-		t.Fatal("no repository returned")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("the in-memory path took %v; it must not touch the network", elapsed)
 	}
 }
 
@@ -146,7 +126,7 @@ func TestWireOrders_UsesMigrationsDatabaseURLNotDatabaseURLForMigrations(t *test
 	t.Setenv("MIGRATIONS_DATABASE_URL", bogusMigrationsURL)
 	t.Setenv("MIGRATIONS_PATH", migrationsDirForTest(t))
 
-	_, _, _, err := wireOrders(context.Background(), quietLogger())
+	_, _, _, err := wireOrders(context.Background(), quietLogger(), unreachableAppURL)
 	if err == nil {
 		t.Fatal("a malformed MIGRATIONS_DATABASE_URL must fail boot")
 	}

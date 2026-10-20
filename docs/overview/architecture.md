@@ -15,7 +15,7 @@ and `charts/network-fulfillment` on `develop`.
 
 | Binary | Role | Listens on | Reads / writes | Deployment (chart) |
 | --- | --- | --- | --- | --- |
-| `cmd/netfulfil` | OLTP service: REST API, inbound poller, background tickers (sweep, overdue rejection, orphaned-hold sweep, reconciliation, optional recompute), outbox relay, optional capability-offer pipeline | `:8080` (`PORT`); Service 80 -> 8080 | OLTP Postgres (`DATABASE_URL`, optional), Kafka (optional), order-management, inventory-storage | `network-fulfillment` |
+| `cmd/netfulfil` | OLTP service: REST API, inbound poller, background tickers (sweep, overdue rejection, orphaned-hold sweep, reconciliation, recompute), outbox relay, capability-offer pipeline | `:8080` (`PORT`); Service 80 -> 8080 | OLTP Postgres (`DATABASE_URL`, required), Kafka (`KAFKA_BROKERS`, required), order-management, inventory-storage | `network-fulfillment` |
 | `cmd/mcp` | read-only MCP server, Streamable HTTP at `/` and `/mcp`, `GET /healthz` | `:8090` (`MCP_ADDR`) | the same OLTP Postgres, read only; `netfulfil-reports` over REST | `network-fulfillment-mcp` (`mcp.enabled`) |
 | `cmd/netfulfil-projector` | analytics writer: consumes `warehouse.network-fulfillment.analytics` into the analytical database, DLQ on failure | `:8091` (`ADMIN_ADDR`), `GET /healthz` only | analytical Postgres (`ANALYTICS_DATABASE_URL`), Kafka | `network-fulfillment-projector` (`analytics.enabled`) |
 | `cmd/netfulfil-reports` | analytics reader: `GET /reports/acknowledgement`, `.../freshness` | `:8092` (`HTTP_ADDR`); Service 80 -> 8092 | analytical Postgres, read-only pool | `network-fulfillment-reports` (`analytics.enabled`) |
@@ -63,8 +63,8 @@ Source: `cmd/netfulfil/main.go`, `cmd/netfulfil/capability.go`,
 `cmd/netfulfil/publishing.go`, `cmd/mcp/main.go`,
 `cmd/netfulfil-projector/main.go`, `cmd/netfulfil-reports/main.go`,
 `migrations/`, `migrations/analytics/`,
-`charts/network-fulfillment/templates/`. Dotted edges are off by default
-(`EVENT_PUBLISHER=kafka`, `CAPABILITY_OFFER_ENABLED=true`). The gateway sits
+`charts/network-fulfillment/templates/`. Both runtime dependencies are
+mandatory (ADR 0025). The gateway sits
 inside the `netfulfil` process because only the stub exists.
 
 ## Hexagonal layout
@@ -93,9 +93,10 @@ internal/
     outbound/kafka/            integration + analytics publishers
     outbound/eventwire/        JSON wire shape of each domain event
     outbound/postgres/         repositories, outbox publisher and relay, unit of work, migrations runner
-    outbound/memory/           in-memory repositories, product translation file
+    outbound/memory/           in-memory repositories (test doubles for unit and BDD tests only)
+    outbound/producttranslation/ product translation file dictionary
+    outbound/system/           system clock
     outbound/analyticsstore/   analytical projection and report store
-    outbound/events/           log publisher (the default)
     outbound/telemetry/        OTLP setup, circuit-breaker gauge
   analytics/report/            report catalogue and ports for the reports binary
   resilience/                  breaker settings, call timeout
@@ -113,21 +114,21 @@ service segment equals the module name. See
 
 | Port (`internal/application/ports`) | Adapters | Chosen by |
 | --- | --- | --- |
-| `NetworkOrderRepo` | `postgres.NetworkOrderRepo`, `memory.NetworkOrderRepo` | `DATABASE_URL` set or not |
-| `CapabilityOfferRepo` | `postgres.CapabilityOfferRepo`, `memory.CapabilityOfferRepo` | same |
+| `NetworkOrderRepo` | `postgres.NetworkOrderRepo` (`memory` is a test double) | always |
+| `CapabilityOfferRepo` | `postgres.CapabilityOfferRepo` | always |
 | `NetworkGateway` | `network.StubGateway` (live not implemented) | `NETWORK_MODE` |
 | `FulfillmentPlanner` | `ordermanagement.BreakerClient` wrapping `Planner` | always |
-| `ProductTranslation` | `memory` dictionary loaded from `PRODUCT_TRANSLATION_FILE` | always (empty without the file) |
-| `ProcessPathCapability` | `processpathcache.Consumer` | `CAPABILITY_OFFER_ENABLED=true` |
+| `ProductTranslation` | `producttranslation` dictionary loaded from `PRODUCT_TRANSLATION_FILE` | always (empty without the file) |
+| `ProcessPathCapability` | `processpathcache.Consumer` | always |
 | `PathCapacity` | `pathcapacitycache.Consumer` | same |
 | `InventoryAvailability` | `inventoryclient.Client` | same |
-| `EventPublisher` | `events` log publisher; `kafka` direct publishers; `postgres.OutboxPublisher` | `EVENT_PUBLISHER`, `DATABASE_URL` |
-| `UnitOfWork` | `postgres.UnitOfWork`, or nil | `DATABASE_URL` set (a real transaction, which also holds the outbox rows when `EVENT_PUBLISHER=kafka`) |
+| `EventPublisher` | `postgres.OutboxPublisher` | always |
+| `UnitOfWork` | `postgres.UnitOfWork` | always (a real transaction, which also holds the outbox rows) |
 | `Clock` | system clock (UTC) | always |
 
 ## Data stores
 
-**OLTP Postgres** (`DATABASE_URL`, optional), migrations `migrations/0001`
+**OLTP Postgres** (`DATABASE_URL`, required), migrations `migrations/0001`
 to `0005`, applied by `netfulfil` and by `mcp` at startup:
 
 | Table | Holds |

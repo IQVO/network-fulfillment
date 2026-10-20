@@ -1,0 +1,7 @@
+# chart-testing / helm lint values: Postgres and Kafka are mandatory, so the
+# chart refuses to render with its defaults alone. Dummy DSN (no password) and
+# a dummy broker list.
+database:
+  url: postgres://u@example.invalid:5432/db
+kafka:
+  brokers: kafka.invalid:9092

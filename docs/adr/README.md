@@ -30,6 +30,7 @@ to update when a record is added or its Status line changes.
 | [0022](0022-trace-context-crosses-the-outbox.md) | The W3C trace context crosses the outbox to Kafka (`traceparent` stored in `outbox_events.headers`, sent by the relay) | Accepted (2026-10-13); additive to 0003 |
 | [0023](0023-analytics-claim-and-apply-in-one-transaction.md) | The analytics consumer's dedupe claim and projection write commit in one transaction (`analyticsstore.UnitOfWork`) | Accepted (2026-10-13); amends 0004 §6 |
 | [0024](0024-orphaned-order-management-hold-sweep.md) | Sweep orphaned order-management holds past the acknowledgement window: record the hold id at raise, `SweepOrphanedHolds` cancels it after `ORPHAN_HOLD_GRACE`, reports `OrphanedHoldCancelled` | Accepted (2026-10-17); builds on 0001 §6 and order-management ADR 0020 (gap OM-0020); migration 0005 |
+| [0025](0025-postgres-and-kafka-are-the-only-runtime.md) | Postgres and Kafka are the only runtime: `DATABASE_URL` and `KAFKA_BROKERS` mandatory, no in-memory mode or log publisher, relay and capability pipeline always on, `/readyz` checks both | Accepted (2026-10-19); supersedes the optional-runtime parts of ADR 0003 and ADR 0022 |
 
 [`0002-retail-network-not-amazon-counterpart.md`](0002-retail-network-not-amazon-counterpart.md)
 is a redirect stub ("Moved to ADR 0009"), kept so old links resolve; it is

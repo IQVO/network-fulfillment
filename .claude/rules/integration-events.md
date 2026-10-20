@@ -14,15 +14,14 @@ content mode. No flat envelope (`event_id`/`event_type`/`occurred_at`), no
 
 ## What exists today
 
-- **Publishers** (`internal/adapters/outbound/kafka/`), active when
-  `EVENT_PUBLISHER=kafka` (otherwise `cmd/netfulfil` uses a log-only
-  publisher):
+- **Publishers** (`internal/adapters/outbound/kafka/`), always on (ADR 0025,
+  no log-only publisher):
   - `publisher.go` — integration topic `warehouse.network-fulfillment.events`.
   - `analytics_publisher.go` — analytics topic
     `warehouse.network-fulfillment.analytics`.
-  - Both implement `Encoder`; with `DATABASE_URL` set they feed the
+  - Both implement `Encoder`; they feed the
     transactional outbox (`internal/adapters/outbound/postgres/outbox_*.go`,
-    ADR 0003), otherwise they publish directly.
+    ADR 0003).
 - **Consumer** (`internal/adapters/inbound/kafka/analytics_consumer.go`,
   run by `cmd/netfulfil-projector`) — consumes this service's OWN analytics
   topic into the acknowledgement report. This service consumes no other
