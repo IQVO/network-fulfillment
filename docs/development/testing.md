@@ -28,8 +28,8 @@ consumer-driven contract test, and no eval suite in this repo.
 ## Unit tests
 
 `make test` runs `go test ./... -race`. No database, broker or network is
-needed: the default build has the in-memory repositories, the stub gateway and
-fake ports. Notable suites:
+needed: unit and BDD tests use the in-memory repositories (test doubles, not a
+runtime mode), the stub gateway and fake ports. Notable suites:
 
 - `internal/domain/networkorder` and `internal/domain/capabilityoffer`: every
   lifecycle transition and invariant, plus `ParseState`/`ParseBasis`. For the
@@ -60,7 +60,7 @@ fake ports. Notable suites:
 - `internal/adapters/inbound/http/otel_metrics_test.go`: the otelhttp
   instruments the REST handler emits.
 - `cmd/netfulfil/retry_test.go`, `wiring_test.go`: the boot retry, the
-  in-memory fallback when `DATABASE_URL` is unset, and the
+  mandatory `DATABASE_URL`/`KAFKA_BROKERS` boot errors, and the
   `MIGRATIONS_DATABASE_URL` split.
 - `cmd/netfulfil/outbox_relay_config_test.go`: `OUTBOX_MAX_ATTEMPTS` parsing
   (`TestOutboxMaxAttempts`, `TestDefaultOutboxMaxAttemptsIsTwenty`) and that

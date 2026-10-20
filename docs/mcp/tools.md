@@ -13,11 +13,10 @@ Protocol over Streamable HTTP, mounted at both `/` and `/mcp`, on `MCP_ADDR`
 
 It reads the same OLTP Postgres database `cmd/netfulfil` writes (through
 `DATABASE_URL`) and, for the report tool, calls `netfulfil-reports` over REST
-(`REPORTS_BASE_URL`). Without `DATABASE_URL` it uses a private in-memory store
-that is always empty. Configuration: [operations/configuration.md](../operations/configuration.md#cmdmcp-the-mcp-server).
+(`REPORTS_BASE_URL`). `DATABASE_URL` is required (ADR 0025). Configuration: [operations/configuration.md](../operations/configuration.md#cmdmcp-the-mcp-server).
 
 The schemas below were taken from a live `tools/list` call against a local
-build of `cmd/mcp` on this branch (in-memory store, `REPORTS_BASE_URL` set),
+build of `cmd/mcp` on this branch (`REPORTS_BASE_URL` set),
 and match `internal/adapters/inbound/mcp/tools.go` and `report_tool.go`.
 
 ## Tools

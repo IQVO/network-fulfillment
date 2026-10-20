@@ -112,10 +112,12 @@ resources:
 autoscaling:
   # cmd/netfulfil (this Deployment): stateless OLTP HTTP service plus an
   # inbound poller (internal/adapters/inbound/poller) and acknowledgement
-  # sweep, both driven by this same process's own ticker -- neither
-  # consumes Kafka, so there is no consumer-group collision risk here at
-  # all (this binary's only Kafka use is as an OUTBOUND publisher/outbox
-  # relay, which every replica may do independently). Every api replica
+  # sweep, both driven by this same process's own ticker. The api DOES
+  # consume Kafka: the two capability-offer caches (process-path and
+  # work-planning topics) each derive their own consumer-group id and replay
+  # from the earliest offset, so every replica holds a full cache and there
+  # is no group-id collision. The outbox relay is an OUTBOUND publisher that
+  # every replica may run independently. Every api replica
   # shares the SAME Postgres-backed NetworkOrderRepo (Postgres is the only
   # runtime, there is no in-process store), so N replicas read/write one
   # consistent store. max 4 / target 70% CPU, matching

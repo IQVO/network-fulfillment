@@ -211,9 +211,8 @@ instant of the site's next cutoff.
 
 ## Events published
 
-Only with `EVENT_PUBLISHER=kafka`. With `DATABASE_URL` set every event goes
-through the transactional outbox (ADR 0003) and the relay; without it the
-publishers write directly. Otherwise events go to the log only.
+Always on (ADR 0025). Every event goes through the transactional outbox
+(ADR 0003) and the relay.
 
 Envelope (ADR 0008, `internal/adapters/kafka/cloudevents/cloudevents.go`):
 CloudEvents 1.0 structured mode, Kafka header
@@ -277,7 +276,7 @@ specified in `apis/openapi.yaml`:
 | `GET /network-orders` | unanswered (`NEW`) orders, soonest deadline first |
 | `GET /network-orders/{networkRef}` | one order, any state |
 | `POST /network-orders/{networkRef}/shipment-confirmation` | the one write route (ADR 0014): `204`, `404`, `409` |
-| `GET /capability-offers` | only with `CAPABILITY_OFFER_ENABLED=true` |
+| `GET /capability-offers` | always |
 
 `cmd/netfulfil-reports` serves `GET /reports/acknowledgement`,
 `GET /reports/acknowledgement/freshness` and `GET /healthz`; see the

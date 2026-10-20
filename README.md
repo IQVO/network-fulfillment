@@ -43,8 +43,8 @@ What exists today:
 - **`CapabilityOffer` aggregate** (`internal/domain/capabilityoffer`, ADR
   0001 §8) — the advertisable quantity per `(sku, siteId)`:
   `min(physicalAvailable, throughputFeasible)` with a `PHYSICAL` /
-  `THROUGHPUT_CONSTRAINED` basis, never more than physical stock. Opt-in
-  via `CAPABILITY_OFFER_ENABLED=true`.
+  `THROUGHPUT_CONSTRAINED` basis, never more than physical stock. Always
+  computed: Postgres and Kafka are the only runtime (ADR 0025).
 - **Inbound leg** — a poller (`internal/adapters/inbound/poller`) calls the
   network gateway every `POLL_INTERVAL` (default `1m`) and feeds each unit of
   demand to `ReceiveNetworkDemand`. Its watermark advances only on a fully
@@ -86,7 +86,7 @@ What exists today:
   -> CONFIRMED`, publishes `NetworkOrderShipmentConfirmed`, then tells the
   network. Idempotent on an already-`CONFIRMED` order.
 - **`RecomputeCapabilityOffers`** — every `RECOMPUTE_INTERVAL` (default
-  `1m`, only when `CAPABILITY_OFFER_ENABLED=true`), for every SKU in the
+  `1m`), for every SKU in the
   translation dictionary at `SITE_ID`: physical stock from
   `inventory-storage` (`GET /inventory/{sku}/usable`, synchronous REST) and
   remaining path capacity before the site's next CPT from two Kafka-fed
@@ -114,10 +114,9 @@ What exists today:
   over a read-only pool.
 - **Persistence** — Postgres (`migrations/0001`–`0005`: `network_orders`,
   `network_order_lines`, `outbox_events`, `capability_offers`, and the hold
-  outcome columns of `network_orders`) when
-  `DATABASE_URL` is set, and in-memory repositories when it is not. If
-  `DATABASE_URL` is set but Postgres cannot be reached, the service refuses
-  to boot instead of falling back. Migrations run at startup
+  outcome columns of `network_orders`). `DATABASE_URL` is mandatory: there
+  is no in-memory mode (ADR 0025), and a Postgres that cannot be reached
+  fails the boot. Migrations run at startup
   (`MIGRATIONS_DATABASE_URL` for a direct, non-PgBouncer connection, ADR
   0007).
 - **Curated ACL files** — `PRODUCT_TRANSLATION_FILE` (network product id ->
@@ -138,16 +137,13 @@ What exists today:
   frontend Deployments, HPA per ADR 0006). The chart's Python tests live in
   `charts/network-fulfillment/tests/`. It is deployed to the kind cluster by
   `warehouse-infra`, and Kong serves it at `/api/network-fulfillment`.
-- **Kafka + transactional outbox (ADR 0003)** — `EVENT_PUBLISHER=kafka` fans
-  every domain event out to both the integration topic
+- **Kafka + transactional outbox (ADR 0003)** — every domain event fans out to both the integration topic
   (`warehouse.network-fulfillment.events`) and the analytics topic
   (`warehouse.network-fulfillment.analytics`), keyed by `networkRef` with a
-  hash balancer (ADR 0005). With `DATABASE_URL` unset both are published
-  directly (no transaction to bind them to — the in-memory dev mode); with
-  `DATABASE_URL` set, saving the aggregate and enqueuing its event(s) for
-  both topics happen in one Postgres transaction (the `outbox_events`
-  table), and a background relay drains it to the broker. The default
-  (`EVENT_PUBLISHER` unset) publishes to a log-only publisher.
+  hash balancer (ADR 0005). Saving the aggregate and enqueuing its event(s)
+  for both topics happen in one Postgres transaction (the `outbox_events`
+  table), and a background relay, always on, drains it to the broker.
+  `KAFKA_BROKERS` is mandatory (ADR 0025); there is no log-only publisher.
 - **CloudEvents 1.0, mandatory (ADR 0008)** — every Kafka message on both
   topics is a CloudEvents 1.0 structured-mode event (header
   `content-type: application/cloudevents+json; charset=UTF-8`,
@@ -276,7 +272,8 @@ internal/
   adapters/outbound/pathcapacitycache/ wes-work-planning Kafka cache
   adapters/outbound/kafka/     integration + analytics publishers
   adapters/outbound/postgres/  repositories, outbox, unit of work, migrations runner
-  adapters/outbound/memory/    in-memory repositories + product translation file
+  adapters/outbound/memory/    in-memory repositories (test doubles only; ADR 0025)
+  adapters/outbound/producttranslation/  product translation file dictionary
   adapters/outbound/analyticsstore/  analytical projection + report store
   architecture/                arch-go hexagonal + fleet fitness tests
 migrations/                    OLTP schema (+ migrations/analytics/)
@@ -302,7 +299,7 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `NETWORK_MODE` | `stub` | `live` currently refuses to boot (not implemented) |
 | `NETWORK_BASE_URL` | unset | live-mode target (ADR 0009 §4); required when `NETWORK_MODE=live` |
 | `ORDER_MANAGEMENT_URL` | `http://localhost:8080` | base URL for the held-order calls |
-| `DATABASE_URL` | unset (in-memory) | set = Postgres or refuse to boot |
+| `DATABASE_URL` | none | **required**: Postgres DSN; a missing or unreachable database fails the boot (ADR 0025) |
 | `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | direct (non-pooled) connection for migrations only (ADR 0007) |
 | `MIGRATIONS_PATH` | `/app/migrations` | override for a local run from the repo root |
 | `PRODUCT_TRANSLATION_FILE` | unset | `{"products":[{"networkProductId","sku"}]}` |
@@ -313,20 +310,20 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `ORPHAN_HOLD_GRACE` | `1h` | Go duration added to `acknowledgeBy` before a hold counts as orphaned; `0` = no grace; malformed or negative uses the default |
 | `PORT` | `8080` | HTTP listen port |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5188` | comma-separated; methods GET, POST, OPTIONS |
-| `EVENT_PUBLISHER` | `log` (default) | `kafka` publishes to both topics; with `DATABASE_URL` set this activates the transactional outbox (ADR 0003) instead of publishing directly |
-| `KAFKA_BROKERS` | `localhost:9092` | comma-separated broker list (publishers and capability-offer caches) |
-| `OUTBOX_RELAY_INTERVAL` | `1s` | Go duration; sleep between empty outbox relay passes (outbox mode only) |
+| `EVENT_PUBLISHER` | unset | only `kafka` (or unset, which means `kafka`) is accepted; anything else fails the boot. Events always go through the transactional outbox (ADR 0003) |
+| `KAFKA_BROKERS` | none | **required**: comma-separated broker list (outbox relay and capability-offer caches) |
+| `OUTBOX_RELAY_INTERVAL` | `1s` | Go duration; sleep between empty outbox relay passes |
 | `OUTBOX_MAX_ATTEMPTS` | `20` | outbox relay attempt cap (ADR 0021): a row that failed this many sends is logged at ERROR and excluded until re-armed (`UPDATE outbox_events SET attempts = 0 WHERE id = ...`); `0` = unlimited |
-| `CAPABILITY_OFFER_ENABLED` | `false` | `true` wires the two Kafka caches, the inventory client, the recompute ticker and `GET /capability-offers`; boot blocks until both caches replay |
+| `CAPABILITY_OFFER_ENABLED` | unset | only `true` (or unset, which means `true`) is accepted; anything else fails the boot. The two Kafka caches, the inventory client, the recompute ticker and `GET /capability-offers` are always wired; boot blocks until both caches replay |
 | `SITE_ID` | `site-1` | the single site capability offers are computed for |
 | `RECOMPUTE_INTERVAL` | `1m` | Go duration; capability-offer recompute cadence |
 | `INVENTORY_STORAGE_URL` | `http://localhost:8080` | base URL for `GET /inventory/{sku}/usable` |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`/`warning`, `error` (same in all four binaries) |
 
-`cmd/mcp`: `MCP_ADDR` (`:8090`), `DATABASE_URL`, `MIGRATIONS_DATABASE_URL`,
+`cmd/mcp`: `MCP_ADDR` (`:8090`), `DATABASE_URL` (required), `MIGRATIONS_DATABASE_URL`,
 `MIGRATIONS_PATH`, `REPORTS_BASE_URL` (unset = no report tool), `LOG_LEVEL`.
 `cmd/netfulfil-projector`: `ANALYTICS_DATABASE_URL` (required),
-`ADMIN_ADDR` (`:8091`), `KAFKA_BROKERS`, `ANALYTICS_MIGRATIONS_PATH`
+`ADMIN_ADDR` (`:8091`), `KAFKA_BROKERS` (required), `ANALYTICS_MIGRATIONS_PATH`
 (`migrations/analytics`), `LOG_LEVEL`. `cmd/netfulfil-reports`:
 `ANALYTICS_DATABASE_URL` (required), `HTTP_ADDR` (`:8092`), `LOG_LEVEL`.
 

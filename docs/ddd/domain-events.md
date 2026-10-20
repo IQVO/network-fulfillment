@@ -25,8 +25,7 @@ mode** (ADR 0008), built only by `internal/adapters/kafka/cloudevents.New`:
 
 ## Published
 
-Publishing is active only with `EVENT_PUBLISHER=kafka`; otherwise a
-log-only publisher is used. `fanOutPublisher` (`cmd/netfulfil/main.go`)
+Publishing is always on (ADR 0025); there is no log-only publisher. `fanOutPublisher` (`cmd/netfulfil/main.go`)
 sends **every** event to **both** topics:
 
 - `warehouse.network-fulfillment.events`, the integration topic
@@ -35,7 +34,7 @@ sends **every** event to **both** topics:
   `analytics`). The same `type` is used on both, but the `id` differs per
   topic.
 
-With `DATABASE_URL` set, both are written through `outbox_events` in the
+Both are written through `outbox_events` in the
 same transaction as the aggregate (ADR 0003), and the relay drains them.
 
 | Event | Full `type` | Payload fields (`data`) | Producer use case | Known consumers |
