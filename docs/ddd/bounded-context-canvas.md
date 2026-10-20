@@ -176,7 +176,7 @@ ship-to PII enters this context at all.
 | External network | Transaction status | Query | `ports.NetworkGateway.SubmissionStatus(ref)` (stub) | Conformist |
 | External network | Shipment confirmation | Command | `ports.NetworkGateway.SubmitShipmentConfirmation(ref)` (stub) | Conformist |
 | External network | Availability, capability declaration, label | Command / Query | `SubmitAvailability`, `DeclareCapability`, `RequestLabel`: **on the port and in the stub, called by no use case** | Conformist (wired, unused) |
-| Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`, `OrphanedHoldCancelled` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (with `EVENT_PUBLISHER=kafka`) | Open Host / Published Language |
+| Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`, `OrphanedHoldCancelled` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (published through the outbox relay, always on) | Open Host / Published Language |
 | Analytics projector | The same 7 events (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
 
 Full message details: [domain-events.md](domain-events.md). Relationship

@@ -35,7 +35,7 @@ flowchart LR
     NF -.->|"GET /inventory/sku/usable<br/>always on"| INV
     PPM -.->|"warehouse.process-path-management.events<br/>always on"| NF
     WWP -.->|"warehouse.work-planning.events<br/>always on"| NF
-    NF -.->|"warehouse.network-fulfillment.events<br/>EVENT_PUBLISHER=kafka"| SUB
+    NF -.->|"warehouse.network-fulfillment.events<br/>always published (outbox)"| SUB
     NF -.->|"warehouse.network-fulfillment.analytics"| PROJ
     PROJ --> REP
     CON -->|"GET /network-orders, /inbound-status"| NF
@@ -63,8 +63,8 @@ inside the diagram for `{id}` / `{sku}`.
 | `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | always on | SKU skipped for that recompute pass |
 | `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | always on | bad message logged and skipped, no DLQ |
 | `wes-work-planning` | upstream | Kafka, CloudEvents | `PathCapacityChanged` on `warehouse.work-planning.events` | always on | bad message logged and skipped, no DLQ |
-| any subscriber | downstream | Kafka, CloudEvents | 7 event types on `warehouse.network-fulfillment.events` | `EVENT_PUBLISHER=kafka` only | outbox keeps unsent rows |
-| own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | `EVENT_PUBLISHER=kafka` only | retry 3 times, then `.dlq` |
+| any subscriber | downstream | Kafka, CloudEvents | 7 event types on `warehouse.network-fulfillment.events` | always on (outbox relay) | outbox keeps unsent rows |
+| own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | always on | retry 3 times, then `.dlq` |
 | `warehouse-console` (via `web/` remote) | downstream | REST | `GET /network-orders`, `GET /inbound-status` | on | n/a |
 | MCP clients | downstream | MCP, Streamable HTTP | 4 read-only tools | `mcp.enabled` | n/a |
 
