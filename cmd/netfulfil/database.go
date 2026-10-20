@@ -8,35 +8,25 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 )
 
-// wireOrders chooses the NetworkOrderRepo implementation.
-//
-// With no DATABASE_URL the service runs on the in-memory repo, which is
-// what keeps a local run and the unit suite free of infrastructure (ADR
-// 0001 §4). With one set, it MUST reach Postgres: returning an error
-// rather than falling back is the whole point, because the fallback is
-// silent and its cost is the acknowledgement deadlines this context owes
-// the network.
+// wireOrders builds the Postgres NetworkOrderRepo. There is no in-memory
+// fallback: the caller (loadBootConfig) has already refused a missing
+// DATABASE_URL, and a database that cannot be reached fails the boot
+// rather than degrading, because the fallback is silent and its cost is
+// the acknowledgement deadlines this context owes the network (ADR 0001,
+// real-wiring ADR).
 //
 // Migrations run here, at startup, matching every sibling service in this
 // fleet — the alternative is a separate job that can be forgotten, and a
 // schema that lags the binary is how a context starts answering wrongly
 // rather than not at all.
 //
-// The returned pool is nil exactly when the repo is the in-memory one;
-// main uses that alone to decide whether a UnitOfWork/outbox is wired,
-// so the two can never disagree about which mode is active.
-func wireOrders(ctx context.Context, logger *slog.Logger) (ports.NetworkOrderRepo, *pgxpool.Pool, func(), error) {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		logger.Info("order repository wired", "backend", "memory")
-		return memory.NewNetworkOrderRepo(), nil, func() {}, nil
-	}
-
+// The returned pool is never nil: it backs the UnitOfWork, the outbox and
+// the capability-offer repository.
+func wireOrders(ctx context.Context, logger *slog.Logger, databaseURL string) (ports.NetworkOrderRepo, *pgxpool.Pool, func(), error) {
 	// Retried, because in this fleet EVERY injected pod's first outbound
 	// TCP dial is reset ~10s after the app starts (Istio native sidecars;
 	// `holdApplicationUntilProxyStarts` is a no-op for them). A single

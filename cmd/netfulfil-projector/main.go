@@ -49,6 +49,10 @@ import (
 // cannot start without it.
 var errMissingAnalyticsURL = errors.New("ANALYTICS_DATABASE_URL is required")
 
+// errConsumerStopped is the exit error when the analytics consumer returns
+// while the process was meant to keep running.
+var errConsumerStopped = errors.New("analytics consumer stopped on its own")
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("netfulfil-projector exited with error", "error", err)
@@ -69,11 +73,11 @@ func run() error {
 	defer shutdownTelemetry()
 
 	adminAddr := getenv("ADMIN_ADDR", ":8091")
-	analyticsURL := os.Getenv("ANALYTICS_DATABASE_URL")
-	if analyticsURL == "" {
-		return errMissingAnalyticsURL
+	cfg, err := loadProjectorConfig(os.Getenv)
+	if err != nil {
+		return err
 	}
-	kafkaBrokers := strings.Split(getenv("KAFKA_BROKERS", "localhost:9092"), ",")
+	analyticsURL, kafkaBrokers := cfg.analyticsURL, cfg.kafkaBrokers
 	migrationsPath := getenv("ANALYTICS_MIGRATIONS_PATH", "migrations/analytics")
 
 	// The projector owns the analytical schema: run its migrations on
@@ -109,22 +113,42 @@ func run() error {
 	}()
 
 	consumerCtx, cancelConsumer := context.WithCancel(context.Background())
+	consumerErr := make(chan error, 1)
 	go func() {
 		logger.Info("analytics consumer starting", "topic", outboundkafka.AnalyticsTopic, "group", group, "brokers", kafkaBrokers)
-		if err := consumer.Run(consumerCtx); err != nil {
+		err := consumer.Run(consumerCtx)
+		if err != nil {
 			logger.Error("analytics consumer stopped", "error", err)
 		}
+		consumerErr <- err
 	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	exitErr := waitForStopOrConsumerDeath(stop, consumerErr)
 
 	cancelConsumer()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil && exitErr == nil {
+		exitErr = err
+	}
+	return exitErr
+}
+
+// waitForStopOrConsumerDeath blocks until a termination signal arrives
+// (nil: a clean stop) or the analytics consumer returns on its own. In the
+// second case it returns errConsumerStopped joined with the consumer's error,
+// so the process exits non-zero and the pod restarts instead of staying up
+// and projecting nothing.
+func waitForStopOrConsumerDeath(stop <-chan os.Signal, consumerErr <-chan error) error {
+	select {
+	case <-stop:
+		return nil
+	case err := <-consumerErr:
+		return errors.Join(errConsumerStopped, err)
+	}
 }
 
 // setupTelemetry installs Go runtime metrics only (ADR-0013 Tier 1 item

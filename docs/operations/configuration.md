@@ -37,16 +37,15 @@ inside the cluster, like every context in the fleet.
   `OUTBOX_MAX_ATTEMPTS`. `0` is valid; a malformed or negative value logs a
   WARN (`invalid integer env var, using default`) and falls back to the
   default.
-- **Booleans**: two are boolean. `CAPABILITY_OFFER_ENABLED` is `true` only for
-  the string `true` (case-insensitive, surrounding spaces trimmed), default
-  off. `ORPHAN_HOLD_SWEEP_ENABLED` is **on by default**: unset or empty is on,
+- **Booleans**: `ORPHAN_HOLD_SWEEP_ENABLED` is **on by default**: unset or empty is on,
   anything `strconv.ParseBool` accepts (`true`, `false`, `1`, `0`, `t`, `f`, ...,
   case-insensitive) is honoured, and an unparseable value logs a WARN
   (`invalid ORPHAN_HOLD_SWEEP_ENABLED, keeping the orphaned-hold sweep on`) and
   keeps it on, so a typo can never switch the safety net off.
-- **`EVENT_PUBLISHER`** is compared exactly: only the lower-case string
-  `kafka` enables Kafka. Any other value, including `Kafka`, keeps the log
-  publisher.
+- **`EVENT_PUBLISHER`** and **`CAPABILITY_OFFER_ENABLED`** are kept only as
+  guards (ADR 0025): unset or empty is the one runtime; `kafka` and `true`
+  respectively are accepted (case-insensitive for the second); any other
+  value is a boot error naming the variable. They switch nothing off.
 
 ## `cmd/netfulfil` (the OLTP service)
 
@@ -57,7 +56,7 @@ relay all run in this one process. Its env surface lives in
 | Variable | Default | Required? | Meaning | Source |
 | --- | --- | --- | --- | --- |
 | `PORT` | `8080` | no | HTTP listen port. The server listens on `:<PORT>`. | `cmd/netfulfil/config.go` (`addr`) |
-| `DATABASE_URL` | unset | no | Postgres DSN for the request-serving pool. Unset: in-memory repositories (state is lost on restart). Set: Postgres, or the process **refuses to boot** after the retry budget. It never falls back to memory. | `cmd/netfulfil/database.go` (`wireOrders`) |
+| `DATABASE_URL` | none | **yes** | Postgres DSN for the request-serving pool. Missing: boot error `DATABASE_URL is required`. Unreachable: the process exits after the retry budget. There is no in-memory mode (ADR 0025). | `cmd/netfulfil/database.go` (`wireOrders`) |
 | `MIGRATIONS_DATABASE_URL` | value of `DATABASE_URL` | no | Direct (non-PgBouncer) DSN used only for `golang-migrate` at startup (ADR 0007). The runtime pool always uses `DATABASE_URL`. | `cmd/netfulfil/database.go` (`migrationsURL`) |
 | `MIGRATIONS_PATH` | `/app/migrations` | no | Directory of the OLTP `*.up.sql` files. Set it to `migrations` for a local run from the repo root. | `cmd/netfulfil/config.go` (`migrationsPath`) |
 | `NETWORK_MODE` | `stub` | no | Which network gateway is wired. `live` (case-insensitive) selects the live gateway, which **is not implemented**: boot fails with `NETWORK_MODE=live is not implemented yet`. Every other value, including the retired `sandbox`, means `stub`. The mode in force is logged at startup and echoed by `GET /inbound-status`. | `cmd/netfulfil/wiring.go` (`wireGateway`), `internal/adapters/outbound/network/gateway.go` (`ParseMode`) |
@@ -69,12 +68,12 @@ relay all run in this one process. Its env surface lives in
 | `SWEEP_INTERVAL` | `1m` | no | Cadence of `SweepAcknowledgementDeadlines`, of `RejectOverdueOrders` and of `SweepOrphanedHolds` (three separate tickers). Must be positive. The chart sets `5m`. | `cmd/netfulfil/config.go` (`sweepInterval`), `cmd/netfulfil/workers.go` |
 | `ORPHAN_HOLD_SWEEP_ENABLED` | `true` | no | Turns the orphaned-hold sweep (ADR 0024) on or off. `false` skips wiring it: no ticker, and a boot WARN `orphaned-hold sweep disabled by ORPHAN_HOLD_SWEEP_ENABLED: a hold nobody decides stays reserved in order-management`. Anything else `strconv.ParseBool` rejects keeps it on. The hold id and outcome are still recorded when it is off. | `cmd/netfulfil/config.go` (`orphanHoldSweepEnabled`), `cmd/netfulfil/wiring.go` (`wireOrphanHoldSweep`) |
 | `ORPHAN_HOLD_GRACE` | `1h` | no | Go duration added to each order's `acknowledgeBy` before its undecided hold counts as orphaned (`now > acknowledgeBy + grace`). It lets `RejectOverdueOrders` free the hold first, so the sweep is a backstop and not a second actor. `0` means no grace; a malformed or negative value logs a WARN and uses `1h`. Read once at boot. | `cmd/netfulfil/config.go` (`orphanHoldGrace`) |
-| `EVENT_PUBLISHER` | unset (log) | no | `kafka` publishes every domain event to both topics. With `DATABASE_URL` set this goes through the transactional outbox and starts the relay (ADR 0003); without it both topics are written directly. Anything else logs events only. | `cmd/netfulfil/publishing.go` (`wireEventPublisher`) |
+| `EVENT_PUBLISHER` | unset | no | Guard only: unset or `kafka`; anything else is a boot error. Every domain event goes to both topics through the transactional outbox and the relay, which is always on (ADR 0003, ADR 0025). | `cmd/netfulfil/publishing.go` (`wireEventPublisher`) |
 | `KAFKA_BROKERS` | `localhost:9092` | when Kafka is used | Comma-separated broker list for the two publishers and the two capability-offer caches. The caches read their start-up offsets from the first broker only. | `cmd/netfulfil/config.go` (`kafkaBrokers`), `internal/adapters/outbound/processpathcache/consumer.go` |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | no | Sleep between outbox relay passes that found nothing to publish (outbox mode only). A full batch of 100 is followed immediately by another pass. | `cmd/netfulfil/publishing.go`, `internal/adapters/outbound/postgres/outbox_relay.go` |
 | `OUTBOX_MAX_ATTEMPTS` | `20` | no | Outbox relay attempt cap (ADR 0021, outbox mode only). A row that has failed this many sends is excluded from the relay's claims and logged at ERROR; it stays in `outbox_events` until re-armed with `UPDATE outbox_events SET attempts = 0 WHERE id = ...` ([runbook](./runbook.md#an-outbox-row-hit-the-attempt-cap)). `0` = unlimited (one poison row then blocks every later row forever). An invalid or negative value logs a WARN and uses `20`. | `cmd/netfulfil/config.go` (`outboxMaxAttempts`, `envInt`), `cmd/netfulfil/publishing.go` |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5188` | no | Comma-separated browser origins. Methods `GET`, `POST`, `OPTIONS`; headers `Content-Type`, `Authorization`; no credentials; preflight cached 300 s. | `internal/adapters/inbound/http/server.go` (`corsMiddleware`) |
-| `CAPABILITY_OFFER_ENABLED` | `false` | no | `true` wires the CapabilityOffer pipeline: the two Kafka caches, the inventory-storage client, the `RECOMPUTE_INTERVAL` ticker and `GET /capability-offers`. Boot then blocks until both caches have replayed their topic (one shared wait of 120 s, the sum of the two caches' 60 s `WaitReadyTimeout`s). | `cmd/netfulfil/config.go`, `cmd/netfulfil/capability.go` |
+| `CAPABILITY_OFFER_ENABLED` | unset | no | Guard only: unset or `true`; anything else is a boot error. The CapabilityOffer pipeline is always wired: the two Kafka caches, the inventory-storage client, the `RECOMPUTE_INTERVAL` ticker and `GET /capability-offers`. Boot then blocks until both caches have replayed their topic (one shared wait of 120 s, the sum of the two caches' 60 s `WaitReadyTimeout`s). | `cmd/netfulfil/config.go`, `cmd/netfulfil/capability.go` |
 | `SITE_ID` | `site-1` | no | The single site capability offers are computed for (the CPT schedule is looked up by this id). | `cmd/netfulfil/config.go` (`siteId`) |
 | `RECOMPUTE_INTERVAL` | `1m` | no | Cadence of `RecomputeCapabilityOffers`. Only used when the pipeline is enabled. | `cmd/netfulfil/config.go` (`recomputeInterval`) |
 | `INVENTORY_STORAGE_URL` | `http://localhost:8080` | when the pipeline is enabled | Base URL for `GET /inventory/{sku}/usable`. | `cmd/netfulfil/capability.go` (`wireInventoryClient`) |
@@ -96,15 +95,14 @@ for the tool list.
 | Variable | Default | Required? | Meaning | Source |
 | --- | --- | --- | --- | --- |
 | `MCP_ADDR` | `:8090` | no | Listen address. | `cmd/mcp/main.go` |
-| `DATABASE_URL` | unset | yes in any real deployment | Postgres DSN of the **same** OLTP database `netfulfil` writes. Unset: an in-memory repository private to this process, so every tool sees an empty store. | `cmd/mcp/main.go` (`buildOrders`) |
+| `DATABASE_URL` | none | **yes** | Postgres DSN of the **same** OLTP database `netfulfil` writes. Missing: boot error `DATABASE_URL is required`. | `cmd/mcp/main.go` (`buildOrders`) |
 | `MIGRATIONS_DATABASE_URL` | value of `DATABASE_URL` | no | Direct DSN for the migration step this binary also runs at startup (ADR 0007). Unlike `netfulfil`, this step is **not retried**. | `cmd/mcp/main.go` |
 | `MIGRATIONS_PATH` | `/app/migrations` | no | OLTP migrations directory. | `cmd/mcp/main.go` |
 | `REPORTS_BASE_URL` | unset | no | Base URL of `netfulfil-reports`. Unset: the `get_acknowledgement_report` tool is not registered. The chart fills it in with the in-cluster reports Service when `analytics.enabled=true`. | `cmd/mcp/main.go` |
 | `LOG_LEVEL` | `info` | no | Same values as `netfulfil`. | `cmd/mcp/main.go` (`newLogger`) |
 
 `list_capability_offers` is always registered by this binary: it reads the
-`capability_offers` table, which stays empty unless `netfulfil` runs with
-`CAPABILITY_OFFER_ENABLED=true`.
+`capability_offers` table, which `netfulfil` fills (the pipeline is always on).
 
 ## `cmd/netfulfil-projector` (analytics writer)
 
@@ -151,7 +149,7 @@ These look like knobs but are compiled in. Changing them is a code change.
 ## Helm chart values to environment
 
 `charts/network-fulfillment` sets the variables below. Anything without a
-values key (`CAPABILITY_OFFER_ENABLED`, `SITE_ID`, `RECOMPUTE_INTERVAL`,
+values key (`SITE_ID`, `RECOMPUTE_INTERVAL`,
 `INVENTORY_STORAGE_URL`, `OUTBOX_RELAY_INTERVAL`) can only be set with
 `extraEnv` (API Deployment) or `mcp.extraEnv`.
 

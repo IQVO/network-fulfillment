@@ -40,10 +40,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
@@ -282,7 +282,7 @@ func newWiredUsecases(t *testing.T, feasible bool) *wiredUsecases {
 	om := newOrderManagementStub(t, feasible)
 	planner := ordermanagement.NewPlanner(om.baseURL(), nil)
 
-	translation := memory.NewProductTranslation()
+	translation := producttranslation.New()
 	translation.Add("NPROD-A", "SKU-A")
 	translation.Add("NPROD-B", "SKU-B")
 

@@ -10,18 +10,15 @@ import (
 
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/system"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 )
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 // wireGateway wires the outbound network gateway for the NETWORK_MODE env
 // var, returning the parsed mode alongside it so the composition root can
@@ -78,7 +75,7 @@ func seedStubDemand(gateway ports.NetworkGateway, logger *slog.Logger) error {
 // negative every time, and the cause is invisible because refusing
 // unknown products is also correct behaviour.
 func loadProductTranslation(logger *slog.Logger) (ports.ProductTranslation, error) {
-	translation := memory.NewProductTranslation()
+	translation := producttranslation.New()
 	path := os.Getenv("PRODUCT_TRANSLATION_FILE")
 	if path == "" {
 		// WARN, not INFO: a deployment with no dictionary is running, and
@@ -86,7 +83,7 @@ func loadProductTranslation(logger *slog.Logger) (ports.ProductTranslation, erro
 		logger.Warn("no PRODUCT_TRANSLATION_FILE set; every network order will be rejected as untranslatable")
 		return translation, nil
 	}
-	n, err := memory.LoadProductTranslationFile(translation, path)
+	n, err := producttranslation.LoadFile(translation, path)
 	if err != nil {
 		return nil, err
 	}
@@ -119,9 +116,8 @@ func wirePlanner() (ports.FulfillmentPlanner, *telemetry.CircuitBreakerMetrics) 
 
 // wireUseCases builds the use cases this composition root serves,
 // sharing one repository, planner, publisher and clock between them.
-// The UnitOfWork is nil exactly when pool is (in-memory mode): the use
-// cases treat that as "no transactional backing" and run Save+Publish
-// back to back, unchanged from before this rollout.
+// The UnitOfWork is always the Postgres one: Save and Publish (the
+// outbox enqueue) commit or roll back together.
 //
 // SweepAcknowledgementDeadlines and RejectOverdueOrders are deliberately
 // two separate use cases (ADR 0001 §6): the sweep only ever reports
@@ -136,38 +132,34 @@ func wireUseCases(
 	events ports.EventPublisher,
 	pool *pgxpool.Pool,
 ) (*usecases.ReceiveNetworkDemand, *usecases.SweepAcknowledgementDeadlines, *usecases.RejectOverdueOrders) {
-	var uow ports.UnitOfWork
-	if pool != nil {
-		uow = postgres.NewUnitOfWork(pool)
-	}
+	uow := postgres.NewUnitOfWork(pool)
 	receive := &usecases.ReceiveNetworkDemand{
 		Orders:      orders,
 		Gateway:     gateway,
 		Planner:     planner,
 		Translation: translation,
 		Events:      events,
-		Clock:       systemClock{},
+		Clock:       system.Clock{},
 		UnitOfWork:  uow,
 	}
 	sweep := &usecases.SweepAcknowledgementDeadlines{
 		Orders: orders,
 		Events: events,
-		Clock:  systemClock{},
+		Clock:  system.Clock{},
 	}
 	rejectOverdue := &usecases.RejectOverdueOrders{
 		Orders:     orders,
 		Planner:    planner,
 		Events:     events,
-		Clock:      systemClock{},
+		Clock:      system.Clock{},
 		UnitOfWork: uow,
 	}
 	return receive, sweep, rejectOverdue
 }
 
 // wireOrphanHoldSweep builds the orphaned-hold sweep (ADR 0024), or returns
-// nil when ORPHAN_HOLD_SWEEP_ENABLED turns it off. Like the other use cases
-// its UnitOfWork is set only when pool is non-nil (in-memory mode has no
-// transactional backing).
+// nil when ORPHAN_HOLD_SWEEP_ENABLED turns it off (a safety net inside this
+// context, not a database or broker stand-in).
 func wireOrphanHoldSweep(
 	orders ports.NetworkOrderRepo,
 	planner ports.FulfillmentPlanner,
@@ -183,16 +175,15 @@ func wireOrphanHoldSweep(
 		Orders:     orders,
 		Planner:    planner,
 		Events:     events,
-		Clock:      systemClock{},
-		UnitOfWork: wireUnitOfWork(pool),
+		Clock:      system.Clock{},
+		UnitOfWork: postgres.NewUnitOfWork(pool),
 		Metrics:    telemetry.NewOrphanHoldMetrics(nil),
 		Grace:      orphanHoldGrace(logger),
 	}
 }
 
 // wireReconcile builds the submitted-order reconciliation use case
-// (ADR 0001 §5). Its UnitOfWork is set only when pool is non-nil, the
-// same "nil means no transactional backing" convention as wireUseCases.
+// (ADR 0001 §5), on the Postgres UnitOfWork.
 func wireReconcile(
 	orders ports.NetworkOrderRepo,
 	gateway ports.NetworkGateway,
@@ -200,28 +191,14 @@ func wireReconcile(
 	events ports.EventPublisher,
 	pool *pgxpool.Pool,
 ) *usecases.ReconcileSubmittedOrders {
-	reconcile := &usecases.ReconcileSubmittedOrders{
-		Orders:  orders,
-		Gateway: gateway,
-		Planner: planner,
-		Events:  events,
-		Clock:   systemClock{},
+	return &usecases.ReconcileSubmittedOrders{
+		Orders:     orders,
+		Gateway:    gateway,
+		Planner:    planner,
+		Events:     events,
+		Clock:      system.Clock{},
+		UnitOfWork: postgres.NewUnitOfWork(pool),
 	}
-	if pool != nil {
-		reconcile.UnitOfWork = postgres.NewUnitOfWork(pool)
-	}
-	return reconcile
-}
-
-// wireUnitOfWork returns a UnitOfWork bound to pool, or nil when pool is
-// nil (in-memory mode) — the same "nil means no transactional backing"
-// convention wireUseCases already establishes for ReceiveNetworkDemand
-// and SweepAcknowledgementDeadlines.
-func wireUnitOfWork(pool *pgxpool.Pool) ports.UnitOfWork {
-	if pool == nil {
-		return nil
-	}
-	return postgres.NewUnitOfWork(pool)
 }
 
 // apiDeps are the collaborators wireAPI assembles the REST server from.
@@ -244,7 +221,7 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 	api := &inboundhttp.Server{
 		Orders:          d.orders,
 		Poller:          d.poller,
-		Clock:           systemClock{},
+		Clock:           system.Clock{},
 		NetworkMode:     string(d.mode),
 		Readiness:       d.readiness,
 		MetricsRegistry: d.metrics.Registry,
@@ -257,8 +234,8 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 		Orders:     d.orders,
 		Gateway:    d.gateway,
 		Events:     d.events,
-		Clock:      systemClock{},
-		UnitOfWork: wireUnitOfWork(d.pool),
+		Clock:      system.Clock{},
+		UnitOfWork: postgres.NewUnitOfWork(d.pool),
 	}
 	return api
 }

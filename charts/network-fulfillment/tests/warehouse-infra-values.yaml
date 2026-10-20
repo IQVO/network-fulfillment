@@ -1,0 +1,96 @@
+# network-fulfillment: the fleet's Anti-Corruption Layer to an external retail network
+# (Amazon Vendor Direct Fulfillment). Complete Helm values (ADR 0002 D2), formerly computed
+# in terraform/10-platform/network-fulfillment.tf (see its git history for each block's reasoning).
+
+# THE IMPORTANT PART OF THIS FILE IS WHAT IT DOES NOT SET: config.networkMode stays "stub",
+# deliberately and permanently for the local kind cluster. In stub mode the service makes
+# no external calls and needs no credentials, so this cluster cannot acknowledge a real
+# retailer's order. A real-network environment sets networkMode plus
+# credentials.existingSecret in ITS values, never here; the chart refuses a non-stub mode
+# without credentials.
+
+# Platform facts come from _platform.yaml, the kind CPU overlay from kind-resources/, the
+# image tags from Terraform. The chart reads network-fulfillment-db and
+# network-fulfillment-analytics-db (existingSecret).
+analytics:
+  database:
+    existingSecret: network-fulfillment-analytics-db
+  enabled: true
+  reports:
+    route:
+      enabled: true
+      path: /api/network-fulfillment/reports
+config:
+  eventPublisher: kafka
+  networkMode: stub
+  orderManagementUrl: http://order-management.warehouse-systems.svc.cluster.local:80
+  pollInterval: 1m
+  port: '8080'
+  sweepInterval: 5m
+database:
+  existingSecret: network-fulfillment-db
+  existingSecretKey: DATABASE_URL
+extraEnv:
+  - name: CAPABILITY_OFFER_ENABLED
+    value: 'true'
+  - name: KAFKA_BROKERS
+    value: kafka.warehouse-systems.svc.cluster.local:9092
+  - name: INVENTORY_STORAGE_URL
+    value: http://inventory-storage.warehouse-systems.svc.cluster.local:80
+  - name: SITE_ID
+    value: site-1
+frontend:
+  enabled: true
+  image:
+    pullPolicy: IfNotPresent
+    repository: warehouse/network-fulfillment-frontend
+gatewayApi:
+  enabled: true
+  hosts:
+    - path: /api/network-fulfillment
+      pathType: PathPrefix
+  stripPath: true
+image:
+  pullPolicy: IfNotPresent
+  repository: warehouse/network-fulfillment
+ingress:
+  annotations:
+    konghq.com/strip-path: 'true'
+  className: kong
+  enabled: false
+  hosts:
+    - host: ''
+      paths:
+        - path: /api/network-fulfillment
+          pathType: Prefix
+kongPlugins:
+  cors:
+    enabled: true
+  opentelemetry:
+    enabled: true
+  prometheus:
+    enabled: true
+mcp:
+  enabled: true
+  route:
+    enabled: true
+    path: /api/mcp/network-fulfillment
+productTranslation:
+  mappings:
+    - networkProductId: ASIN-LOCAL-1
+      sku: sku-1
+    - networkProductId: ASIN-LOCAL-2
+      sku: sku-2
+service:
+  port: 80
+  targetPort: 8080
+  type: ClusterIP
+stubDemand:
+  demands:
+    - lines:
+        - networkLineRef: '1'
+          networkProductId: ASIN-LOCAL-1
+          quantity: 1
+      networkRef: po-local-1
+      requiredShipBy: +36h
+      siteId: site-1

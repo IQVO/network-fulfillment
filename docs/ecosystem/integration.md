@@ -32,10 +32,10 @@ flowchart LR
 
     RN -->|"PollDemand, SubmitAcknowledgement,<br/>SubmissionStatus, SubmitShipmentConfirmation"| NF
     NF -->|"POST /orders, POST /orders/id/release,<br/>DELETE /orders/id"| OM
-    NF -.->|"GET /inventory/sku/usable<br/>opt-in"| INV
-    PPM -.->|"warehouse.process-path-management.events<br/>opt-in"| NF
-    WWP -.->|"warehouse.work-planning.events<br/>opt-in"| NF
-    NF -.->|"warehouse.network-fulfillment.events<br/>EVENT_PUBLISHER=kafka"| SUB
+    NF -.->|"GET /inventory/sku/usable<br/>always on"| INV
+    PPM -.->|"warehouse.process-path-management.events<br/>always on"| NF
+    WWP -.->|"warehouse.work-planning.events<br/>always on"| NF
+    NF -.->|"warehouse.network-fulfillment.events<br/>always published (outbox)"| SUB
     NF -.->|"warehouse.network-fulfillment.analytics"| PROJ
     PROJ --> REP
     CON -->|"GET /network-orders, /inbound-status"| NF
@@ -60,11 +60,11 @@ inside the diagram for `{id}` / `{sku}`.
 | --- | --- | --- | --- | --- | --- |
 | retail network (`retail-network` plays the role, ADR 0009) | upstream | in-process port `ports.NetworkGateway` | poll demand, submit acknowledgement, submission status, shipment confirmation | stub only | see [The network](#the-network) |
 | `order-management` | downstream of our call (we are its Customer) | REST, synchronous | `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` | always on | error propagates, one circuit breaker, no retry |
-| `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | `CAPABILITY_OFFER_ENABLED=true` only | SKU skipped for that recompute pass |
-| `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | `CAPABILITY_OFFER_ENABLED=true` only | bad message logged and skipped, no DLQ |
-| `wes-work-planning` | upstream | Kafka, CloudEvents | `PathCapacityChanged` on `warehouse.work-planning.events` | `CAPABILITY_OFFER_ENABLED=true` only | bad message logged and skipped, no DLQ |
-| any subscriber | downstream | Kafka, CloudEvents | 7 event types on `warehouse.network-fulfillment.events` | `EVENT_PUBLISHER=kafka` only | outbox keeps unsent rows |
-| own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | `EVENT_PUBLISHER=kafka` only | retry 3 times, then `.dlq` |
+| `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | always on | SKU skipped for that recompute pass |
+| `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | always on | bad message logged and skipped, no DLQ |
+| `wes-work-planning` | upstream | Kafka, CloudEvents | `PathCapacityChanged` on `warehouse.work-planning.events` | always on | bad message logged and skipped, no DLQ |
+| any subscriber | downstream | Kafka, CloudEvents | 7 event types on `warehouse.network-fulfillment.events` | always on (outbox relay) | outbox keeps unsent rows |
+| own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | always on | retry 3 times, then `.dlq` |
 | `warehouse-console` (via `web/` remote) | downstream | REST | `GET /network-orders`, `GET /inbound-status` | on | n/a |
 | MCP clients | downstream | MCP, Streamable HTTP | 4 read-only tools | `mcp.enabled` | n/a |
 
@@ -149,7 +149,7 @@ Failure behaviour:
 ## inventory-storage
 
 Client: `internal/adapters/outbound/inventoryclient/client.go`, base URL
-`INVENTORY_STORAGE_URL`. Wired only with `CAPABILITY_OFFER_ENABLED=true`.
+`INVENTORY_STORAGE_URL`. Wired at boot, always on.
 
 - `GET /inventory/{sku}/usable` returns `{"sku","usable"}`; `usable` is the
   physical side of the capability offer. An unknown SKU is `usable: 0` by
@@ -169,7 +169,7 @@ comment).
 ## process-path-management
 
 Consumer: `internal/adapters/outbound/processpathcache/consumer.go`. Wired
-only with `CAPABILITY_OFFER_ENABLED=true`.
+at boot, always on.
 
 - Topic `warehouse.process-path-management.events`, read from the earliest
   offset with a group id unique per process
@@ -194,7 +194,7 @@ only with `CAPABILITY_OFFER_ENABLED=true`.
 ## wes-work-planning
 
 Consumer: `internal/adapters/outbound/pathcapacitycache/consumer.go`. Wired
-only with `CAPABILITY_OFFER_ENABLED=true`.
+at boot, always on.
 
 - Topic `warehouse.work-planning.events`, earliest offset, group id
   `network-fulfillment-path-capacity-cache-<hostname>-<pid>-<unix-nanos>`.
@@ -211,9 +211,8 @@ instant of the site's next cutoff.
 
 ## Events published
 
-Only with `EVENT_PUBLISHER=kafka`. With `DATABASE_URL` set every event goes
-through the transactional outbox (ADR 0003) and the relay; without it the
-publishers write directly. Otherwise events go to the log only.
+Always on (ADR 0025). Every event goes through the transactional outbox
+(ADR 0003) and the relay.
 
 Envelope (ADR 0008, `internal/adapters/kafka/cloudevents/cloudevents.go`):
 CloudEvents 1.0 structured mode, Kafka header
@@ -277,7 +276,7 @@ specified in `apis/openapi.yaml`:
 | `GET /network-orders` | unanswered (`NEW`) orders, soonest deadline first |
 | `GET /network-orders/{networkRef}` | one order, any state |
 | `POST /network-orders/{networkRef}/shipment-confirmation` | the one write route (ADR 0014): `204`, `404`, `409` |
-| `GET /capability-offers` | only with `CAPABILITY_OFFER_ENABLED=true` |
+| `GET /capability-offers` | always |
 
 `cmd/netfulfil-reports` serves `GET /reports/acknowledgement`,
 `GET /reports/acknowledgement/freshness` and `GET /healthz`; see the

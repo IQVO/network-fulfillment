@@ -8,6 +8,7 @@ import (
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
@@ -64,11 +65,11 @@ type fixture struct {
 	orders      *memory.NetworkOrderRepo
 	gateway     *network.StubGateway
 	planner     *fakePlanner
-	translation *memory.ProductTranslation
+	translation *producttranslation.Dictionary
 }
 
 func newFixture(feasible bool) *fixture {
-	tr := memory.NewProductTranslation()
+	tr := producttranslation.New()
 	tr.Add("ASIN-1", "SKU-1")
 	tr.Add("ASIN-2", "SKU-2")
 	return &fixture{

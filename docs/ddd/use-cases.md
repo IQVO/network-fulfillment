@@ -28,7 +28,7 @@ tools read the repositories directly (`internal/adapters/inbound/http/server.go`
 | `RejectOverdueOrders` | ticker | every `SWEEP_INTERVAL` (its own ticker) | `cmd/netfulfil/workers.go` |
 | `SweepOrphanedHolds` | ticker | every `SWEEP_INTERVAL` (its own ticker, the same interval as the two passes above); not started when `ORPHAN_HOLD_SWEEP_ENABLED=false` | `cmd/netfulfil/workers.go` (`runSweepOrphanedHolds`), built in `cmd/netfulfil/wiring.go` (`wireOrphanHoldSweep`) |
 | `ConfirmNetworkOrderShipment` | REST | `POST /network-orders/{networkRef}/shipment-confirmation` | `internal/adapters/inbound/http/server.go` |
-| `RecomputeCapabilityOffers` | ticker | every `RECOMPUTE_INTERVAL`, only with `CAPABILITY_OFFER_ENABLED=true` | `cmd/netfulfil/capability.go` |
+| `RecomputeCapabilityOffers` | ticker | every `RECOMPUTE_INTERVAL`, always | `cmd/netfulfil/capability.go` |
 
 No use case is driven by Kafka or by MCP. The two Kafka consumers in
 `netfulfil` only fill caches that `RecomputeCapabilityOffers` reads; the
@@ -37,11 +37,10 @@ projector's consumer feeds the analytics store, not a use case.
 ## How Save and Publish commit
 
 Every use case that changes a `NetworkOrder` saves it and publishes its event
-inside `atomically(...)` (`unit_of_work.go`). With `DATABASE_URL` set the unit
-of work is one Postgres transaction (`cmd/netfulfil/wiring.go`); with
-`EVENT_PUBLISHER=kafka` as well, the publisher writes the `outbox_events`
-rows inside that same transaction (ADR 0003). Without `DATABASE_URL` the unit
-of work is nil and the two calls run back to back.
+inside `atomically(...)` (`unit_of_work.go`). The unit
+of work is one Postgres transaction (`cmd/netfulfil/wiring.go`) and the
+publisher writes the `outbox_events` rows inside that same transaction
+(ADR 0003, ADR 0025). Unit tests with fakes run the two calls back to back.
 External calls (order-management, the network) are made **outside** that
 scope, in a fixed order explained per use case below.
 
@@ -247,7 +246,7 @@ another having run.
 ## RecomputeCapabilityOffers
 
 `recompute_capability_offers.go` (ADR 0001 §8, ADR 0017). Computes what this
-context would advertise per SKU at `SITE_ID`. Opt-in.
+context would advertise per SKU at `SITE_ID`. Always on.
 
 - **Input**: none; the SKU list is `ProductTranslation.KnownSKUs` (every SKU
   the dictionary maps to).
