@@ -69,11 +69,11 @@ func run() error {
 	defer shutdownTelemetry()
 
 	adminAddr := getenv("ADMIN_ADDR", ":8091")
-	analyticsURL := os.Getenv("ANALYTICS_DATABASE_URL")
-	if analyticsURL == "" {
-		return errMissingAnalyticsURL
+	cfg, err := loadProjectorConfig(os.Getenv)
+	if err != nil {
+		return err
 	}
-	kafkaBrokers := strings.Split(getenv("KAFKA_BROKERS", "localhost:9092"), ",")
+	analyticsURL, kafkaBrokers := cfg.analyticsURL, cfg.kafkaBrokers
 	migrationsPath := getenv("ANALYTICS_MIGRATIONS_PATH", "migrations/analytics")
 
 	// The projector owns the analytical schema: run its migrations on
