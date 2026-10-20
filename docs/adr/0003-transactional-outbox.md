@@ -12,6 +12,7 @@ description: "ADR 0003 — why saving a NetworkOrder and publishing its domain e
 
 Accepted — implemented in the same change that introduced this record.
 Per-key ordering consequence amended by ADR-0021 (relay attempt cap).
+Status pointer: ADR 0025 removed the optional runtime this record describes (direct no-database publishing, log publisher, independent `EVENT_PUBLISHER`/`DATABASE_URL` toggles); the outbox is now the only path.
 Envelope description superseded by ADR-0008: the outbox mechanism is
 unchanged, but the bytes it stores are now CloudEvents 1.0 structured-mode
 events (the flat `Envelope` / `AnalyticsEnvelope` shapes named below no
