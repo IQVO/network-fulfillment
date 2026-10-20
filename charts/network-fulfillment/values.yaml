@@ -19,6 +19,11 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
+# Pod terminationGracePeriodSeconds of the api Deployment. The binary's graceful
+# shutdown flips /readyz, stops the consumers, drains HTTP and waits for the
+# outbox relay; the chart refuses anything under 20.
+terminationGracePeriodSeconds: 30
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
@@ -110,12 +115,10 @@ autoscaling:
   # sweep, both driven by this same process's own ticker -- neither
   # consumes Kafka, so there is no consumer-group collision risk here at
   # all (this binary's only Kafka use is as an OUTBOUND publisher/outbox
-  # relay, which every replica may do independently). Its in-memory mode
-  # (no DATABASE_URL) forgets state on restart by design, but that is a
-  # deployment-mode property, not a per-replica-divergence risk: every
-  # api replica in a real deployment shares the SAME Postgres-backed
-  # NetworkOrderRepo, so N replicas read/write one consistent store, not N
-  # disagreeing in-memory maps. max 4 / target 70% CPU, matching
+  # relay, which every replica may do independently). Every api replica
+  # shares the SAME Postgres-backed NetworkOrderRepo (Postgres is the only
+  # runtime, there is no in-process store), so N replicas read/write one
+  # consistent store. max 4 / target 70% CPU, matching
   # order-management's identically-shaped api Deployment.
   api:
     enabled: false
@@ -143,22 +146,22 @@ autoscaling:
     targetCPUUtilizationPercentage: 70
 
 # This context's OLTP configuration surface (cmd/netfulfil/main.go), plus
-# corsAllowedOrigins for the inbound HTTP adapter's CORS middleware. It
-# additionally gains an optional Kafka connection below (kafka.enabled) —
-# see the comment on eventPublisher for what that unlocks.
+# corsAllowedOrigins for the inbound HTTP adapter's CORS middleware. Postgres
+# (database.*) and Kafka (kafka.brokers) are REQUIRED: the chart refuses to
+# render without them.
 config:
   port: "8080"
 
-  # log | kafka. log (the default) keeps the existing behaviour: domain
-  # events are logged and nothing else. kafka fans out to BOTH the
-  # integration topic (warehouse.network-fulfillment.events) and the
-  # analytics topic (warehouse.network-fulfillment.analytics) -- see
-  # cmd/netfulfil/main.go's wireEventPublisher. Naming mirrors
-  # facility-layout's and process-path-management's charts exactly.
-  eventPublisher: "log"   # "log" or "kafka"
+  # kafka is the only value. Domain events go through the transactional outbox
+  # and its relay, which fans out to BOTH the integration topic
+  # (warehouse.network-fulfillment.events) and the analytics topic
+  # (warehouse.network-fulfillment.analytics) -- see cmd/netfulfil's
+  # wireEventPublisher. The key is kept because warehouse-infra sets it; any
+  # other value (the old "log") is refused at render and by the binary at boot.
+  eventPublisher: "kafka"
 
-  # Outbox relay attempt cap (ADR 0021); OUTBOX_MAX_ATTEMPTS. Read only in
-  # outbox mode (eventPublisher=kafka plus a database). A row that has failed
+  # Outbox relay attempt cap (ADR 0021); OUTBOX_MAX_ATTEMPTS. The relay is
+  # always on. A row that has failed
   # this many sends is excluded from the relay's claims and logged at ERROR
   # (it stays in outbox_events; re-arm it with attempts = 0, see the
   # runbook). Later rows, including rows with the same key, then overtake it.
@@ -275,17 +278,11 @@ stubDemand:
   #       networkProductId: ASIN-XYZ123
   #       quantity: 3
 
-# Persistence. With BOTH left empty the binary runs on its in-memory
-# repository: that is the zero-configuration local run (ADR 0001 section 4),
-# and it is deliberately the default so a `helm install` with no values
-# needs no database to exist.
-#
-# It is NOT an acceptable production posture. An in-memory repo forgets
-# every acknowledgement deadline this context owes the network on restart,
-# and pods in this fleet restart once at rollout by design — so a real
-# deployment sets database.url (or existingSecret) and the binary then
-# REFUSES to boot if Postgres is unreachable, rather than silently falling
-# back to the map.
+# Persistence. REQUIRED: set database.url or database.existingSecret. The
+# binaries (cmd/netfulfil, cmd/mcp) exit at boot without DATABASE_URL, there is
+# no in-memory repository, and the chart refuses to render without a source.
+# A real Postgres is the only runtime: the acknowledgement deadlines this
+# context owes the network must survive the restart every rollout causes.
 #
 # Prefer existingSecret outside a throwaway cluster: an inline url lands in
 # the release's stored manifest in plain text.
@@ -389,26 +386,29 @@ frontend:
     capabilities:
       drop: ["ALL"]
 
-# This service PUBLISHES onto warehouse.network-fulfillment.events (and, in
-# the same fan-out, warehouse.network-fulfillment.analytics) when
-# config.eventPublisher is "kafka" (KAFKA_BROKERS is only set in the
-# container env in that case) -- see cmd/netfulfil/main.go's
-# wireEventPublisher and config.eventPublisher above. Naming mirrors
-# facility-layout's and process-path-management's charts exactly; this
-# fleet does not invent a second name for the same knob per repo.
+# Kafka is REQUIRED: KAFKA_BROKERS is always set on the api Deployment and the
+# projector, and the chart refuses to render with brokers empty. This service
+# PUBLISHES onto warehouse.network-fulfillment.events (and, in the same fan-out,
+# warehouse.network-fulfillment.analytics) through the transactional outbox and
+# its relay (always on), and consumes the capability-offer topics for its
+# path-capability and capacity caches (always on; CAPABILITY_OFFER_ENABLED, if
+# set in extraEnv, must be "true"). /readyz checks Postgres and Kafka broker
+# metadata. There is no localhost default: set brokers explicitly.
+#
+# kafka.enabled is no longer a switch. Leave it out; the legacy
+# `enabled: true` that warehouse-infra still sets is tolerated, `false` is
+# refused at render.
 kafka:
-  enabled: false
-  brokers: "kafka:9092"
+  brokers: ""   # REQUIRED, comma-separated host:port list (KAFKA_BROKERS)
 
 # --- analytics data product (ADR 0002) ---
 # The "Network Order Acknowledgement & Translation" report: a separate
 # analytics topic, a writer (netfulfil-projector) and a read-only reader
 # (netfulfil-reports), backed by a separate analytical database. Disabled
 # by default so existing releases are unaffected; set analytics.enabled=true
-# to deploy the two extra processes. Requires kafka.enabled=true (and
-# EVENT_PUBLISHER=kafka, wired automatically when kafka.enabled is true) on
-# the main deployment too, or the projector's Kafka topic never receives
-# events to consume.
+# to deploy the two extra processes. While enabled the chart requires
+# analytics.database.url or analytics.database.existingSecret
+# (ANALYTICS_DATABASE_URL); the projector reads kafka.brokers above.
 analytics:
   enabled: false
   # Directory (inside the image) of the analytical *.up.sql migrations the

@@ -58,7 +58,12 @@ stubDemand:
 
 
 def render(values: str | None) -> list[dict]:
-    args = ["helm", "template", "network-fulfillment", str(CHART_DIR)]
+    # Postgres and Kafka are the only runtime: the chart refuses to render
+    # without a database source and kafka.brokers (tests/render_test.sh owns
+    # the refusals), so every render here carries both.
+    args = ["helm", "template", "network-fulfillment", str(CHART_DIR),
+            "--set", "database.existingSecret=base-db",
+            "--set", "kafka.brokers=kafka.invalid:9092"]
     if values is not None:
         values_path = CHART_DIR / "tests" / ".rendered-values.yaml"
         values_path.write_text(values)

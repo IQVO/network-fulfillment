@@ -36,10 +36,30 @@ INLINE_CREDS = [
     "--set", "credentials.refreshToken=test-token",
 ]
 
+# Postgres and Kafka are the only runtime: the chart refuses to render without
+# a database source and kafka.brokers. Every render here gets both, so these
+# tests keep asserting the credential and database wiring rather than the
+# refusal (tests/render_test.sh owns the refusals). The database comes from an
+# existingSecret, which the chart references but never creates; secret_refs()
+# drops it so "no Secret referenced" still means no credentials Secret. A test
+# that sets any database.* value itself replaces this default.
+BASE_DB_SECRET = "base-db"
+REAL_RUNTIME = [
+    "--set", f"database.existingSecret={BASE_DB_SECRET}",
+    "--set", "kafka.brokers=kafka.invalid:9092",
+]
+
+
+def with_real_runtime(extra_args: list[str]) -> list[str]:
+    base = list(REAL_RUNTIME)
+    if any(a.startswith("database.") for a in extra_args):
+        base = base[2:]
+    return [*base, *extra_args]
+
 
 def render(extra_args: list[str]) -> list[dict]:
     out = subprocess.run(
-        ["helm", "template", "network-fulfillment", str(CHART_DIR), *extra_args],
+        ["helm", "template", "network-fulfillment", str(CHART_DIR), *with_real_runtime(extra_args)],
         capture_output=True, text=True, check=True,
     ).stdout
     try:
@@ -52,7 +72,7 @@ def render(extra_args: list[str]) -> list[dict]:
 
 def render_expecting_failure(extra_args: list[str]) -> str:
     proc = subprocess.run(
-        ["helm", "template", "network-fulfillment", str(CHART_DIR), *extra_args],
+        ["helm", "template", "network-fulfillment", str(CHART_DIR), *with_real_runtime(extra_args)],
         capture_output=True, text=True,
     )
     if proc.returncode == 0:
@@ -81,6 +101,7 @@ def secret_refs(docs: list[dict]) -> set[str]:
                 ref = env.get("valueFrom", {}).get("secretKeyRef")
                 if ref:
                     refs.add(ref["name"])
+    refs.discard(BASE_DB_SECRET)
     return refs
 
 
@@ -157,20 +178,20 @@ def check_non_stub_without_credentials_fails_closed() -> None:
 
 
 def check_default_has_no_database() -> None:
-    """The zero-config default: in-memory repo, so no DATABASE_URL anywhere.
-
-    This is what keeps `helm install` with no values working against a
-    cluster that has no Postgres for this context.
-    """
-    docs = render([])
-    assert "DATABASE_URL" not in env_names(docs), (
-        "the default render set DATABASE_URL; the zero-config install must "
-        "run on the in-memory repository"
+    """No in-memory mode: without a database source the chart refuses to render."""
+    proc = subprocess.run(
+        ["helm", "template", "network-fulfillment", str(CHART_DIR),
+         "--set", "kafka.brokers=kafka.invalid:9092"],
+        capture_output=True, text=True,
     )
-    assert not any(n.endswith("-database") for n in secret_names(docs)), (
-        f"the default render created a database Secret: {sorted(secret_names(docs))}"
+    assert proc.returncode != 0, (
+        "the chart rendered with no database source; there is no in-memory "
+        "mode, so it must refuse"
     )
-    print("PASS: default render has no database wiring at all")
+    assert "database.url or database.existingSecret" in proc.stderr, (
+        f"the refusal does not name the missing value. stderr was:\n{proc.stderr}"
+    )
+    print("PASS: no database source -- the chart refuses to render, naming the value")
 
 
 def check_database_url_creates_the_secret_it_references() -> None:
