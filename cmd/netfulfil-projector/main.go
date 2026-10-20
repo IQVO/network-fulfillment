@@ -125,15 +125,7 @@ func run() error {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	var exitErr error
-	select {
-	case <-stop:
-	case <-consumerErr:
-		// The consumer died on its own (its error is logged above): exit
-		// non-zero so the pod restarts instead of staying up and projecting
-		// nothing.
-		exitErr = errConsumerStopped
-	}
+	exitErr := waitForStopOrConsumerDeath(stop, consumerErr)
 
 	cancelConsumer()
 
@@ -143,6 +135,20 @@ func run() error {
 		exitErr = err
 	}
 	return exitErr
+}
+
+// waitForStopOrConsumerDeath blocks until a termination signal arrives
+// (nil: a clean stop) or the analytics consumer returns on its own. In the
+// second case it returns errConsumerStopped joined with the consumer's error,
+// so the process exits non-zero and the pod restarts instead of staying up
+// and projecting nothing.
+func waitForStopOrConsumerDeath(stop <-chan os.Signal, consumerErr <-chan error) error {
+	select {
+	case <-stop:
+		return nil
+	case err := <-consumerErr:
+		return errors.Join(errConsumerStopped, err)
+	}
 }
 
 // setupTelemetry installs Go runtime metrics only (ADR-0013 Tier 1 item

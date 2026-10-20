@@ -239,4 +239,3 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 	}
 	return api
 }
-
