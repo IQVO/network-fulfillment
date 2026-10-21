@@ -9,8 +9,7 @@ separate databases:
 - the **analytical** database (`ANALYTICS_DATABASE_URL`):
   `migrations/analytics/0001_report`, `0002_rejected_submission_failed`.
 
-With `DATABASE_URL` unset the service runs on in-memory repositories and
-uses neither.
+Both are required: there is no in-memory mode (ADR 0025).
 
 A relationship line is drawn **only** where a real `FOREIGN KEY` exists.
 

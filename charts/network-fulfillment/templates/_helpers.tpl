@@ -89,6 +89,94 @@ select it.
 {{- include "network-fulfillment.fullname" . }}-reports
 {{- end }}
 
+{{/*
+Postgres and Kafka are the only runtime. The binaries exit at boot without
+DATABASE_URL and KAFKA_BROKERS (cmd/netfulfil loadBootConfig, cmd/mcp,
+cmd/netfulfil-projector, cmd/netfulfil-reports): there is no in-memory mode, no
+log sink and no localhost broker default. The chart therefore refuses to render
+without a source for each, naming the value.
+*/}}
+{{- define "network-fulfillment.requireDatabase" -}}
+{{- if not (or .Values.database.url .Values.database.existingSecret) -}}
+{{- fail "database.url or database.existingSecret is required: DATABASE_URL is mandatory, this service runs only on a real Postgres" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+kafka.brokers is required (KAFKA_BROKERS) and kafka.enabled=false is refused.
+`kafka.enabled: true` is tolerated: warehouse-infra's values may still set it.
+*/}}
+{{- define "network-fulfillment.requireKafka" -}}
+{{- if and (hasKey .Values.kafka "enabled") (not .Values.kafka.enabled) -}}
+{{- fail "kafka.enabled=false is not supported: this service runs only on a real Kafka; remove the value (kafka.enabled: true is still tolerated)" -}}
+{{- end -}}
+{{- $_ := required "kafka.brokers is required (KAFKA_BROKERS): every binary of this chart runs on a real Kafka" .Values.kafka.brokers -}}
+{{- end }}
+
+{{/*
+EVENT_PUBLISHER is kept because warehouse-infra sets it; the only value is kafka.
+*/}}
+{{- define "network-fulfillment.requireEventPublisher" -}}
+{{- if ne (lower (toString .Values.config.eventPublisher)) "kafka" -}}
+{{- fail (printf "config.eventPublisher=%q is not supported: this service publishes through the outbox to a real Kafka, the only value is kafka" (toString .Values.config.eventPublisher)) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+extraEnv must not turn the publisher or the capability-offer pipeline off. The
+binary accepts only EVENT_PUBLISHER unset/kafka and CAPABILITY_OFFER_ENABLED
+unset/true. Call with (dict "env" <list> "where" <name>).
+*/}}
+{{- define "network-fulfillment.requireRealEnv" -}}
+{{- $where := .where -}}
+{{- range .env -}}
+{{- if hasKey . "value" -}}
+{{- $v := lower (toString .value) -}}
+{{- if and (eq .name "EVENT_PUBLISHER") (ne $v "") (ne $v "kafka") -}}
+{{- fail (printf "%s sets EVENT_PUBLISHER=%s: not supported, this service runs only on a real Kafka and the binary rejects it at boot" $where (toString .value)) -}}
+{{- end -}}
+{{- if and (eq .name "CAPABILITY_OFFER_ENABLED") (ne $v "") (ne $v "true") -}}
+{{- fail (printf "%s sets CAPABILITY_OFFER_ENABLED=%s: not supported, the capability-offer pipeline is always on and the binary rejects it at boot" $where (toString .value)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The binary's graceful shutdown flips readiness, stops the consumers, drains HTTP
+and waits for the outbox relay under a short deadline; the readiness probe needs
+a period to see the flip. Under 20s a SIGKILL can cut that short.
+*/}}
+{{- define "network-fulfillment.requireGracePeriod" -}}
+{{- if lt (int .Values.terminationGracePeriodSeconds) 20 -}}
+{{- fail (printf "terminationGracePeriodSeconds is %v, want at least 20: readiness flip + HTTP drain + consumers + outbox relay" .Values.terminationGracePeriodSeconds) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+netfulfil-projector and netfulfil-reports exit at boot without
+ANALYTICS_DATABASE_URL; the projector also needs KAFKA_BROKERS (requireKafka).
+*/}}
+{{- define "network-fulfillment.requireAnalytics" -}}
+{{- if and .Values.analytics.enabled (not (or .Values.analytics.database.url .Values.analytics.database.existingSecret)) -}}
+{{- fail "analytics.database.url or analytics.database.existingSecret is required while analytics.enabled: ANALYTICS_DATABASE_URL is mandatory for the projector and the reports API" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+One entry point for the api Deployment, which every release renders, so any
+release fails whichever optional component is enabled.
+*/}}
+{{- define "network-fulfillment.requireRealRuntime" -}}
+{{- include "network-fulfillment.requireDatabase" . -}}
+{{- include "network-fulfillment.requireKafka" . -}}
+{{- include "network-fulfillment.requireEventPublisher" . -}}
+{{- include "network-fulfillment.requireGracePeriod" . -}}
+{{- include "network-fulfillment.requireAnalytics" . -}}
+{{- include "network-fulfillment.requireRealEnv" (dict "env" .Values.extraEnv "where" "extraEnv") -}}
+{{- include "network-fulfillment.requireRealEnv" (dict "env" .Values.mcp.extraEnv "where" "mcp.extraEnv") -}}
+{{- end }}
+
 
 {{/*
 Comma-joined names of this chart's enabled KongPlugins, for the

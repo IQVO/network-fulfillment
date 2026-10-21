@@ -40,11 +40,22 @@ make integration    # testcontainers Postgres and Kafka (needs Docker)
 There is no `make run`. Details of every layer and CI job:
 [development/testing.md](../development/testing.md).
 
-## Run the API with zero infrastructure
+## Start Postgres and Kafka
 
-With no `DATABASE_URL` the service uses in-memory repositories; with the
-default `NETWORK_MODE` it uses the stub gateway; with no `EVENT_PUBLISHER`
-events go to the log. The stub has nothing to poll unless you seed it.
+Postgres and Kafka are the only runtime (ADR 0025): `DATABASE_URL` and
+`KAFKA_BROKERS` are mandatory and there is no in-memory mode. The repo's
+`docker-compose.yml` starts both:
+
+```bash
+docker compose up -d --wait
+```
+
+The kind cluster owns `localhost:9092`; if it is running, start the broker on
+another port with `KAFKA_HOST_PORT=19092 docker compose up -d --wait` and use
+`KAFKA_BROKERS=localhost:19092` below. Stop with `docker compose down -v`.
+
+With the default `NETWORK_MODE` the service uses the stub gateway, which has
+nothing to poll unless you seed it.
 
 Create two files (the formats are in
 [configuration](../operations/configuration.md#cmdnetfulfil-the-oltp-service)):
@@ -72,6 +83,9 @@ Run it (port `8088` is where the standalone `web/` dev server looks for the
 API, see `web/src/config.ts`):
 
 ```bash
+DATABASE_URL='postgres://netfulfil:netfulfil@localhost:5432/netfulfil?sslmode=disable' \
+KAFKA_BROKERS=localhost:9092 \
+MIGRATIONS_PATH=migrations \
 PORT=8088 \
 NETWORK_SEED_FILE=./demand.json \
 PRODUCT_TRANSLATION_FILE=./products.json \
@@ -90,7 +104,7 @@ curl -s localhost:8088/network-orders/po-local-2
 curl -si -X POST localhost:8088/network-orders/po-local-2/shipment-confirmation
 ```
 
-What you should see (checked against a local build on 2026-10-09):
+What you should see (observed on the in-memory build before ADR 0025; not re-checked on the real runtime):
 
 - `po-local-2` is `REJECTED` with no lines: `ASIN-UNKNOWN` has no mapping,
   so the order is refused as `UNTRANSLATABLE_SKU` without any
@@ -114,7 +128,7 @@ the `Idempotency-Key` header order-management requires (`netful-raise-<networkRe
 so a retry replays the same order. The BDD suite (`make bdd`) exercises the full
 lifecycle, including the orphaned-hold sweep, with a fake planner.
 
-## Add Postgres
+## Postgres and migrations
 
 Any Postgres 16 works. The service runs its migrations at startup from
 `MIGRATIONS_PATH` (default `/app/migrations`, the image path), so point it at
@@ -126,29 +140,21 @@ MIGRATIONS_PATH=migrations \
 go run ./cmd/netfulfil
 ```
 
-If `DATABASE_URL` is set and Postgres cannot be reached after the boot retry
-(5 attempts), the process exits with `cannot wire order repository`. It never
-falls back to memory.
+If Postgres cannot be reached after the boot retry (5 attempts), the process
+exits with `cannot wire order repository`. A missing `DATABASE_URL` is a boot
+error too; there is no in-memory fallback.
 
 ## Add Kafka
 
-The fleet runs one Kafka broker, in the kind cluster, reachable from the host
-at `localhost:9092` through its external access. There is no
-docker-compose broker. Publishing:
+The compose broker (or the kind cluster's, at `localhost:9092`) is the one
+`KAFKA_BROKERS` points at. Every event goes through the `outbox_events` table
+and the relay to `warehouse.network-fulfillment.events` and
+`warehouse.network-fulfillment.analytics`.
+
+The capability-offer pipeline is always on and also needs inventory-storage:
 
 ```bash
-EVENT_PUBLISHER=kafka KAFKA_BROKERS=localhost:9092 go run ./cmd/netfulfil
-```
-
-With `DATABASE_URL` also set, events go through the `outbox_events` table and
-the relay; without it they are written to
-`warehouse.network-fulfillment.events` and
-`warehouse.network-fulfillment.analytics` directly.
-
-Capability offers (opt-in) also need the broker, plus inventory-storage:
-
-```bash
-CAPABILITY_OFFER_ENABLED=true KAFKA_BROKERS=localhost:9092 \
+DATABASE_URL=... KAFKA_BROKERS=localhost:9092 \
 INVENTORY_STORAGE_URL=http://localhost:8082 SITE_ID=site-1 \
 go run ./cmd/netfulfil
 curl -s localhost:8080/capability-offers

@@ -10,6 +10,8 @@ description: "ADR 0022 — the outbox publisher stores the writing span's W3C tr
 
 ## Status
 
+> Status pointer: ADR 0025 removed the "direct mode" (no database) described in this record; the outbox is the only path.
+
 **Accepted** (2026-10-13, ecosystem gap fix D27). Additive: no migration (the
 existing `outbox_events.headers jsonb` column carries it), optional Kafka
 headers only. Payloads and the CloudEvents envelope

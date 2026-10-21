@@ -1,4 +1,4 @@
-package memory
+package producttranslation
 
 import (
 	"bytes"
@@ -30,12 +30,12 @@ type productMapping struct {
 	SKU              string `json:"sku"`
 }
 
-// LoadProductTranslationFile reads path into t.
+// LoadFile reads path into t.
 //
 // Every failure is returned rather than logged: a dictionary that
 // silently failed to load is indistinguishable, from the outside, from a
 // network asking only for products we do not stock.
-func LoadProductTranslationFile(t *ProductTranslation, path string) (int, error) {
+func LoadFile(t *Dictionary, path string) (int, error) {
 	raw, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled config (a boot-time env value), not user input.
 	if err != nil {
 		return 0, fmt.Errorf("read product translation file: %w", err)

@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -37,15 +38,11 @@ import (
 	otelchimetric "github.com/riandyrn/otelchi/metric"
 
 	inboundmcp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/mcp"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/system"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 )
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 func main() {
 	if err := run(); err != nil {
@@ -78,7 +75,10 @@ func run() error {
 	}()
 
 	mcpAddr := getenv("MCP_ADDR", ":8090")
-	databaseURL := os.Getenv("DATABASE_URL")
+	databaseURL, err := requireDatabaseURL(os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return err
+	}
 	// See cmd/netfulfil/main.go's wireOrders doc comment for the full
 	// "why" (session-scoped pg_advisory_lock vs PgBouncer
 	// transaction-pooling incompatibility; docs/adr/0007-migrations-
@@ -107,7 +107,7 @@ func run() error {
 	// service; when it is unset the tool is simply not registered.
 	deps := inboundmcp.Deps{
 		Orders: orders,
-		Clock:  systemClock{},
+		Clock:  system.Clock{},
 		Offers: offers,
 	}
 	if reportsURL := os.Getenv("REPORTS_BASE_URL"); reportsURL != "" {
@@ -166,19 +166,25 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// buildOrders chooses the NetworkOrderRepo implementation, exactly as
-// cmd/netfulfil/main.go's wireOrders does: in-memory with no DATABASE_URL,
-// Postgres (with migrations run) when one is set. Kept independent of
-// cmd/netfulfil so the MCP process can be deployed and scaled separately.
-// The returned pool is nil exactly when the repo is the in-memory one,
-// mirroring wireOrders's own convention — buildOffers uses it to decide
-// its own backend without opening a second pool.
-func buildOrders(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath string, logger *slog.Logger) (ports.NetworkOrderRepo, *pgxpool.Pool, func(), error) {
-	if databaseURL == "" {
-		logger.Info("order repository wired", "backend", "memory")
-		return memory.NewNetworkOrderRepo(), nil, func() {}, nil
-	}
+// errMissingDatabaseURL is the boot error when DATABASE_URL is empty: this
+// process reads the same Postgres cmd/netfulfil writes, and has no other
+// backend.
+var errMissingDatabaseURL = errors.New("DATABASE_URL is required: the MCP server reads the real Postgres that cmd/netfulfil writes")
 
+// requireDatabaseURL returns the trimmed DATABASE_URL or errMissingDatabaseURL.
+func requireDatabaseURL(raw string) (string, error) {
+	url := strings.TrimSpace(raw)
+	if url == "" {
+		return "", errMissingDatabaseURL
+	}
+	return url, nil
+}
+
+// buildOrders opens the Postgres pool (running migrations first) and returns
+// the NetworkOrderRepo over it. Kept independent of cmd/netfulfil so the MCP
+// process can be deployed and scaled separately. buildOffers reuses the
+// returned pool instead of opening a second one.
+func buildOrders(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath string, logger *slog.Logger) (ports.NetworkOrderRepo, *pgxpool.Pool, func(), error) {
 	if err := postgres.RunMigrations(migrationsDatabaseURL, migrationsPath); err != nil {
 		return nil, nil, nil, err
 	}
@@ -191,18 +197,11 @@ func buildOrders(ctx context.Context, databaseURL, migrationsDatabaseURL, migrat
 }
 
 // buildOffers wires ports.CapabilityOfferRepo for the list_capability_offers
-// tool, following the SAME backend choice as buildOrders: in-memory with
-// no DATABASE_URL (pool == nil), the SAME already-migrated pool
-// buildOrders opened when one is set. Note this process's own in-memory
-// map, when DATABASE_URL is unset, is NOT the same map cmd/netfulfil's
-// recompute pass writes to (two separate processes) — exactly the same
-// existing quirk buildOrders already has for Orders in that mode;
-// Postgres is what makes the two processes genuinely share data.
+// tool over the SAME already-migrated pool buildOrders opened, so the MCP
+// process and cmd/netfulfil share the offers cmd/netfulfil's recompute pass
+// writes.
 func buildOffers(pool *pgxpool.Pool) ports.CapabilityOfferRepo {
-	if pool != nil {
-		return postgres.NewCapabilityOfferRepo(pool)
-	}
-	return memory.NewCapabilityOfferRepo()
+	return postgres.NewCapabilityOfferRepo(pool)
 }
 
 // newLogger builds the process logger: JSON to stdout at the level LOG_LEVEL

@@ -13,11 +13,10 @@ Protocol over Streamable HTTP, mounted at both `/` and `/mcp`, on `MCP_ADDR`
 
 It reads the same OLTP Postgres database `cmd/netfulfil` writes (through
 `DATABASE_URL`) and, for the report tool, calls `netfulfil-reports` over REST
-(`REPORTS_BASE_URL`). Without `DATABASE_URL` it uses a private in-memory store
-that is always empty. Configuration: [operations/configuration.md](../operations/configuration.md#cmdmcp-the-mcp-server).
+(`REPORTS_BASE_URL`). `DATABASE_URL` is required (ADR 0025). Configuration: [operations/configuration.md](../operations/configuration.md#cmdmcp-the-mcp-server).
 
 The schemas below were taken from a live `tools/list` call against a local
-build of `cmd/mcp` on this branch (in-memory store, `REPORTS_BASE_URL` set),
+build of `cmd/mcp` on this branch (`REPORTS_BASE_URL` set),
 and match `internal/adapters/inbound/mcp/tools.go` and `report_tool.go`.
 
 ## Tools
@@ -40,7 +39,7 @@ keeps it that way (gap fix D16).
 | --- | --- | --- | --- |
 | `get_network_order` | always | `networkRef` (string, **required**): the network's own reference, e.g. `po-4711` | one network order (shape below). Unknown ref: tool error `network order not found`. Empty ref: `networkRef is required`. |
 | `list_network_orders` | always | `state` (string, optional): `NEW`, `SUBMITTED`, `ACKNOWLEDGED`, `REJECTED` or `CONFIRMED`; omit for every order | `{"networkOrders":[<network order>...]}`. Any other `state` value is a tool error (`unknown state ...`). |
-| `list_capability_offers` | always in `cmd/mcp` (the code skips it only when no offer repository is wired, which `cmd/mcp` never does) | none | `{"capabilityOffers":[{"sku","siteId","advertisedQuantity","basis","computedAt"}]}`; `basis` is `PHYSICAL` or `THROUGHPUT_CONSTRAINED`. Empty unless `netfulfil` runs with `CAPABILITY_OFFER_ENABLED=true`. |
+| `list_capability_offers` | always in `cmd/mcp` (the code skips it only when no offer repository is wired, which `cmd/mcp` never does) | none | `{"capabilityOffers":[{"sku","siteId","advertisedQuantity","basis","computedAt"}]}`; `basis` is `PHYSICAL` or `THROUGHPUT_CONSTRAINED`. Empty until `netfulfil` has stored its first recompute pass (the pipeline is always on). |
 | `get_acknowledgement_report` | only when `REPORTS_BASE_URL` is set | `from` (string, **required**, RFC 3339, inclusive), `to` (string, **required**, RFC 3339, exclusive), `granularity` (string, optional, only `day`) | `{"rows":[{"dayBucket","ordersReceived","ordersAcknowledged","ordersRejectedUntranslatableSku","ordersRejectedDomain","acknowledgementDeadlinesMissed","ordersRejectedSubmissionFailed","avgAcknowledgementLatencySeconds"}]}`, proxied from `GET /reports/acknowledgement`. Missing `from`/`to`: `from and to are required (RFC3339)`. A non-2xx reports response: `reports client: unexpected status <n>`. |
 
 Every input schema has `additionalProperties: false`, so an unknown argument

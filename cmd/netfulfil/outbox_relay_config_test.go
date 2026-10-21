@@ -53,13 +53,11 @@ func TestDefaultOutboxMaxAttemptsIsTwenty(t *testing.T) {
 
 // TestWireEventPublisher_OutboxRelayIsCapped proves the composition root
 // hands the parsed cap to the relay it builds, not just that the parser
-// works: with a pool, EVENT_PUBLISHER=kafka and OUTBOX_MAX_ATTEMPTS=7 the
-// returned relay carries 7.
+// works: with a pool and OUTBOX_MAX_ATTEMPTS=7 the returned relay carries 7.
+// There is no other mode: the relay is always built (the real-wiring ADR).
 func TestWireEventPublisher_OutboxRelayIsCapped(t *testing.T) {
-	t.Setenv("EVENT_PUBLISHER", "kafka")
-	t.Setenv("KAFKA_BROKERS", "127.0.0.1:1")
 	t.Setenv("OUTBOX_MAX_ATTEMPTS", "7")
-	_, relay, closeFn := wireEventPublisher(&pgxpool.Pool{}, quietLogger())
+	_, relay, closeFn := wireEventPublisher(&pgxpool.Pool{}, []string{"127.0.0.1:1"}, quietLogger())
 	defer closeFn()
 	if relay == nil {
 		t.Fatal("outbox mode built no relay")

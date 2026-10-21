@@ -95,8 +95,8 @@ func TestWireOrphanHoldSweep(t *testing.T) {
 	if got.Clock == nil || got.Orders == nil {
 		t.Fatalf("sweep is missing collaborators: %+v", got)
 	}
-	if got.UnitOfWork != nil {
-		t.Fatal("with no pool there is no unit of work (in-memory mode)")
+	if got.UnitOfWork == nil {
+		t.Fatal("the sweep always runs in a transaction: the unit of work must be wired (Postgres is the only runtime)")
 	}
 	if got.Metrics == nil {
 		t.Fatal("the sweep must carry its outcome counter")

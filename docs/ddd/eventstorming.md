@@ -250,8 +250,8 @@ Source: `internal/application/usecases/recompute_capability_offers.go`,
 `internal/adapters/outbound/{processpathcache,pathcapacitycache,inventoryclient}/`,
 `cmd/netfulfil/main.go` (`wireCapabilityOffer`, `siteId`).
 
-Omitted: the boot-time `WaitReady` gate and the
-`CAPABILITY_OFFER_ENABLED` switch. `CapabilityOffer` raises no domain
+Omitted: the boot-time `WaitReady` gate, which the always-on capability-offer
+pipeline blocks on. `CapabilityOffer` raises no domain
 event, so there is no orange sticky.
 
 ## Sticky inventory

@@ -1,0 +1,46 @@
+# Local Postgres and Kafka for `go run ./cmd/netfulfil` (ADR 0025: Postgres and
+# Kafka are the only runtime; there is no in-memory mode).
+#
+#   docker compose up -d --wait
+#   DATABASE_URL='postgres://netfulfil:netfulfil@localhost:5432/netfulfil?sslmode=disable' \
+#   KAFKA_BROKERS=localhost:9092 MIGRATIONS_PATH=migrations go run ./cmd/netfulfil
+#   docker compose down -v
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: netfulfil
+      POSTGRES_PASSWORD: netfulfil
+      POSTGRES_DB: netfulfil
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - netfulfil_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netfulfil -d netfulfil"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # A real single-node Kafka (KRaft). The broker advertises
+  # localhost:${KAFKA_HOST_PORT:-9092} to the host, so KAFKA_BROKERS=localhost:9092
+  # works from the host. If another broker already owns 9092 (the warehouse kind
+  # cluster maps it), pick a free port:
+  #   KAFKA_HOST_PORT=19092 docker compose up -d --wait
+  #   KAFKA_BROKERS=localhost:19092 ...
+  # The broker auto-creates topics on first write, like the cluster.
+  kafka:
+    image: confluentinc/confluent-local:7.6.1
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:29092,PLAINTEXT_HOST://localhost:${KAFKA_HOST_PORT:-9092}"
+    ports:
+      - "${KAFKA_HOST_PORT:-9092}:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  netfulfil_postgres_data:

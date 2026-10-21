@@ -225,13 +225,16 @@ jobs:
           python-version: "3.x"
           check-latest: true
       - name: helm lint
-        run: helm lint charts/network-fulfillment
+        # Postgres and Kafka are mandatory, so the chart renders only with the
+        # real-wiring values (database.url, kafka.brokers).
+        run: helm lint charts/network-fulfillment -f charts/network-fulfillment/ci/real-wiring-values.yaml
       - name: Chart wiring tests
         # Both suites run on every PR, deliberately. process-path-management
         # has a render-assertion script that is NOT wired to CI and only
         # runs if somebody remembers — which is how it rots.
         run: |
           pip install --require-hashes -r .github/requirements/chart-tests.txt
+          bash charts/network-fulfillment/tests/render_test.sh
           python3 charts/network-fulfillment/tests/test_credential_wiring.py
           python3 charts/network-fulfillment/tests/test_data_files.py
           python3 charts/network-fulfillment/tests/test_kong_config.py
@@ -287,7 +290,7 @@ jobs:
           severity: 'CRITICAL,HIGH,MEDIUM'
           ignore-unfixed: true
       - name: Upload Trivy SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'

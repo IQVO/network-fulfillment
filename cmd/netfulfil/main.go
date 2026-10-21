@@ -1,14 +1,16 @@
 // Command netfulfil is network-fulfillment's OLTP composition root: the
 // one place every layer is wired together.
 //
-// With no configuration at all it runs fully functional on in-memory
-// adapters and a stub network gateway — no Postgres, no broker, and no
-// network credentials in existence (ADR 0001 §4).
+// It runs only on a real Postgres (DATABASE_URL) and a real Kafka
+// (KAFKA_BROKERS); both are mandatory and a missing one is a boot error
+// that names the variable (the real-wiring ADR). The network gateway may
+// still be the stub (NETWORK_MODE), an external-system seam, not a
+// database or broker stand-in.
 //
 // The root is split within package main by concern: config.go (env
 // knobs), wiring.go (use cases, gateway, planner, API), database.go
-// (order repository + migrations), publishing.go (event publisher /
-// outbox), capability.go (CapabilityOffer pipeline), workers.go (tickers),
+// (order repository + migrations), publishing.go (outbox + relay),
+// capability.go (CapabilityOffer pipeline), workers.go (tickers),
 // shutdown.go (serve + graceful shutdown) and retry.go (boot retry).
 package main
 
@@ -16,25 +18,29 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
+	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/system"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 )
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(context.Background()))
 }
 
 // infra is what bootInfra builds before any use case exists: the
-// network gateway, the product dictionary, the order repository (and its
-// pool, nil in in-memory mode) and the optional CapabilityOffer pipeline.
+// network gateway, the product dictionary, the order repository and its
+// pool, and the CapabilityOffer pipeline.
 type infra struct {
 	gateway     ports.NetworkGateway
 	mode        network.Mode
@@ -47,11 +53,25 @@ type infra struct {
 }
 
 // run wires every adapter and use case in startup order, serves until a
-// signal arrives, and returns the process exit code. Deferred closers run
-// when run returns, after serve's graceful shutdown has stopped every
-// goroutine touching the pool.
-func run() int {
+// signal arrives or ctx is cancelled (the integration test cancels it; main
+// passes a background context), and returns the process exit code. Deferred
+// closers run when run returns, after serve's graceful shutdown has stopped
+// every goroutine touching the pool.
+func run(ctx context.Context) int {
+	// One signal-aware context for the whole process, so the Kafka cache
+	// consumers started during boot stop with the server on SIGTERM too.
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	logger := newLogger(getenv("LOG_LEVEL", "info"))
+
+	// Mandatory configuration FIRST: before telemetry, the listener or any
+	// dial, so a missing variable fails the boot immediately.
+	cfg, err := loadBootConfig(os.Getenv)
+	if err != nil {
+		logger.Error("invalid configuration", "error", err)
+		return 1
+	}
 
 	// OTLP trace + metric export and Go runtime metrics (ADR 0019). Never
 	// blocks on the Collector. MUST run before wireAPI/Routes(): otelchi
@@ -73,7 +93,7 @@ func run() int {
 		}
 	}()
 
-	in, closeInfra, ok := bootInfra(logger)
+	in, closeInfra, ok := bootInfra(ctx, logger, cfg)
 	if !ok {
 		return 1
 	}
@@ -87,9 +107,15 @@ func run() int {
 	// itself stops accepting connections, so a Kubernetes readinessProbe
 	// has a chance to observe the flip and stop routing new traffic
 	// during the drain window that follows.
-	readiness := &inboundhttp.Readiness{}
+	//
+	// The gate also requires Postgres and Kafka to answer: /readyz is 503
+	// dependency-unavailable while either is down, /healthz stays 200.
+	readiness := inboundhttp.NewReadiness(inboundhttp.DefaultReadinessTTL, inboundhttp.DefaultReadinessTimeout,
+		inboundhttp.Dependency{Name: "postgres", Check: in.pool.Ping},
+		inboundhttp.Dependency{Name: "kafka", Check: outboundkafka.NewBrokerCheck(cfg.kafkaBrokers).Check},
+	)
 
-	eventPublisher, relay, closeEventPublisher := wireEventPublisher(in.pool, logger)
+	eventPublisher, relay, closeEventPublisher := wireEventPublisher(in.pool, cfg.kafkaBrokers, logger)
 	defer closeEventPublisher()
 
 	receive, sweep, rejectOverdue := wireUseCases(in.orders, in.gateway, planner, in.translation, eventPublisher, in.pool)
@@ -99,7 +125,7 @@ func run() int {
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
 	// could create a NetworkOrder at all.
-	inbound := poller.New(in.gateway, receive, systemClock{}, poller.Config{
+	inbound := poller.New(in.gateway, receive, system.Clock{}, poller.Config{
 		Interval: pollInterval(),
 	}, logger)
 
@@ -117,8 +143,7 @@ func run() int {
 		serviceName: serviceName,
 	})
 
-	serve(context.Background(), logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
-	return 0
+	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
 }
 
 // bootInfra builds the pieces that must exist before any use case, in
@@ -127,7 +152,7 @@ func run() int {
 // open pool/reader at that point is irrelevant. On success the returned
 // closer releases the capability-offer caches first, then the order
 // repository (the reverse of their construction).
-func bootInfra(logger *slog.Logger) (in infra, closeAll func(), ok bool) {
+func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig) (in infra, closeAll func(), ok bool) {
 	gateway, mode, err := wireGateway(logger)
 	if err != nil {
 		logger.Error("cannot wire network gateway", "mode", mode, "err", err)
@@ -151,26 +176,23 @@ func bootInfra(logger *slog.Logger) (in infra, closeAll func(), ok bool) {
 		return infra{}, nil, false
 	}
 
-	orders, pool, closeOrders, err := wireOrders(context.Background(), logger)
+	orders, pool, closeOrders, err := wireOrders(context.Background(), logger, cfg.databaseURL)
 	if err != nil {
-		// Same reasoning as the gateway above: a deployment that asked
-		// for a database and silently got an in-memory map would look
-		// healthy while forgetting every acknowledgement deadline it owes
-		// the moment it restarts.
+		// A database that cannot be reached fails the boot: there is no
+		// in-memory fallback that would look healthy while forgetting
+		// every acknowledgement deadline it owes on the next restart.
 		logger.Error("cannot wire order repository", "err", err)
 		return infra{}, nil, false
 	}
 	in.orders, in.pool = orders, pool
 
-	// CapabilityOffer (ADR 0001 §8), gated behind CAPABILITY_OFFER_ENABLED
-	// (default false) so this service's zero-config, no-broker-required
-	// boot (ADR 0001 §4) is unaffected when the feature is not wanted —
-	// mirroring the EVENT_PUBLISHER=kafka convention used elsewhere for
-	// another optional Kafka dependency. See wireCapabilityOffer's own
-	// doc comment for what "enabled" wires. A failure here exits without
-	// any closer registered (os.Exit-equivalent: the process is
-	// terminating regardless of any open pool/reader).
-	offers, recompute, capDone, closeCapabilityOffer, err := wireCapabilityOffer(context.Background(), pool, in.translation, logger)
+	// CapabilityOffer (ADR 0001 §8): always on, because Kafka is a
+	// mandatory dependency (the real-wiring ADR); the two Kafka cache
+	// consumers it needs run on cfg.kafkaBrokers. See wireCapabilityOffer's
+	// own doc comment for what it wires. A failure here exits without any
+	// closer registered (the process is terminating regardless of any open
+	// pool/reader).
+	offers, recompute, capDone, closeCapabilityOffer, err := wireCapabilityOffer(ctx, pool, cfg.kafkaBrokers, in.translation, logger)
 	if err != nil {
 		logger.Error("cannot wire capability offer pipeline", "err", err)
 		return infra{}, nil, false

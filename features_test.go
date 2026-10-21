@@ -31,6 +31,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/analyticsstore"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
@@ -72,7 +73,7 @@ type world struct {
 	clock     *fixedClock
 	orders    *memory.NetworkOrderRepo
 	offers    *memory.CapabilityOfferRepo
-	dict      *memory.ProductTranslation
+	dict      *producttranslation.Dictionary
 	gateway   *recordingGateway
 	planner   *fakePlanner
 	bus       *eventBus
@@ -115,7 +116,7 @@ func (w *world) reset() {
 	w.clock = newFixedClock(time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC))
 	w.orders = memory.NewNetworkOrderRepo()
 	w.offers = memory.NewCapabilityOfferRepo()
-	w.dict = memory.NewProductTranslation()
+	w.dict = producttranslation.New()
 	w.gateway = newRecordingGateway(network.NewStubGateway(logger))
 	w.planner = newFakePlanner()
 	w.readiness = &inboundhttp.Readiness{}

@@ -25,8 +25,7 @@ mode** (ADR 0008), built only by `internal/adapters/kafka/cloudevents.New`:
 
 ## Published
 
-Publishing is active only with `EVENT_PUBLISHER=kafka`; otherwise a
-log-only publisher is used. `fanOutPublisher` (`cmd/netfulfil/main.go`)
+Publishing is always on (ADR 0025); there is no log-only publisher. `fanOutPublisher` (`cmd/netfulfil/main.go`)
 sends **every** event to **both** topics:
 
 - `warehouse.network-fulfillment.events`, the integration topic
@@ -35,7 +34,7 @@ sends **every** event to **both** topics:
   `analytics`). The same `type` is used on both, but the `id` differs per
   topic.
 
-With `DATABASE_URL` set, both are written through `outbox_events` in the
+Both are written through `outbox_events` in the
 same transaction as the aggregate (ADR 0003), and the relay drains them.
 
 | Event | Full `type` | Payload fields (`data`) | Producer use case | Known consumers |
@@ -75,8 +74,8 @@ never reached by these seven types.
 | Topic | Full `type` | Fields used | Consumer | Group id |
 | --- | --- | --- | --- | --- |
 | `warehouse.network-fulfillment.analytics` (own) | `...networkorder.NetworkOrderReceived`, `...NetworkOrderSubmitted`, `...NetworkOrderAcknowledged.v2`, the historic `...NetworkOrderAcknowledged` (v1, published before ADR 0016, counted as before so a replay keeps the report numbers), `...NetworkOrderRejected`; other types ignored | `reason`, `receivedAt`; `time`, `id` from the envelope | `internal/adapters/inbound/kafka/analytics_consumer.go` (`cmd/netfulfil-projector`) | `network-fulfillment-analytics-<host>-<pid>-<ts>` |
-| `warehouse.process-path-management.events` | `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`, `...processpath.ProcessPathUpdated`, `...processpath.ProcessPathDeactivated`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | `path_id`, `cycle_time_p95`; schedule `site_id`, `timezone`, `cutoffs[].cpt_id/local_time/days_of_week/ship_method/eligible_path_ids` | `internal/adapters/outbound/processpathcache/consumer.go` (opt-in) | `network-fulfillment-process-path-capability-cache-<host>-<pid>-<ts>` |
-| `warehouse.work-planning.events` | `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | `path_id`, `cutoff_at`, `remaining_units`, `known` | `internal/adapters/outbound/pathcapacitycache/consumer.go` (opt-in) | `network-fulfillment-path-capacity-cache-<host>-<pid>-<ts>` |
+| `warehouse.process-path-management.events` | `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`, `...processpath.ProcessPathUpdated`, `...processpath.ProcessPathDeactivated`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | `path_id`, `cycle_time_p95`; schedule `site_id`, `timezone`, `cutoffs[].cpt_id/local_time/days_of_week/ship_method/eligible_path_ids` | `internal/adapters/outbound/processpathcache/consumer.go` (always on) | `network-fulfillment-process-path-capability-cache-<host>-<pid>-<ts>` |
+| `warehouse.work-planning.events` | `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | `path_id`, `cutoff_at`, `remaining_units`, `known` | `internal/adapters/outbound/pathcapacitycache/consumer.go` (always on) | `network-fulfillment-path-capacity-cache-<host>-<pid>-<ts>` |
 
 Consumer behaviour:
 

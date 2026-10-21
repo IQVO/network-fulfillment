@@ -28,15 +28,15 @@ decides what can be sold belongs to other contexts:
 - Deadline feasibility is asked of `order-management`
   (`ports.FulfillmentPlanner.RaiseHeldOrder`) and never recomputed here
   (ADR 0001 §7). No use case in `internal/application/usecases` does
-  arithmetic on cutoffs, capacities or cycle times except the opt-in
-  capability offer, which sums figures other contexts publish.
+  arithmetic on cutoffs, capacities or cycle times except the capability
+  offer, which sums figures other contexts publish.
 - Cutoffs and cycle times come from `process-path-management`, path capacity
   from `wes-work-planning`, usable stock from `inventory-storage`.
 - The acknowledgement protocol (one answer, in full, within 24 h) is the
   network's rule set, and the context conforms to it.
 - The one new idea, `CapabilityOffer` (advertise
   `min(physicalAvailable, throughputFeasible)` instead of raw stock), is
-  opt-in, single-site and not yet sent to the network
+  always on, single-site and not yet sent to the network
   (`SubmitAvailability` is never called), so it does not differentiate
   anything today.
 
@@ -61,9 +61,9 @@ Copied from the fleet table in `warehouse-docs`
 | Context | Classification (fleet table) | Tier | Relationship to network-fulfillment |
 | --- | --- | --- | --- |
 | `order-management` | Generic/Supporting | `wes` | We are its Customer: held orders, feasibility, release and cancel over REST |
-| `inventory-storage` | Core | `wms` | Usable quantity over REST for capability offers (opt-in) |
-| `process-path-management` | Generic | `wes` | Path cycle times and the CPT schedule over Kafka (opt-in) |
-| `wes-work-planning` | Core | `wes` | Remaining path capacity over Kafka (opt-in) |
+| `inventory-storage` | Core | `wms` | Usable quantity over REST for capability offers (always on) |
+| `process-path-management` | Generic | `wes` | Path cycle times and the CPT schedule over Kafka (always on) |
+| `wes-work-planning` | Core | `wes` | Remaining path capacity over Kafka (always on) |
 | `fulfillment-execution` | Core | `wes` | No edge: shipment confirmation is an explicit REST call, not a `PackageManifested` consumer (ADR 0014) |
 
 The counterpart network (played by `retail-network`, ADR 0009) is outside

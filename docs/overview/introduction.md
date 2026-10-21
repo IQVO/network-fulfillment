@@ -32,7 +32,7 @@ quantities, a site and a deadline.
   reports overdue orders and a separate job rejects them. A third pass is the
   backstop for the `order-management` hold each order raises: it cancels a hold
   nobody decided once the window plus a grace has passed (ADR 0024).
-- **`CapabilityOffer`** (opt-in): the quantity per SKU and site this context
+- **`CapabilityOffer`** (always on): the quantity per SKU and site this context
   would advertise, `min(physicalAvailable, throughputFeasible)`, so the
   network is never offered more than the building can move before the next
   cutoff. Computed and stored, not yet sent to the network.
