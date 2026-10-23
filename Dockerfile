@@ -4,7 +4,7 @@
 # Go 1.27 (this repo's go.mod), unlike most of the fleet's 1.26 — digest
 # resolved from the registry, not copied from a sibling repo whose tag
 # points at a different minor.
-FROM golang:1.27-alpine@sha256:738d1cf061836894ff6bb8c33881080ac66de8cf0586615012a0c8f592649cfa AS build
+FROM golang:1.27-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS build
 WORKDIR /src
 
 # Cache go.mod/go.sum download separately from source so editing source
@@ -35,7 +35,7 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 # TLS (NETWORK_MODE=live), and without a trust store that fails at runtime,
 # not at build time.
 RUN apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates=20260909-r0 && \
+    apk add --no-cache ca-certificates=20261020-r0 && \
     addgroup -g 1000 -S app && adduser -u 1000 -S app -G app
 WORKDIR /app
 COPY --from=build --chown=app:app /out/netfulfil ./netfulfil
