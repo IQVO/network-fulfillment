@@ -237,6 +237,7 @@ jobs:
           bash charts/network-fulfillment/tests/render_test.sh
           python3 charts/network-fulfillment/tests/test_credential_wiring.py
           python3 charts/network-fulfillment/tests/test_data_files.py
+          python3 charts/network-fulfillment/tests/test_env_parity.py
           python3 charts/network-fulfillment/tests/test_kong_config.py
 
   arch-test:

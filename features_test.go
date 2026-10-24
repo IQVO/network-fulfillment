@@ -30,8 +30,8 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/analyticsstore"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
@@ -117,7 +117,7 @@ func (w *world) reset() {
 	w.orders = memory.NewNetworkOrderRepo()
 	w.offers = memory.NewCapabilityOfferRepo()
 	w.dict = producttranslation.New()
-	w.gateway = newRecordingGateway(network.NewStubGateway(logger))
+	w.gateway = newRecordingGateway(retailnetwork.NewStubGateway(logger))
 	w.planner = newFakePlanner()
 	w.readiness = &inboundhttp.Readiness{}
 	w.metrics = telemetry.NewCircuitBreakerMetrics()
@@ -167,7 +167,7 @@ func (w *world) apiServer() *httptest.Server {
 			Orders:          w.orders,
 			Poller:          w.poller,
 			Clock:           w.clock,
-			NetworkMode:     string(network.ModeStub),
+			NetworkMode:     string(retailnetwork.ModeStub),
 			Readiness:       w.readiness,
 			MetricsRegistry: w.metrics.Registry,
 			ConfirmShipment: &usecases.ConfirmNetworkOrderShipment{

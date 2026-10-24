@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -25,6 +26,45 @@ import (
 type bootConfig struct {
 	databaseURL  string
 	kafkaBrokers []string
+	network      networkConfig
+}
+
+// networkConfig is the retail-network side of the boot configuration (ADR 0009
+// §4, ADR 0026 Decision 10). Stub is the default; everything else is read only
+// in live mode.
+type networkConfig struct {
+	mode     retailnetwork.Mode
+	baseURL  string // NETWORK_BASE_URL, required in live mode
+	vendorID string // NETWORK_VENDOR_ID, required in live mode
+	// nodesFile is NETWORK_NODES_FILE, optional: without it live mode relies
+	// on every site already being a node on the network (adoption).
+	nodesFile string
+}
+
+// loadNetworkConfig reads NETWORK_MODE and, in live mode, the variables the
+// Vendor API adapter cannot run without. A missing one stops the boot with one
+// error naming every variable that is absent, before anything is dialled.
+func loadNetworkConfig(get func(string) string) (networkConfig, error) {
+	cfg := networkConfig{mode: retailnetwork.ParseMode(get("NETWORK_MODE"))}
+	if cfg.mode != retailnetwork.ModeLive {
+		// Not read in stub mode: a stale NETWORK_BASE_URL on a stub deployment
+		// is harmless, and the stub never dials it.
+		return cfg, nil
+	}
+	cfg.baseURL = strings.TrimSpace(get("NETWORK_BASE_URL"))
+	cfg.vendorID = strings.TrimSpace(get("NETWORK_VENDOR_ID"))
+	cfg.nodesFile = strings.TrimSpace(get("NETWORK_NODES_FILE"))
+	var missing []string
+	if cfg.baseURL == "" {
+		missing = append(missing, "NETWORK_BASE_URL")
+	}
+	if cfg.vendorID == "" {
+		missing = append(missing, "NETWORK_VENDOR_ID")
+	}
+	if len(missing) > 0 {
+		return networkConfig{}, fmt.Errorf("NETWORK_MODE=live requires %s to be set", strings.Join(missing, " and "))
+	}
+	return cfg, nil
 }
 
 // loadBootConfig reads and validates the mandatory configuration through
@@ -46,6 +86,14 @@ func loadBootConfig(get func(string) string) (bootConfig, error) {
 	if err := checkCapabilityOffer(get("CAPABILITY_OFFER_ENABLED")); err != nil {
 		return bootConfig{}, err
 	}
+	// After DATABASE_URL on purpose: live mode keeps its submission ledger and
+	// identifier maps in Postgres (ADR 0025, ADR 0026 Decision 4), so a live
+	// boot without a database is refused by the check above, by name.
+	network, err := loadNetworkConfig(get)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	cfg.network = network
 	return cfg, nil
 }
 

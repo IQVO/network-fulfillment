@@ -65,31 +65,7 @@ var consumedTopics = []string{processpathcache.Topic, pathcapacitycache.Topic}
 
 func startE2EInfra(t *testing.T, ctx context.Context) e2eEnv {
 	t.Helper()
-	pg, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("network_fulfillment"), tcpostgres.WithUsername("nf"), tcpostgres.WithPassword("nf"),
-		tcpostgres.BasicWaitStrategies())
-	if err != nil {
-		t.Fatalf("start postgres: %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(pg) })
-	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("postgres dsn: %v", err)
-	}
-
-	suffix := time.Now().UnixNano()
-	kc, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1", tckafka.WithClusterID(fmt.Sprintf("nf-e2e-%d", suffix)))
-	if err != nil {
-		t.Fatalf("start kafka: %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(kc) })
-	brokers, err := kc.Brokers(ctx)
-	if err != nil {
-		t.Fatalf("kafka brokers: %v", err)
-	}
-	for _, topic := range consumedTopics {
-		e2eCreateTopic(t, ctx, brokers[0], topic)
-	}
+	env := startE2EContainers(t, ctx)
 
 	// order-management stand-in: RaiseHeldOrder (POST /orders) answers a
 	// promise before the deadline; ReleaseHeldOrder (POST /orders/{id}/release)
@@ -121,7 +97,41 @@ func startE2EInfra(t *testing.T, ctx context.Context) e2eEnv {
 	if err := os.WriteFile(filepath.Join(dir, "products.json"), []byte(`{"products":[{"networkProductId":"NP-1","sku":"SKU-E2E"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return e2eEnv{dsn: dsn, brokers: brokers, addr: e2eFreeAddr(t), dir: dir, suffix: suffix, kafkaCont: kc, omURL: om.URL}
+	env.addr, env.dir, env.omURL = e2eFreeAddr(t), dir, om.URL
+	return env
+}
+
+// startE2EContainers starts the real Postgres and Kafka every end-to-end test
+// runs on and creates the topics the service consumes. Its result carries no
+// listen address, directory or order-management URL: the callers add theirs.
+func startE2EContainers(t *testing.T, ctx context.Context) e2eEnv {
+	t.Helper()
+	pg, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+		tcpostgres.WithDatabase("network_fulfillment"), tcpostgres.WithUsername("nf"), tcpostgres.WithPassword("nf"),
+		tcpostgres.BasicWaitStrategies())
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(pg) })
+	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("postgres dsn: %v", err)
+	}
+
+	suffix := time.Now().UnixNano()
+	kc, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1", tckafka.WithClusterID(fmt.Sprintf("nf-e2e-%d", suffix)))
+	if err != nil {
+		t.Fatalf("start kafka: %v", err)
+	}
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(kc) })
+	brokers, err := kc.Brokers(ctx)
+	if err != nil {
+		t.Fatalf("kafka brokers: %v", err)
+	}
+	for _, topic := range consumedTopics {
+		e2eCreateTopic(t, ctx, brokers[0], topic)
+	}
+	return e2eEnv{dsn: dsn, brokers: brokers, suffix: suffix, kafkaCont: kc}
 }
 
 func e2eFreeAddr(t *testing.T) string {
@@ -166,6 +176,15 @@ func e2eWaitFor(t *testing.T, ctx context.Context, timeout time.Duration, what s
 // that cancels it and returns run()'s exit code.
 func startE2EService(t *testing.T, ctx context.Context, env e2eEnv) func() (int, error) {
 	t.Helper()
+	return startE2EServiceWith(t, ctx, env, nil)
+}
+
+// startE2EServiceWith is startE2EService with extra environment applied after
+// the stub-mode defaults, so a test can switch the network to live, change the
+// intervals or blank a variable. The variables are set with t.Setenv, so they
+// are undone when the test ends.
+func startE2EServiceWith(t *testing.T, ctx context.Context, env e2eEnv, overrides map[string]string) func() (int, error) {
+	t.Helper()
 	_, port, err := net.SplitHostPort(env.addr)
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +213,9 @@ func startE2EService(t *testing.T, ctx context.Context, env e2eEnv) func() (int,
 	t.Setenv("OTEL_SDK_DISABLED", "true")
 	t.Setenv("OTEL_TRACES_EXPORTER", "none")
 	t.Setenv("OTEL_METRICS_EXPORTER", "none")
+	for k, v := range overrides {
+		t.Setenv(k, v)
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan int, 1)

@@ -17,10 +17,11 @@ quantities, a site and a deadline.
 - **Tier**: `wes`. Every event it publishes is typed
   `com.warehouse.wes.network-fulfillment.networkorder.<Event>`.
 - **Counterpart**: the fleet's own `retail-network` service plays the network
-  (ADR 0009). Only an in-process stub gateway exists on `develop`;
-  `NETWORK_MODE=live` refuses to boot.
-- **Status**: implemented, stub only. A study project, not a production
-  system (see the repository README).
+  (ADR 0009). `NETWORK_MODE` picks the gateway: the in-process stub (the
+  default) or, with `live`, the demand loop against the network's Vendor API
+  (ADR 0026; the supply loop is ADR 0027, not built).
+- **Status**: implemented; the stub is the default everywhere and `live` is
+  opt-in. A study project, not a production system (see the repository README).
 
 ## What it owns
 

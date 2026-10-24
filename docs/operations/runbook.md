@@ -75,17 +75,26 @@ from the sibling checkout and loads it into kind.
 
 `run()` in `cmd/netfulfil/main.go` does, in order:
 
+0. Validate the mandatory configuration (`loadBootConfig`): `DATABASE_URL`,
+   `KAFKA_BROKERS`, and with `NETWORK_MODE=live` also `NETWORK_BASE_URL` and
+   `NETWORK_VENDOR_ID` (one error names every missing one). Nothing has been
+   dialled yet.
 1. `telemetry.Setup` (OTLP exporters, never blocks on the Collector).
-2. Wire the network gateway from `NETWORK_MODE`; fail on `live`.
-3. Load `NETWORK_SEED_FILE` into the stub gateway, if set.
-4. Load `PRODUCT_TRANSLATION_FILE`, or log the "every network order will be
+2. Live only: load `NETWORK_NODES_FILE` if set (strict; a bad file stops the
+   boot with `cannot load network node definitions`).
+3. Load `PRODUCT_TRANSLATION_FILE`, or log the "every network order will be
    rejected" warning.
-5. Run OLTP migrations against `MIGRATIONS_DATABASE_URL`,
+4. Run OLTP migrations against `MIGRATIONS_DATABASE_URL`,
    open the pool, ping it. Both steps are retried.
+5. Wire the network gateway from `NETWORK_MODE`, **after** the pool: the live
+   gateway keeps its identifier maps and submission ledger in this Postgres.
+   The stub gateway then loads `NETWORK_SEED_FILE`, if set; a seed file against
+   the live gateway stops the boot.
 6. Dial both Kafka caches (retried),
    start them, and wait until both have replayed their topic.
 7. Wire the circuit-broken order-management client, the outbox event publisher
-   and the relay and the use cases.
+   and the relay and the use cases. One `circuit_breaker_state` registry serves
+   order-management and, in live mode, `retail-network`.
 8. Start the tickers, the poller (which polls once immediately), the outbox
    relay, then the HTTP listener.
 
@@ -138,7 +147,7 @@ consumer first.
 
 | Database | Owner | Tables (migration) | Applied by |
 | --- | --- | --- | --- |
-| OLTP (`DATABASE_URL`) | `netfulfil` | `network_orders`, `network_order_lines` (0001), `outbox_events` (0002), state `SUBMITTED` added (0003), `capability_offers` (0004), columns `hold_outcome` and `hold_settled_at` on `network_orders` (0005, ADR 0024) | `netfulfil` at startup, and `cmd/mcp` at startup |
+| OLTP (`DATABASE_URL`) | `netfulfil` | `network_orders`, `network_order_lines` (0001), `outbox_events` (0002), state `SUBMITTED` added (0003), `capability_offers` (0004), columns `hold_outcome` and `hold_settled_at` on `network_orders` (0005, ADR 0024), `network_nodes`, `network_purchase_orders`, `network_purchase_order_lines`, `network_submissions`, `network_labels` (0006, ADR 0026; empty in stub mode) | `netfulfil` at startup, and `cmd/mcp` at startup |
 | Analytical (`ANALYTICS_DATABASE_URL`) | `netfulfil-projector` | `analytics_processed_events`, `analytics_consumed_events`, `acknowledgement_rollup` (0001), column `orders_rejected_submission_failed` (0002) | `netfulfil-projector` at startup |
 
 - Migrations ship in the image (`/app/migrations`, `/app/migrations/analytics`)
@@ -156,6 +165,12 @@ consumer first.
   working against the new schema. Its `.down.sql` sets `local_order_id` to
   `NULL` on `NEW` and `REJECTED` rows before restoring the old CHECK, so a
   rollback forgets which holds those orders had.
+- Migration `0006_retail_network_map` only adds tables (nothing is altered, and
+  the tables have no foreign key to `network_orders`), so an older binary keeps
+  working against it. Its `.down.sql` drops them: rolling back forgets every
+  purchase order mapping and ledger row, which makes every order the live
+  gateway still owes an answer on unanswerable. Never run it while live mode
+  has run.
 - Every migration has a `.down.sql`, but nothing in the repo runs them. A
   rollback is a manual `migrate ... down` against the direct DSN.
 - The reports binary only reads; its pool is pinned read-only.
@@ -271,8 +286,8 @@ for the same `networkRef` may already have been delivered.
 
 | Job | Cadence | What it does |
 | --- | --- | --- |
-| Poller | immediately at start, then every `POLL_INTERVAL` | `PollDemand(since)` on the gateway, then `ReceiveNetworkDemand` per unit. The watermark advances only after a pass with no failure. |
-| `ReconcileSubmittedOrders` | every `POLL_INTERVAL` (first run after one interval) | settles every `SUBMITTED` order from the gateway's submission status. |
+| Poller | immediately at start, then every `POLL_INTERVAL` | `PollDemand(since)` on the gateway, then `ReceiveNetworkDemand` per unit. The watermark advances only after a pass with no failure. The watermark is kept in the process and starts at zero, so every boot re-reads what the network still lists. In live mode each poll first converges the sites onto network nodes (see [the live adapter](#the-live-retail-network-adapter)). |
+| `ReconcileSubmittedOrders` | every `POLL_INTERVAL` (first run after one interval) | settles every `SUBMITTED` order from the gateway's submission status. In live mode that is the network's transaction record, and an answer whose call never got through is sent again from the stored body. |
 | `SweepAcknowledgementDeadlines` | every `SWEEP_INTERVAL` | publishes `AcknowledgementDeadlineAtRisk` for every overdue `NEW` order, on every pass while it stays overdue. |
 | `RejectOverdueOrders` | every `SWEEP_INTERVAL`, own ticker | cancels the order-management hold (if one is recorded and still open) and rejects each overdue `NEW` order with `ACKNOWLEDGEMENT_DEADLINE_MISSED`. |
 | `SweepOrphanedHolds` | every `SWEEP_INTERVAL`, own ticker, unless `ORPHAN_HOLD_SWEEP_ENABLED=false` | the backstop for `RejectOverdueOrders` (ADR 0024): cancels the order-management hold of a `NEW` or `REJECTED` order that nobody decided, once `now > acknowledgeBy + ORPHAN_HOLD_GRACE`, records the outcome and publishes `OrphanedHoldCancelled`. Never changes the order's state. See [A held order is stuck in order-management](#a-held-order-is-stuck-in-order-management). |
@@ -331,13 +346,14 @@ curl -i -X POST http://localhost:8000/api/network-fulfillment/network-orders/po-
 confirm-before-acknowledge` unless the order is `ACKNOWLEDGED`; `404` for an
 unknown ref (ADR 0014).
 
-### Change the product dictionary or the stub demand
+### Change the product dictionary, the stub demand or the node definitions
 
-Edit `productTranslation.mappings` or `stubDemand.demands` in the
-environment's values. Both files are read once, at boot. The Deployment's
+Edit `productTranslation.mappings`, `stubDemand.demands` (stub mode) or
+`networkNodes.nodes` (live mode) in the environment's values. The files are
+read once, at boot. The Deployment's
 `checksum/config` annotation covers `configmap.yaml` only, not the
-`-data` ConfigMap that holds `products.json` and `demand.json`, so a
-mapping change alone does not roll the pod. Restart it:
+`-data` ConfigMap that holds `products.json`, `demand.json` and `nodes.json`, so a
+change alone does not roll the pod. Restart it:
 
 ```bash
 kubectl -n <apps namespace> rollout restart deployment/network-fulfillment
@@ -522,6 +538,131 @@ the delay, set `ORPHAN_HOLD_GRACE` (a Go duration, `0` = none).
    held order in order-management and cancel it there with `DELETE /orders/{id}`.
 4. Orders rejected before migration `0005` whose raise had succeeded have no
    recorded id either; same hand step.
+
+## The live retail-network adapter
+
+`NETWORK_MODE=live` ([ADR 0026](../adr/0026-live-retail-network-adapter-demand-loop.md))
+makes the gateway call the retail network's Vendor API. The chart's default, the
+kind cluster and every e2e run stay `stub`; the flip to `live` in an environment
+is a values change (`config.networkMode`, `config.networkBaseUrl`,
+`config.networkVendorId`, optionally `networkNodes.nodes`) and the render refuses
+it without the first three. There is no credential and no timeout variable.
+
+**Before the flip.** The database must be one that live mode can own. An order
+that was answered by the stub has no row in `network_purchase_orders`, and the
+live gateway cannot answer for it: reconciling a `SUBMITTED` one or confirming an
+`ACKNOWLEDGED` one fails with `retail-network: no purchase order is recorded for
+this ref` (the reconcile pass does not log that failure; the order just stays
+`SUBMITTED`). Settle those first; this lists them:
+
+```sql
+SELECT o.network_ref, o.state, o.acknowledge_by
+FROM network_orders o
+LEFT JOIN network_purchase_orders p ON p.network_ref = o.network_ref
+WHERE p.network_ref IS NULL AND o.state IN ('SUBMITTED', 'ACKNOWLEDGED')
+ORDER BY o.acknowledge_by;
+```
+
+**The tables (migration 0006)** are written only by the adapter and are empty in
+stub mode:
+
+| Table | One row per | Holds |
+| --- | --- | --- |
+| `network_nodes` | site | `site_code` to the network's `node_id` |
+| `network_purchase_orders` | purchase order | the minted `network_ref` (`NR-...`) to `po_number`, the vendor and node, `required_ship_by`, the network's `ack_by` |
+| `network_purchase_order_lines` | purchase order line | line number, `network_line_ref` (`line-<n>`), listing id, `network_product_id`, ordered quantity |
+| `network_submissions` | `(kind, subject)` | the ledger: `kind` is `ACKNOWLEDGEMENT`, `SHIPMENT_CONFIRMATION` or `NODE_REGISTRATION`, `subject` the network ref (or site code), the idempotency key, the exact request body, the network's `transaction_id`, `status`, `errors` |
+| `network_labels` | package | `label_ref`, `tracking_number`, `carrier` from the label request |
+
+**Ledger statuses.** The row, with its key and exact body, is written before the
+first HTTP call; the `transaction_id` is stored as soon as the `202` is read.
+
+| `status` | `transaction_id` | Meaning |
+| --- | --- | --- |
+| `SENDING` | none | The call has not been confirmed: a crash mid-call, a `5xx`/timeout after the retries, an open breaker, or an answer that is not a final refusal (`403`, `404`, `409 concurrent-update`, `422 idempotency-key-reused`). The write may or may not have reached the network; the stored body and key are what any retry sends, so it cannot be created twice. |
+| `PROCESSING` | set | The network accepted the write (`202`) and has not settled the transaction. |
+| `SUCCESS` | set | The network settled it. Terminal. |
+| `FAILURE` | set, or none | The transaction failed, or the network refused the write outright (`409 ack-window-closed`, `illegal-transition`, `confirm-without-label`, `label-before-acceptance`; `422 validation-failed`); `errors` says why. Terminal: a settled row is never updated again. |
+
+Stuck rows, oldest first (an index serves this):
+
+```sql
+SELECT kind, subject, status, transaction_id, errors, created_at, updated_at
+FROM network_submissions
+WHERE status IN ('SENDING', 'PROCESSING') AND updated_at < now() - interval '10 minutes'
+ORDER BY updated_at;
+```
+
+**What to do with each kind of row.**
+
+- `ACKNOWLEDGEMENT`, `SENDING` or `PROCESSING`: nothing to re-arm. While the
+  order is `SUBMITTED`, `ReconcileSubmittedOrders` sends the stored answer again
+  or reads the transaction every `POLL_INTERVAL`. If it stays unsettled, find out
+  why. A lookup that fails does not abort the pass and **is not logged by the use
+  case**: the order just stays `SUBMITTED`. The signals are this query,
+  `circuit_breaker_state{dependency="retail-network"}` = `2` (open: no call is
+  attempted) and the client's `WARN` `retail-network call will be retried` (`op`,
+  `attempt`, `err`). A transaction that stays `PROCESSING` on the network is the
+  network's to settle. This service never sweeps a `SUBMITTED` order, so it
+  stays `SUBMITTED` here (list them with `list_network_orders` `state=SUBMITTED`)
+  even after the network has expired the purchase order at `ackBy`.
+- `ACKNOWLEDGEMENT`, `FAILURE`: the order is rejected here with
+  `SUBMISSION_FAILED` and its hold cancelled by the reconcile pass. There is no
+  re-arm: a re-delivered purchase order finds the same `network_ref` and the
+  same rejected order, and the network returns the purchase order to `ISSUED` and
+  expires it at `ackBy`.
+- `SHIPMENT_CONFIRMATION`, any unsettled or `FAILURE` row: the order is already
+  `CONFIRMED` here, and **no use case retries or reconciles the confirmation**
+  (ADR 0026, Consequences; ADR 0018 finding 3). A transaction that is
+  already `FAILURE` when the confirmation is sent is logged at `ERROR` (`the
+  network failed a shipment confirmation; the order stays accepted there until an
+  operator acts`) with the `errors` text; one still `PROCESSING` at that moment
+  is never read again, so its row stays `PROCESSING` and nothing is logged. Calling the confirm
+  endpoint again answers `204` without sending anything, because the order is
+  `CONFIRMED`. Check the order on the network and act there; this service has no
+  re-send for it today.
+- `NODE_REGISTRATION`, `SENDING` or `PROCESSING`: converges by itself on each
+  poll (a `WARN` `node convergence incomplete; the next tick retries` carries the
+  cause). `FAILURE`: the network refused to register the site and the site gets
+  no demand. Fix the cause (usually `networkNodes.nodes`, whose values are the
+  network's to judge), then delete the settled row so the next poll writes a new
+  one, and roll the pod if the file changed:
+
+  ```sql
+  DELETE FROM network_submissions
+  WHERE kind = 'NODE_REGISTRATION' AND subject = '<site code>' AND status = 'FAILURE';
+  ```
+
+  The idempotency key is `nf-node-<site code>` and the network keeps a key for 24
+  hours: a corrected body sent under the old key inside that window is answered
+  `idempotency-key-reused`, which is logged on every poll and succeeds once the
+  first attempt is 24 hours old.
+
+**Purchase orders that are skipped.** A purchase order whose node is not mapped to
+one of our sites is skipped with `WARN` `retail-network: purchase order skipped,
+its node is not mapped to any of our sites` (`nodeId`, `poNumber`); there is no
+metric for it. The watermark moves on, so the order is read again only on the next
+boot (the watermark starts at zero), and the network expires it at its `ackBy`
+otherwise. To recover: make the node known (add a `networkNodes.nodes` entry for
+its site, or register the node on the network under the site code as its
+`vendorNodeCode`), then restart the pod before `ackBy`. A site with neither a node
+nor a definition logs `WARN` `site has no node on the network and no node
+definition to register one from` on every poll.
+
+**Signals.** `retail-network:` log lines (`WARN` for skips, node convergence and
+node listing failures, `ERROR` for a failed shipment confirmation, `Info` once per
+process for each supply-loop no-op: `DeclareCapability` and `SubmitAvailability`
+do nothing in live mode until ADR 0027); the poller's `poll demand failed`;
+`circuit_breaker_state{dependency="retail-network"}` on `GET /metrics` next to
+`dependency="order-management"`; `GET /inbound-status` for the mode and the
+poller counters. `/readyz` does not depend on the network (ADR 0026 Decision 10):
+a network outage leaves the pod ready, so alert on the gauge and the poll errors.
+
+**What is and is not proven about a crash.** The ledger row is written before the
+call, so a process death between the steps is designed to end with one order here
+and one write on the network. The integration test stops the service gracefully
+(a context cancel) between the acknowledgement being sent and reconciled; there is
+no test that kills the process (ADR 0026, As built 8).
 
 ## Reports API (`netfulfil-reports`)
 

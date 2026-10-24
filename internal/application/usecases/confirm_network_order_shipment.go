@@ -9,6 +9,12 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
+// singlePackage is how many packages a confirmed order leaves in. This context
+// holds no package data and the network needs only the count (ADR 0026): a
+// ship-complete order leaves as one package until a fleet fact carries the
+// real number.
+const singlePackage = 1
+
 // ConfirmNetworkOrderShipment answers the network that one of its orders
 // has shipped (ADR 0001 §5's `submitShipmentConfirmations`), closing the
 // order and raising NetworkOrderShipmentConfirmed.
@@ -55,6 +61,16 @@ func (uc *ConfirmNetworkOrderShipment) Execute(ctx context.Context, ref shared.N
 		return o, nil
 	}
 
+	// The labels first: the network confirms a shipment only with a label for
+	// every package, and asking is idempotent. A failure here leaves the order
+	// ACKNOWLEDGED and the call retryable, instead of CONFIRMED with nothing
+	// to confirm.
+	if err := o.CheckConfirmable(); err != nil {
+		return nil, err
+	}
+	if _, err := uc.Gateway.RequestLabel(ctx, o.NetworkRef(), singlePackage); err != nil {
+		return nil, fmt.Errorf("request label: %w", err)
+	}
 	if err := o.ConfirmShipment(); err != nil {
 		return nil, err
 	}
@@ -79,7 +95,7 @@ func (uc *ConfirmNetworkOrderShipment) Execute(ctx context.Context, ref shared.N
 		return nil, err
 	}
 
-	if err := uc.Gateway.SubmitShipmentConfirmation(ctx, o.NetworkRef()); err != nil {
+	if err := uc.Gateway.SubmitShipmentConfirmation(ctx, o.NetworkRef(), now); err != nil {
 		return nil, fmt.Errorf("submit shipment confirmation: %w", err)
 	}
 	return o, nil

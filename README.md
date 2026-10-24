@@ -81,10 +81,12 @@ What exists today:
   next pass. It never changes the order's state. Counter
   `network_fulfillment.orphaned_holds.swept`. Runbook:
   [A held order is stuck in order-management](docs/operations/runbook.md#a-held-order-is-stuck-in-order-management).
-- **`ConfirmNetworkOrderShipment`** (ADR 0014) — the one write endpoint,
-  `POST /network-orders/{networkRef}/shipment-confirmation`: `ACKNOWLEDGED
-  -> CONFIRMED`, publishes `NetworkOrderShipmentConfirmed`, then tells the
-  network. Idempotent on an already-`CONFIRMED` order.
+- **`ConfirmNetworkOrderShipment`** (ADR 0014, ADR 0026) — the one write endpoint,
+  `POST /network-orders/{networkRef}/shipment-confirmation`: requests the label
+  from the gateway first (one package), then `ACKNOWLEDGED -> CONFIRMED`,
+  publishes `NetworkOrderShipmentConfirmed`, then tells the network. A label
+  failure leaves the order `ACKNOWLEDGED` and retryable. Idempotent on an
+  already-`CONFIRMED` order.
 - **`RecomputeCapabilityOffers`** — every `RECOMPUTE_INTERVAL` (default
   `1m`), for every SKU in the
   translation dictionary at `SITE_ID`: physical stock from
@@ -112,18 +114,45 @@ What exists today:
   Postgres (`migrations/analytics/`), and `cmd/netfulfil-reports` serves
   `GET /reports/acknowledgement` and `GET /reports/acknowledgement/freshness`
   over a read-only pool.
-- **Persistence** — Postgres (`migrations/0001`–`0005`: `network_orders`,
-  `network_order_lines`, `outbox_events`, `capability_offers`, and the hold
-  outcome columns of `network_orders`). `DATABASE_URL` is mandatory: there
+- **Persistence** — Postgres (`migrations/0001`–`0006`: `network_orders`,
+  `network_order_lines`, `outbox_events`, `capability_offers`, the hold
+  outcome columns of `network_orders`, and the live adapter's five tables,
+  below). `DATABASE_URL` is mandatory: there
   is no in-memory mode (ADR 0025), and a Postgres that cannot be reached
   fails the boot. Migrations run at startup
   (`MIGRATIONS_DATABASE_URL` for a direct, non-PgBouncer connection, ADR
   0007).
+- **Live retail-network adapter: the demand loop** (ADR 0026,
+  `internal/adapters/outbound/retailnetwork`). `NETWORK_MODE=live` calls the
+  retail network's Vendor API: polls its purchase orders, answers each once
+  (accept, or reject with a reason), reconciles the answer by a persisted
+  transaction id, requests the label and confirms the shipment, every write with
+  a deterministic idempotency key, bounded retries, `429` backoff and one circuit
+  breaker (`circuit_breaker_state{dependency="retail-network"}` on `/metrics`).
+  It keeps the network's identifiers out of the domain and persists the meeting
+  point in migration 0006: `network_nodes` (site code to node id),
+  `network_purchase_orders` and `network_purchase_order_lines` (minted
+  `networkRef` to purchase order number, listing and ordered quantity),
+  `network_submissions` (the ledger: idempotency key, exact request body,
+  transaction id and status per acknowledgement, shipment confirmation and node
+  registration) and `network_labels`. The tables stay empty in stub mode.
+  Environment (the full table is in
+  [configuration](docs/operations/configuration.md)): `NETWORK_MODE` (default
+  `stub`; anything but `live` is `stub`); `NETWORK_BASE_URL` and
+  `NETWORK_VENDOR_ID`, required only in live mode (one boot error names every
+  missing one); `NETWORK_NODES_FILE`, optional and live only (node definitions
+  to register, strict JSON); `NETWORK_SEED_FILE`, stub only. No credential and
+  no timeout variable exist. A purchase order whose node is not mapped is
+  skipped with a warning (ADR 0026, As built 1). Operations:
+  [live adapter runbook](docs/operations/runbook.md#the-live-retail-network-adapter).
+  Mode `stub` stays the default everywhere, including the cluster.
 - **Curated ACL files** — `PRODUCT_TRANSLATION_FILE` (network product id ->
   SKU; without it every order is rejected as untranslatable, and a warning is
-  logged at startup; ADR 0013) and `NETWORK_SEED_FILE` (stub demand; refuses
-  to boot against a non-stub gateway; ADR 0012). The Helm chart renders both
-  from `productTranslation.mappings` and `stubDemand.demands`.
+  logged at startup; ADR 0013), `NETWORK_SEED_FILE` (stub demand; refuses
+  to boot against the live gateway; ADR 0012) and `NETWORK_NODES_FILE` (live
+  only: the nodes to register on the network, ADR 0026). The Helm chart renders
+  them from `productTranslation.mappings`, `stubDemand.demands` and
+  `networkNodes.nodes`.
 - **Resilience** (ADR 0004) — one circuit breaker guards every
   `order-management` call, the analytics consumer retries in-process and
   dead-letters to `<topic>.dlq`, and shutdown flips `/readyz` first, then
@@ -155,15 +184,15 @@ What exists today:
 
 Not built yet:
 
-- **A live `retail-network` adapter.** `NETWORK_MODE=live` refuses to boot
-  with "not implemented yet" (and requires `NETWORK_BASE_URL`). Only the
-  stub gateway exists, so no call to a real counterpart is made.
-- **Submitting `CapabilityOffer` outward.** `NetworkGateway.SubmitAvailability`
-  exists on the port and in the stub, but no use case calls it yet.
+- **Submitting `CapabilityOffer` outward (the supply loop, ADR 0027).**
+  `NetworkGateway.DeclareCapability` and `SubmitAvailability` exist on the port
+  and in the stub, and are logged no-ops in the live gateway (ADR 0026), but no
+  use case calls them yet. ADR 0027 is reserved for this and is not written.
 - **A `PackageManifested`-driven shipment confirmation.** ADR 0014 chose
   the explicit endpoint until a persisted correlation exists.
-- The `adapters/outbound/network/` -> `outbound/retailnetwork/` package
-  rename (ADR 0009).
+- **A real package count.** The label is requested for exactly one package.
+- **Reconciling a shipment confirmation.** The network's `FAILURE` of one is
+  logged at `ERROR` and recorded in `network_submissions`; no use case acts on it.
 
 ## Why this context exists
 
@@ -265,7 +294,7 @@ internal/
   adapters/inbound/mcp/        MCP tools, resource, prompt
   adapters/inbound/kafka/      analytics consumer (own topic)
   adapters/kafka/cloudevents/  the CloudEvents 1.0 envelope
-  adapters/outbound/network/   NETWORK_MODE switch + stub gateway + seed file
+  adapters/outbound/retailnetwork/  NETWORK_MODE switch, stub gateway + seed file, live Vendor API gateway (ADR 0026)
   adapters/outbound/ordermanagement/  held-order planner (order-management REST) + breaker
   adapters/outbound/inventoryclient/  inventory-storage usable-quantity REST client
   adapters/outbound/processpathcache/ process-path-management Kafka cache
@@ -296,8 +325,10 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `NETWORK_MODE` | `stub` | `live` currently refuses to boot (not implemented) |
-| `NETWORK_BASE_URL` | unset | live-mode target (ADR 0009 §4); required when `NETWORK_MODE=live` |
+| `NETWORK_MODE` | `stub` | `live` calls the retail network's Vendor API (ADR 0026); any other value is `stub` |
+| `NETWORK_BASE_URL` | unset | Vendor API base URL; required when `NETWORK_MODE=live`, ignored otherwise |
+| `NETWORK_VENDOR_ID` | unset | vendor account the service acts as; required when `NETWORK_MODE=live`, ignored otherwise |
+| `NETWORK_NODES_FILE` | unset | optional, live only: node definitions to register on the network (strict JSON) |
 | `ORDER_MANAGEMENT_URL` | `http://localhost:8080` | base URL for the held-order calls |
 | `DATABASE_URL` | none | **required**: Postgres DSN; a missing or unreachable database fails the boot (ADR 0025) |
 | `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | direct (non-pooled) connection for migrations only (ADR 0007) |

@@ -37,6 +37,9 @@ type ReconcileResult struct {
 	Confirmed int
 	Failed    int
 	Pending   int
+	// Resent counts orders whose answer the gateway had never sent and this
+	// pass sent again (contract.SubmissionNotSent).
+	Resent int
 }
 
 func (uc *ReconcileSubmittedOrders) Execute(ctx context.Context) (ReconcileResult, error) {
@@ -66,6 +69,13 @@ func (uc *ReconcileSubmittedOrders) Execute(ctx context.Context) (ReconcileResul
 				continue
 			}
 			res.Failed++
+		case contract.SubmissionNotSent:
+			// A SUBMITTED order is one we accepted: say so again. The next pass
+			// reconciles whatever the network made of it.
+			if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), contract.Acknowledgement{Accepted: true}); err != nil {
+				continue
+			}
+			res.Resent++
 		default:
 			res.Pending++
 		}

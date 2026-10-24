@@ -104,7 +104,7 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 		return uc.rejectUntranslatable(ctx, demand, now)
 	}
 
-	o, err := networkorder.Receive(demand.NetworkRef, demand.SiteId, demand.RequiredShipBy, lines, now)
+	o, err := networkorder.ReceiveBy(demand.NetworkRef, demand.SiteId, demand.RequiredShipBy, lines, now, demand.AcknowledgeBy)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +206,7 @@ func (uc *ReceiveNetworkDemand) translate(ctx context.Context, demand contract.I
 // line carrying the ORIGINAL network identifiers, so the refusal is
 // auditable against what the network actually sent.
 func (uc *ReceiveNetworkDemand) rejectUntranslatable(ctx context.Context, demand contract.InboundDemand, now time.Time) (*networkorder.NetworkOrder, error) {
-	o, err := networkorder.ReceiveUntranslatable(demand.NetworkRef, demand.SiteId, demand.RequiredShipBy, now)
+	o, err := networkorder.ReceiveUntranslatableBy(demand.NetworkRef, demand.SiteId, demand.RequiredShipBy, now, demand.AcknowledgeBy)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +249,7 @@ func (uc *ReceiveNetworkDemand) reject(ctx context.Context, o *networkorder.Netw
 	}); err != nil {
 		return nil, err
 	}
-	if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), false); err != nil {
+	if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), contract.Acknowledgement{Reason: reason}); err != nil {
 		return nil, fmt.Errorf("submit rejection: %w", err)
 	}
 	return o, nil
@@ -287,7 +287,7 @@ func (uc *ReceiveNetworkDemand) acknowledge(ctx context.Context, o *networkorder
 	}); err != nil {
 		return nil, err
 	}
-	if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), true); err != nil {
+	if err := uc.Gateway.SubmitAcknowledgement(ctx, o.NetworkRef(), contract.Acknowledgement{Accepted: true}); err != nil {
 		return nil, fmt.Errorf("submit acknowledgement: %w", err)
 	}
 	// Deliberately NOT released here. ADR 0001 §5 models this submission

@@ -85,7 +85,7 @@ internal/
     inbound/mcp/               MCP tools, resource, prompt
     inbound/kafka/             analytics consumer (own topic) + DLQ
     kafka/cloudevents/         the CloudEvents 1.0 envelope, shared by every publisher and consumer
-    outbound/network/          NETWORK_MODE switch, stub gateway, seed file
+    outbound/retailnetwork/    NETWORK_MODE switch, stub gateway, seed file, live Vendor API gateway (ADR 0026)
     outbound/ordermanagement/  held-order REST client + circuit breaker
     outbound/inventoryclient/  usable-quantity REST client
     outbound/processpathcache/ Kafka cache: path cycle times + CPT schedule
@@ -116,7 +116,7 @@ service segment equals the module name. See
 | --- | --- | --- |
 | `NetworkOrderRepo` | `postgres.NetworkOrderRepo` (`memory` is a test double) | always |
 | `CapabilityOfferRepo` | `postgres.CapabilityOfferRepo` | always |
-| `NetworkGateway` | `network.StubGateway` (live not implemented) | `NETWORK_MODE` |
+| `NetworkGateway` | `retailnetwork.StubGateway` (default) or `retailnetwork.LiveGateway` (demand loop, ADR 0026) | `NETWORK_MODE` |
 | `FulfillmentPlanner` | `ordermanagement.BreakerClient` wrapping `Planner` | always |
 | `ProductTranslation` | `producttranslation` dictionary loaded from `PRODUCT_TRANSLATION_FILE` | always (empty without the file) |
 | `ProcessPathCapability` | `processpathcache.Consumer` | always |

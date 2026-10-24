@@ -13,26 +13,20 @@ NETWORK_MODE is {{ .Values.config.networkMode | quote }}.
 {{- if eq .Values.config.networkMode "stub" }}
 
 This install talks to NO external network. The stub adapter answers every
-call locally, which is why it needs no credentials and no Secret. That is
-the intended default for local clusters and e2e runs -- an install that
-reached a real retailer's API by accident would acknowledge real orders.
+call locally, which is why it needs no external configuration. That is the
+intended default for local clusters and e2e runs -- an install that reached a
+real retailer's API by accident would acknowledge real orders.
 
-To integrate for real, set config.networkMode to "live" and
-config.networkBaseUrl, AND provide credentials via credentials.* or
-credentials.existingSecret. The binary refuses to boot in live mode
-without them rather than falling back to stub.
+To integrate for real, set config.networkMode to "live", config.networkBaseUrl
+and config.networkVendorId (the chart refuses to render without them). Live
+takes no credential. Add networkNodes.nodes for any site that is not yet a node
+on the network.
 {{- else }}
 
   !! This install is configured for {{ .Values.config.networkMode }} mode.
-  !! It will make REAL calls to the external network using the mounted
-  !! credentials, and acknowledgements it sends are commitments the
-  !! retailer will hold this warehouse to.
-
-{{- if not (or .Values.credentials.existingSecret .Values.credentials.clientId) }}
-  !! No credentials are configured. The pod will FAIL TO START -- this is
-  !! deliberate fail-closed behaviour, not a bug. Set credentials.* or
-  !! credentials.existingSecret.
-{{- end }}
+  !! It will make REAL calls to {{ .Values.config.networkBaseUrl | quote }} as vendor
+  !! {{ .Values.config.networkVendorId | quote }}, and acknowledgements it sends are
+  !! commitments the retailer will hold this warehouse to.
 {{- end }}
 
 order-management is reached at {{ .Values.config.orderManagementUrl | quote }}.

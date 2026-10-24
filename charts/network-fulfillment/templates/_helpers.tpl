@@ -41,12 +41,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
-{{- define "network-fulfillment.credentialsSecretName" -}}
-{{- if .Values.credentials.existingSecret }}
-{{- .Values.credentials.existingSecret }}
-{{- else }}
-{{- include "network-fulfillment.fullname" . }}-credentials
+{{/*
+The adapter the binary wires from NETWORK_MODE, read the way
+retailnetwork.ParseMode reads it: trimmed and lower-cased. Only "live" selects the
+live gateway; the binary reads everything else as stub.
+*/}}
+{{- define "network-fulfillment.networkMode" -}}
+{{- lower (trim (toString .Values.config.networkMode)) -}}
 {{- end }}
+
+{{/*
+Non-empty when the data ConfigMap is rendered and mounted: the product dictionary,
+the stub demand, or (live mode only) the node definitions of NETWORK_NODES_FILE.
+*/}}
+{{- define "network-fulfillment.hasDataFiles" -}}
+{{- if or .Values.productTranslation.mappings .Values.stubDemand.demands (and (eq (include "network-fulfillment.networkMode" .) "live") .Values.networkNodes.nodes) -}}
+true
+{{- end -}}
 {{- end }}
 
 {{- define "network-fulfillment.databaseSecretName" -}}
@@ -164,10 +175,54 @@ ANALYTICS_DATABASE_URL; the projector also needs KAFKA_BROKERS (requireKafka).
 {{- end }}
 
 {{/*
+NETWORK_MODE is stub (the default, no external call) or live (ADR 0026). The binary
+reads anything but live as stub, so the chart refuses any other value instead of
+deploying a stub that looks configured for a real network. Live needs a base URL
+and a vendor id (the binary exits at boot without them, naming each), takes no
+credential, and refuses seeded stub demand (NETWORK_SEED_FILE is refused against
+the live gateway). The node definitions are checked against the file's strict
+schema (retailnetwork.LoadNodesFile) so a typo fails the render, not the boot.
+*/}}
+{{- define "network-fulfillment.requireNetwork" -}}
+{{- $mode := include "network-fulfillment.networkMode" . -}}
+{{- if not (or (eq $mode "stub") (eq $mode "live")) -}}
+{{- fail (printf "config.networkMode=%q is not supported: use stub (the default) or live. The binary reads anything but live as stub, so another value would deploy a stub that looks configured for a real network" (toString .Values.config.networkMode)) -}}
+{{- end -}}
+{{- if eq $mode "live" -}}
+{{- $missing := list -}}
+{{- if not .Values.config.networkBaseUrl -}}
+{{- $missing = append $missing "config.networkBaseUrl (NETWORK_BASE_URL)" -}}
+{{- end -}}
+{{- if not .Values.config.networkVendorId -}}
+{{- $missing = append $missing "config.networkVendorId (NETWORK_VENDOR_ID)" -}}
+{{- end -}}
+{{- if $missing -}}
+{{- fail (printf "config.networkMode=live requires %s to be set: the binary refuses to boot in live mode without them" (join " and " $missing)) -}}
+{{- end -}}
+{{- if .Values.stubDemand.demands -}}
+{{- fail "stubDemand.demands is set while config.networkMode is live: the binary refuses to boot with NETWORK_SEED_FILE against the live gateway, because seeded demand would never be delivered" -}}
+{{- end -}}
+{{- range $i, $node := .Values.networkNodes.nodes -}}
+{{- range $key, $ignored := $node -}}
+{{- if not (has $key (list "siteCode" "nodeType" "subtype" "regionId" "timezone" "postalCode" "countryCode" "lat" "lon")) -}}
+{{- fail (printf "networkNodes.nodes[%d] has the unknown key %q: the binary rejects it at boot (allowed: siteCode, nodeType, subtype, regionId, timezone, postalCode, countryCode, lat, lon)" $i $key) -}}
+{{- end -}}
+{{- end -}}
+{{- range $field := list "siteCode" "nodeType" "regionId" "timezone" "postalCode" "countryCode" -}}
+{{- if not (get $node $field) -}}
+{{- fail (printf "networkNodes.nodes[%d].%s is required: the binary rejects the node file at boot without it" $i $field) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 One entry point for the api Deployment, which every release renders, so any
 release fails whichever optional component is enabled.
 */}}
 {{- define "network-fulfillment.requireRealRuntime" -}}
+{{- include "network-fulfillment.requireNetwork" . -}}
 {{- include "network-fulfillment.requireDatabase" . -}}
 {{- include "network-fulfillment.requireKafka" . -}}
 {{- include "network-fulfillment.requireEventPublisher" . -}}

@@ -1,4 +1,4 @@
-package network
+package retailnetwork
 
 import (
 	"bytes"
