@@ -63,30 +63,46 @@ func TestInbound_PollFlattensPalletsAndCartonsAndPages(t *testing.T) {
 	if len(got) != 2 || got[0].Ref != "SHP-1" || got[1].Ref != "SHP-2" {
 		t.Fatalf("shipments = %+v, want SHP-1 once and SHP-2 (a repeated and a non-SHIPPED one dropped)", got)
 	}
-	s := got[0]
+	expectFlattenedShipment(t, got[0])
+	expectPagedQueries(t, f.requestsTo(http.MethodGet, "/vendor/inbound-shipments"))
+}
+
+func expectFlattenedShipment(t *testing.T, s contract.InboundShipment) {
+	t.Helper()
 	if s.OwnerRef != "S-100" || s.SiteId != "FC-1" || !s.ShippedAt.Equal(t0) || len(s.Cartons) != 2 {
 		t.Fatalf("shipment = %+v", s)
 	}
-	if c := s.Cartons[0]; c.SSCC != ssccA || c.ParentSSCC != ssccPallet || c.Kind != contract.CartonHomogeneousCase ||
-		c.GrossWeightG != 4200 || c.Dims == nil || c.Dims.LengthMm != 400 || c.Dims.HeightMm != 200 ||
-		c.Contents[0] != (contract.InboundContent{GTIN: gtinEach, QtyEaches: 12, Lot: "L-77", Expiry: "2027-03-01"}) {
-		t.Errorf("pallet carton = %+v", c)
-	}
+	expectPalletCarton(t, s.Cartons[0])
 	if c := s.Cartons[1]; c.SSCC != ssccB || c.ParentSSCC != "" || c.Kind != contract.CartonMixed || c.Dims != nil {
 		t.Errorf("top-level carton = %+v", c)
 	}
+}
 
-	first := f.requestsTo(http.MethodGet, "/vendor/inbound-shipments")
-	if len(first) != 2 {
-		t.Fatalf("requests = %d, want 2 pages", len(first))
+func expectPalletCarton(t *testing.T, c contract.InboundCarton) {
+	t.Helper()
+	if c.SSCC != ssccA || c.ParentSSCC != ssccPallet || c.Kind != contract.CartonHomogeneousCase || c.GrossWeightG != 4200 {
+		t.Errorf("pallet carton = %+v", c)
+	}
+	if c.Dims == nil || c.Dims.LengthMm != 400 || c.Dims.HeightMm != 200 {
+		t.Errorf("pallet carton dims = %+v", c.Dims)
+	}
+	if c.Contents[0] != (contract.InboundContent{GTIN: gtinEach, QtyEaches: 12, Lot: "L-77", Expiry: "2027-03-01"}) {
+		t.Errorf("pallet carton contents = %+v", c.Contents)
+	}
+}
+
+func expectPagedQueries(t *testing.T, reqs []seen) {
+	t.Helper()
+	if len(reqs) != 2 {
+		t.Fatalf("requests = %d, want 2 pages", len(reqs))
 	}
 	for _, want := range []string{"vendorId=V-WS", "nodeId=N-1", "createdAfter=2026-10-24T09%3A58%3A00Z"} {
-		if !strings.Contains(first[0].RawQuery, want) {
-			t.Errorf("first page query %q misses %q (the cursor minus the 2 minute overlap)", first[0].RawQuery, want)
+		if !strings.Contains(reqs[0].RawQuery, want) {
+			t.Errorf("first page query %q misses %q (the cursor minus the 2 minute overlap)", reqs[0].RawQuery, want)
 		}
 	}
-	if strings.Contains(first[1].RawQuery, "createdAfter") || !strings.Contains(first[1].RawQuery, "nextToken=p2") {
-		t.Errorf("next page query %q: a token replaces the filters", first[1].RawQuery)
+	if strings.Contains(reqs[1].RawQuery, "createdAfter") || !strings.Contains(reqs[1].RawQuery, "nextToken=p2") {
+		t.Errorf("next page query %q: a token replaces the filters", reqs[1].RawQuery)
 	}
 }
 
@@ -138,18 +154,23 @@ func TestInbound_ReceiptIsSentOnceWithADeterministicKeyAndTheExactBody(t *testin
 	if posts[0].IdemKey != "nf-rcpt-SHP-1" {
 		t.Errorf("Idempotency-Key = %q", posts[0].IdemKey)
 	}
+	expectReceiptBody(t, posts[0].Body)
+	row, found := f.store.row(KindInboundReceipt, "SHP-1")
+	if !found || row.TransactionID == "" || row.Status != StatusSuccess {
+		t.Errorf("ledger row = %+v, %v", row, found)
+	}
+}
+
+func expectReceiptBody(t *testing.T, body string) {
+	t.Helper()
 	var sent inboundReceiptRequestDTO
-	if err := json.Unmarshal([]byte(posts[0].Body), &sent); err != nil {
+	if err := json.Unmarshal([]byte(body), &sent); err != nil {
 		t.Fatal(err)
 	}
 	if sent.VendorID != "V-WS" || sent.NodeID != "N-1" || sent.ShipmentID != "SHP-1" || len(sent.Cartons) != 2 ||
 		sent.Cartons[0].Items[0].QtyEaches != 12 || sent.Cartons[1].Status != "MISSING" ||
 		sent.Cartons[1].Items == nil || sent.Cartons[1].ComplianceCodes == nil {
-		t.Errorf("body = %s", posts[0].Body)
-	}
-	row, found := f.store.row(KindInboundReceipt, "SHP-1")
-	if !found || row.TransactionID == "" || row.Status != StatusSuccess {
-		t.Errorf("ledger row = %+v, %v", row, found)
+		t.Errorf("body = %s", body)
 	}
 }
 

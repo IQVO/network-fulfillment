@@ -181,7 +181,14 @@ func TestIntake_RegistersTheAsnWithHierarchicalCartonsAndRolledUpLines(t *testin
 	if res != (usecases.IntakeResult{Polled: 1, New: 1, Registered: 1}) {
 		t.Fatalf("result = %+v", res)
 	}
-	a := f.reg.got[0]
+	expectAsnShape(t, f.reg.got[0])
+	if got := f.repo.rows["SHP-1"].status; got != contract.InboundRegistered {
+		t.Errorf("status = %s", got)
+	}
+}
+
+func expectAsnShape(t *testing.T, a contract.AsnRegistration) {
+	t.Helper()
 	if a.AsnNumber != "NF-SHP-1" || a.OwnerRef != "S-100" || a.SupplierRef != "S-100" {
 		t.Errorf("asn header = %+v", a)
 	}
@@ -194,9 +201,6 @@ func TestIntake_RegistersTheAsnWithHierarchicalCartonsAndRolledUpLines(t *testin
 	}
 	if c := a.Cartons[1]; c.Contents[0].LineNo != 2 || c.Contents[1].LineNo != 1 {
 		t.Errorf("mixed carton contents are tied to their lines: %+v", c.Contents)
-	}
-	if got := f.repo.rows["SHP-1"].status; got != contract.InboundRegistered {
-		t.Errorf("status = %s", got)
 	}
 }
 

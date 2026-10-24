@@ -24,6 +24,11 @@ func TestLoadInboundConfig(t *testing.T) {
 			t.Fatalf("cfg=%+v err=%v", cfg, err)
 		}
 	})
+	t.Run("a missing URL is a boot error naming exactly the missing ones", func(t *testing.T) { checkMissingInboundURLs(t, get) })
+}
+
+func checkMissingInboundURLs(t *testing.T, get func(map[string]string) func(string) string) {
+	t.Helper()
 	cases := []struct {
 		name       string
 		vars       map[string]string
@@ -35,22 +40,20 @@ func TestLoadInboundConfig(t *testing.T) {
 		{"blank is missing", map[string]string{"INBOUND_RECEIVING_URL": "  ", "PRODUCT_MASTER_URL": "\t"}, []string{"INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL"}, nil},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := loadInboundConfig(get(tc.vars), retailnetwork.ModeLive)
-			if err == nil {
-				t.Fatal("want a boot error")
+		_, err := loadInboundConfig(get(tc.vars), retailnetwork.ModeLive)
+		if err == nil {
+			t.Fatalf("%s: want a boot error", tc.name)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("%s: %q does not name %s", tc.name, err, w)
 			}
-			for _, w := range tc.want {
-				if !strings.Contains(err.Error(), w) {
-					t.Errorf("%q does not name %s", err, w)
-				}
+		}
+		for _, m := range tc.miss {
+			if strings.Contains(err.Error(), m) {
+				t.Errorf("%s: %q names %s, which is set", tc.name, err, m)
 			}
-			for _, m := range tc.miss {
-				if strings.Contains(err.Error(), m) {
-					t.Errorf("%q names %s, which is set", err, m)
-				}
-			}
-		})
+		}
 	}
 }
 
