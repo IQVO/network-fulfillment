@@ -221,6 +221,14 @@ config:
   # Only read when config.networkMode is "live"; rendered only then. No default.
   networkVendorId: ""
 
+  # NETWORK_PROFILE_INTERVAL, how often the node profile (cutoffs, handling time,
+  # throughput) is re-derived from the local caches and, when its content changed,
+  # declared to the network (ADR 0027). A Go duration; "0" switches the
+  # declaration off. Only read when config.networkMode is "live"; rendered only
+  # then. The network judges our acknowledgement deadlines by the declared handling
+  # time, so leave it on unless the network is being declared to by something else.
+  networkProfileInterval: "5m"
+
   # order-management's in-cluster REST base URL. The one upstream this
   # context calls; the default matches the fleet's service naming.
   orderManagementUrl: "http://order-management.warehouse.svc.cluster.local"

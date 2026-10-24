@@ -125,6 +125,7 @@ func run(ctx context.Context) int {
 	receive, sweep, rejectOverdue := wireUseCases(in.orders, in.gateway, planner, in.translation, eventPublisher, in.pool)
 	reconcile := wireReconcile(in.orders, in.gateway, planner, eventPublisher, in.pool)
 	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
+	profiles := wireNodeProfiles(logger, in.mode, in.gateway, in.recompute.PathCap, in.recompute.Capacity)
 
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
@@ -147,7 +148,7 @@ func run(ctx context.Context) int {
 		serviceName: serviceName,
 	})
 
-	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
+	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inbound, relay, readiness, in.recompute, in.capDone)
 }
 
 // bootInfra builds the pieces that must exist before any use case, in

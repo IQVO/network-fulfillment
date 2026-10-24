@@ -93,6 +93,10 @@ func newLiveGateway(c *apiClient, st Store, cfg LiveConfig) *LiveGateway {
 	return g
 }
 
+// Sites are the sites this gateway converges onto network nodes, in order: the
+// ones DeclareNodeProfiles declares a profile for (ADR 0027).
+func (g *LiveGateway) Sites() []string { return append([]string(nil), g.sites...) }
+
 // ---- nodes (Decision 7) ----
 
 // convergeNodes takes every configured site one step closer to having a node.

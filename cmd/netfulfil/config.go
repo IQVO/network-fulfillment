@@ -207,6 +207,30 @@ func sweepInterval() time.Duration {
 	return time.Minute
 }
 
+// defaultProfileInterval is how often the node profile is re-derived and, when
+// its content changed, declared (ADR 0027 §6). The profile changes with the
+// schedule and the cycle times, not with orders, so minutes are plenty.
+const defaultProfileInterval = 5 * time.Minute
+
+// profileInterval parses NETWORK_PROFILE_INTERVAL (ADR 0027 §6), a Go duration.
+// Unset yields defaultProfileInterval; "0" (or "0s") is valid and disables the
+// declaration worker, which is why this cannot reuse durationEnv (it treats a
+// zero duration as malformed). A negative or malformed value logs a warning and
+// yields the default, so a typo cannot silently switch the declaration off.
+// The bool is false when the worker is disabled.
+func profileInterval(logger *slog.Logger) (time.Duration, bool) {
+	raw := strings.TrimSpace(os.Getenv("NETWORK_PROFILE_INTERVAL"))
+	if raw == "" {
+		return defaultProfileInterval, true
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		logger.Warn("invalid NETWORK_PROFILE_INTERVAL, using the default", "value", raw, "default", defaultProfileInterval, "error", err)
+		return defaultProfileInterval, true
+	}
+	return d, d > 0
+}
+
 // defaultOrphanHoldGrace is how long past acknowledgeBy the orphaned-hold
 // sweep (ADR 0024) waits before it counts a hold as orphaned. It leaves room
 // for RejectOverdueOrders, which runs on the same ticker, to do its own work

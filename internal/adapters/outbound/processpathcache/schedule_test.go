@@ -1,10 +1,13 @@
 package processpathcache
 
 import (
+	"slices"
 	"testing"
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
+
+	"github.com/claudioed/network-fulfillment/internal/application/contract"
 )
 
 func TestSchedule_NoScheduleReturnsNotFound(t *testing.T) {
@@ -35,24 +38,24 @@ func TestSchedule_ReturnsTheWholeWeekWithNextOccurrencesAndPaths(t *testing.T) {
 	if got.Timezone != "America/Sao_Paulo" || len(got.Slots) != 2 {
 		t.Fatalf("schedule = %+v, want the zone and 2 slots", got)
 	}
-	weekday, saturday := got.Slots[0], got.Slots[1]
-	if weekday.LocalTime != "18:00" || len(weekday.Days) != 5 || weekday.Days[0] != time.Monday || weekday.Days[4] != time.Friday {
-		t.Errorf("weekday slot = %+v, want 18:00 on Monday..Friday", weekday)
+	checkSlot(t, "weekday", got.Slots[0], "18:00", []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday},
+		time.Date(2026, 10, 5, 18, 0, 0, 0, time.UTC), true, 45*time.Minute)
+	checkSlot(t, "saturday", got.Slots[1], "10:30", []time.Weekday{time.Saturday},
+		time.Date(2026, 10, 10, 10, 30, 0, 0, time.UTC), false, 0)
+}
+
+// checkSlot asserts a slot's time, days, next occurrence and its one eligible
+// path: whether that path's cycle time is known, and if so what it is.
+func checkSlot(t *testing.T, label string, s contract.ScheduleSlot, localTime string, days []time.Weekday, next time.Time, cycleKnown bool, cycle time.Duration) {
+	t.Helper()
+	if s.LocalTime != localTime || !slices.Equal(s.Days, days) {
+		t.Errorf("%s slot = %+v, want %s on %v", label, s, localTime, days)
 	}
-	if want := time.Date(2026, 10, 5, 18, 0, 0, 0, time.UTC); !weekday.NextAt.Equal(want) {
-		t.Errorf("weekday NextAt = %v, want %v", weekday.NextAt, want)
+	if !s.NextAt.Equal(next) {
+		t.Errorf("%s NextAt = %v, want %v", label, s.NextAt, next)
 	}
-	if len(weekday.Paths) != 1 || !weekday.Paths[0].CycleTimeKnown || weekday.Paths[0].CycleTimeP95 != 45*time.Minute {
-		t.Errorf("weekday paths = %+v, want path-1 with 45m", weekday.Paths)
-	}
-	if saturday.LocalTime != "10:30" || len(saturday.Days) != 1 || saturday.Days[0] != time.Saturday {
-		t.Errorf("saturday slot = %+v, want 10:30 on Saturday", saturday)
-	}
-	if want := time.Date(2026, 10, 10, 10, 30, 0, 0, time.UTC); !saturday.NextAt.Equal(want) {
-		t.Errorf("saturday NextAt = %v, want %v", saturday.NextAt, want)
-	}
-	if len(saturday.Paths) != 1 || saturday.Paths[0].CycleTimeKnown {
-		t.Errorf("saturday paths = %+v, want path-2 with no cycle time", saturday.Paths)
+	if len(s.Paths) != 1 || s.Paths[0].CycleTimeKnown != cycleKnown || s.Paths[0].CycleTimeP95 != cycle {
+		t.Errorf("%s paths = %+v, want one path with known=%v cycle=%v", label, s.Paths, cycleKnown, cycle)
 	}
 }
 

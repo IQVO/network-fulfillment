@@ -101,11 +101,15 @@ expect_refusal "an unsupported network mode" "config.networkMode" "${base[@]}" -
 live_cm="$(render "${live[@]}" --show-only templates/configmap.yaml)" || fail "live mode with its values must render"
 grep -q 'NETWORK_BASE_URL: "https://vendor.invalid"' <<<"$live_cm" || fail "live: NETWORK_BASE_URL is not rendered"
 grep -q 'NETWORK_VENDOR_ID: "V-1"' <<<"$live_cm" || fail "live: NETWORK_VENDOR_ID is not rendered"
+grep -q 'NETWORK_PROFILE_INTERVAL: "5m"' <<<"$live_cm" || fail "live: NETWORK_PROFILE_INTERVAL must default to 5m (ADR 0027)"
+# "0" switches the declaration off, so it must reach the process rather than be dropped as empty.
+zero_cm="$(render "${live[@]}" --set config.networkProfileInterval=0 --show-only templates/configmap.yaml)" || fail "live: networkProfileInterval=0 must render"
+grep -q 'NETWORK_PROFILE_INTERVAL: "0"' <<<"$zero_cm" || fail "live: NETWORK_PROFILE_INTERVAL=0 was not rendered"
 live_api="$(render "${live[@]}" --show-only templates/deployment.yaml)"
 [[ "$(env_value "$live_api" NETWORK_MODE)" == "live" ]] || fail "live: NETWORK_MODE must reach the api Deployment"
 if grep -qE '(^  |- name: )NETWORK_(CLIENT|REFRESH)' <<<"$(render "${live[@]}")"; then fail "live mode renders a credential variable that no code reads"; fi
 stub_cm="$(render --show-only templates/configmap.yaml)"
-if grep -qE '^  NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
+if grep -qE '^  NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE|PROFILE_INTERVAL):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
 
 # Tolerated: a legacy kafka.enabled: true, and the explicit real values.
 render --set kafka.enabled=true >/dev/null || fail "kafka.enabled=true (legacy) must still render"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -447,14 +448,10 @@ func TestLastDeclared_ReturnsWhatWasDeclaredInOurTermsAndNothingBefore(t *testin
 	if err != nil || !found {
 		t.Fatalf("LastDeclared: found=%v err=%v", found, err)
 	}
-	if got.SiteId != "FC-1" || got.Timezone != p.Timezone || got.HandlingTime != p.HandlingTime ||
-		got.ThroughputPerDay != p.ThroughputPerDay || got.Fingerprint != "fp-1" || len(got.Cutoffs) != 2 {
-		t.Fatalf("LastDeclared = %+v, want the profile that was declared", got)
-	}
-	if c := got.Cutoffs[0]; c.LocalTime != "18:00" || c.MaxOrders != 120 || len(c.Days) != 5 || c.Days[0] != 1 {
-		t.Errorf("first cutoff = %+v, want 18:00, ceiling 120 and Monday..Friday", c)
-	}
-	if c := got.Cutoffs[1]; c.MaxOrders != 0 {
-		t.Errorf("second cutoff = %+v, want an unknown ceiling to stay unknown (0)", c)
+	// Everything round-trips: the site, the zone, the handling time to the
+	// nanosecond, each cutoff with its days and ceiling (an unknown ceiling stays
+	// unknown, 0) and the fingerprint.
+	if !reflect.DeepEqual(got, p) {
+		t.Fatalf("LastDeclared = %+v\nwant the profile that was declared %+v", got, p)
 	}
 }

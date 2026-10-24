@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -120,29 +121,34 @@ func (f *profileFixture) onlyCall(t *testing.T) contract.NodeProfile {
 func TestDeclareNodeProfiles_DeclaresWhatTheCachesSupport(t *testing.T) {
 	f := newProfileFixture()
 
-	res := f.uc.Execute(context.Background())
+	f.uc.Execute(context.Background())
 
-	p := f.onlyCall(t)
-	if p.SiteId != "FC-1" || p.Timezone != "America/Sao_Paulo" {
-		t.Errorf("profile = %+v, want site FC-1 in America/Sao_Paulo", p)
-	}
-	if p.HandlingTime != 91*time.Minute {
-		t.Errorf("HandlingTime = %v, want 91m: the longest p95 (90m30s) rounded UP, never less", p.HandlingTime)
-	}
-	if len(p.Cutoffs) != 2 || p.Cutoffs[0].LocalTime != "10:00" || p.Cutoffs[1].LocalTime != "18:00" {
-		t.Fatalf("cutoffs = %+v, want 10:00 and 18:00 in time order", p.Cutoffs)
-	}
-	for _, c := range p.Cutoffs {
-		if c.MaxOrders != 50 || len(c.Days) != 5 || c.Days[0] != time.Monday || c.Days[4] != time.Friday {
-			t.Errorf("cutoff %s = %+v, want ceiling 50 (30+20) on Monday..Friday", c.LocalTime, c)
-		}
-	}
-	if p.ThroughputPerDay != 100 {
-		t.Errorf("ThroughputPerDay = %d, want 100: the busiest weekday's two slots of 50", p.ThroughputPerDay)
-	}
-	if p.Fingerprint == "" {
+	got := f.onlyCall(t)
+	if got.Fingerprint == "" {
 		t.Error("the profile carries no fingerprint")
 	}
+	got.Fingerprint = ""
+	want := contract.NodeProfile{
+		SiteId: "FC-1", Timezone: "America/Sao_Paulo",
+		// The longest p95 (90m30s) rounded UP, never less.
+		HandlingTime: 91 * time.Minute,
+		// The busiest weekday's two slots of 50 (P1 30 + P2 20).
+		ThroughputPerDay: 100,
+		Cutoffs: []contract.ProfileCutoff{
+			{LocalTime: "10:00", Days: workdays, MaxOrders: 50},
+			{LocalTime: "18:00", Days: workdays, MaxOrders: 50},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("profile = %+v\nwant      %+v", got, want)
+	}
+}
+
+func TestDeclareNodeProfiles_TheResultAndTheMetricsAreThatOfTheGateway(t *testing.T) {
+	f := newProfileFixture()
+
+	res := f.uc.Execute(context.Background())
+
 	if res.Outcomes[contract.ProfileConfirmed] != 1 {
 		t.Errorf("outcomes = %v, want one confirmed", res.Outcomes)
 	}

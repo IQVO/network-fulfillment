@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -10,6 +11,45 @@ import (
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 )
+
+// collected is what a manual reader saw: the counter's data points by outcome, the
+// gauge's by site, and each instrument's unit.
+type collected struct {
+	counts, revisions map[string]int64
+	units             map[string]string
+	monotonic         bool
+}
+
+func collect(ctx context.Context, t *testing.T, reader sdkmetric.Reader) collected {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	out := collected{counts: map[string]int64{}, revisions: map[string]int64{}, units: map[string]string{}}
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			out.units[md.Name] = md.Unit
+			switch data := md.Data.(type) {
+			case metricdata.Sum[int64]:
+				out.monotonic = data.IsMonotonic
+				for _, dp := range data.DataPoints {
+					out.counts[attrValue(dp.Attributes, "outcome")] = dp.Value
+				}
+			case metricdata.Gauge[int64]:
+				for _, dp := range data.DataPoints {
+					out.revisions[attrValue(dp.Attributes, "site")] = dp.Value
+				}
+			}
+		}
+	}
+	return out
+}
+
+func attrValue(set attribute.Set, key string) string {
+	v, _ := set.Value(attribute.Key(key))
+	return v.AsString()
+}
 
 // ADR 0027 §8: a counter by outcome and a revision gauge by site.
 func TestNodeProfileMetrics_CountsEachOutcomeAndTracksTheRevisionPerSite(t *testing.T) {
@@ -25,47 +65,25 @@ func TestNodeProfileMetrics_CountsEachOutcomeAndTracksTheRevisionPerSite(t *test
 	m.Declared(ctx, "FC-2", contract.ProfileResult{Outcome: contract.ProfileSkippedNoNode})
 	m.Declared(ctx, "FC-3", contract.ProfileResult{Outcome: contract.ProfileSkippedIncomplete})
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(ctx, &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
-	counts, revisions := map[string]int64{}, map[string]int64{}
-	units := map[string]string{}
-	for _, sm := range rm.ScopeMetrics {
-		for _, md := range sm.Metrics {
-			units[md.Name] = md.Unit
-			switch data := md.Data.(type) {
-			case metricdata.Sum[int64]:
-				if !data.IsMonotonic {
-					t.Fatal("the declarations instrument must be a counter")
-				}
-				for _, dp := range data.DataPoints {
-					v, _ := dp.Attributes.Value(attribute.Key("outcome"))
-					counts[v.AsString()] = dp.Value
-				}
-			case metricdata.Gauge[int64]:
-				for _, dp := range data.DataPoints {
-					v, _ := dp.Attributes.Value(attribute.Key("site"))
-					revisions[v.AsString()] = dp.Value
-				}
-			}
-		}
-	}
+	got := collect(ctx, t, reader)
 
 	wantCounts := map[string]int64{"confirmed": 2, "unchanged": 1, "skipped_no_node": 1, "skipped_incomplete": 1}
-	if len(counts) != len(wantCounts) {
-		t.Fatalf("outcomes = %v, want %v", counts, wantCounts)
+	if !maps.Equal(got.counts, wantCounts) {
+		t.Errorf("outcomes = %v, want %v", got.counts, wantCounts)
 	}
-	for k, v := range wantCounts {
-		if counts[k] != v {
-			t.Errorf("outcome %q = %d, want %d (all: %v)", k, counts[k], v, counts)
-		}
+	if !got.monotonic {
+		t.Error("the declarations instrument must be a counter")
 	}
-	if len(revisions) != 1 || revisions["FC-1"] != 2 {
-		t.Errorf("revision gauge = %v, want only FC-1 at 2 (a skipped site has no revision to report)", revisions)
+	// A skipped site has no revision to report.
+	if want := map[string]int64{"FC-1": 2}; !maps.Equal(got.revisions, want) {
+		t.Errorf("revision gauge = %v, want %v", got.revisions, want)
 	}
-	if units["network_fulfillment.node_profile.declarations"] != "{declaration}" || units["network_fulfillment.node_profile.revision"] != "{revision}" {
-		t.Errorf("units = %v", units)
+	wantUnits := map[string]string{
+		"network_fulfillment.node_profile.declarations": "{declaration}",
+		"network_fulfillment.node_profile.revision":     "{revision}",
+	}
+	if !maps.Equal(got.units, wantUnits) {
+		t.Errorf("units = %v, want %v", got.units, wantUnits)
 	}
 }
 

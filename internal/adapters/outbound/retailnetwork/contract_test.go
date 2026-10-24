@@ -442,26 +442,34 @@ func TestContract_EveryRouteTheClientCallsExistsWithItsRequiredParameters(t *tes
 		t.Fatalf("requests = %d, want 10", len(reqs))
 	}
 	for _, r := range reqs {
-		item := lookupPath(paths, r.Path)
-		if item == nil {
-			t.Errorf("%s %s is not a path of the spec", r.Method, r.Path)
-			continue
+		checkRouteAgainstSpec(t, paths, r)
+	}
+}
+
+// checkRouteAgainstSpec looks one request the client sent up in the spec: the
+// path and the method exist, a write carries the Idempotency-Key the spec lists,
+// and a read carries the vendorId it lists.
+func checkRouteAgainstSpec(t *testing.T, paths map[string]any, r seen) {
+	t.Helper()
+	item := lookupPath(paths, r.Path)
+	if item == nil {
+		t.Errorf("%s %s is not a path of the spec", r.Method, r.Path)
+		return
+	}
+	op, _ := item[strings.ToLower(r.Method)].(map[string]any)
+	if op == nil {
+		t.Errorf("%s %s: the spec has no such operation", r.Method, r.Path)
+		return
+	}
+	refs := parameterRefs(op)
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		if !slices.Contains(refs, "#/components/parameters/IdempotencyKey") || r.IdemKey == "" {
+			t.Errorf("%s %s: the spec requires Idempotency-Key (listed=%v) and the client sent %q", r.Method, r.Path, refs, r.IdemKey)
 		}
-		op, _ := item[strings.ToLower(r.Method)].(map[string]any)
-		if op == nil {
-			t.Errorf("%s %s: the spec has no such operation", r.Method, r.Path)
-			continue
-		}
-		refs := parameterRefs(op)
-		if r.Method == http.MethodPost || r.Method == http.MethodPut {
-			if !slices.Contains(refs, "#/components/parameters/IdempotencyKey") || r.IdemKey == "" {
-				t.Errorf("%s %s: the spec requires Idempotency-Key (listed=%v) and the client sent %q", r.Method, r.Path, refs, r.IdemKey)
-			}
-			continue
-		}
-		if !slices.Contains(refs, "#/components/parameters/VendorId") || !strings.Contains(r.RawQuery, "vendorId=V-WS") {
-			t.Errorf("GET %s: the spec requires vendorId (listed=%v) and the client sent %q", r.Path, refs, r.RawQuery)
-		}
+		return
+	}
+	if !slices.Contains(refs, "#/components/parameters/VendorId") || !strings.Contains(r.RawQuery, "vendorId=V-WS") {
+		t.Errorf("GET %s: the spec requires vendorId (listed=%v) and the client sent %q", r.Path, refs, r.RawQuery)
 	}
 }
 

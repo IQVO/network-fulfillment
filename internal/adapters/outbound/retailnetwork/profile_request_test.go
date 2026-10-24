@@ -46,7 +46,9 @@ type decodedProfileBody struct {
 	} `json:"throughputCap"`
 }
 
-func TestBuildNodeProfileBody_SaysWhatTheProfileSaysAndNothingElse(t *testing.T) {
+// sampleBody builds the sample profile's body at revision 3 and decodes it.
+func sampleBody(t *testing.T) (decodedProfileBody, []byte) {
+	t.Helper()
 	body, err := buildNodeProfileBody("V-WS", 3, sampleProfile())
 	if err != nil {
 		t.Fatalf("buildNodeProfileBody: %v", err)
@@ -55,6 +57,11 @@ func TestBuildNodeProfileBody_SaysWhatTheProfileSaysAndNothingElse(t *testing.T)
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, body)
 	}
+	return got, body
+}
+
+func TestBuildNodeProfileBody_CarriesTheIdentityTheHandlingTimeAndTheThroughput(t *testing.T) {
+	got, _ := sampleBody(t)
 
 	if got.VendorID != "V-WS" || got.ProfileRevision != 3 || got.Timezone != "America/Sao_Paulo" {
 		t.Errorf("identity = %q rev %d %q, want V-WS rev 3 America/Sao_Paulo", got.VendorID, got.ProfileRevision, got.Timezone)
@@ -65,6 +72,11 @@ func TestBuildNodeProfileBody_SaysWhatTheProfileSaysAndNothingElse(t *testing.T)
 	if got.ThroughputCap.Value != 600 || got.ThroughputCap.TimeUnit != "DAY" || got.ThroughputCap.Unit != "ORDER" {
 		t.Errorf("throughputCap = %+v, want 600 ORDER per DAY", got.ThroughputCap)
 	}
+}
+
+func TestBuildNodeProfileBody_CutoffsKeepTheirCeilingsAndAnUnknownOneIsOmitted(t *testing.T) {
+	got, _ := sampleBody(t)
+
 	if len(got.Cutoffs) != 2 {
 		t.Fatalf("cutoffs = %d, want 2", len(got.Cutoffs))
 	}
@@ -76,6 +88,10 @@ func TestBuildNodeProfileBody_SaysWhatTheProfileSaysAndNothingElse(t *testing.T)
 	if saturday.LocalTime != "10:30" || saturday.MaxOrders != nil || len(saturday.Days) != 1 || saturday.Days[0] != "saturday" {
 		t.Errorf("saturday cutoff = %+v, want 10:30 on saturday with maxOrders OMITTED (unknown is not zero)", saturday)
 	}
+}
+
+func TestBuildNodeProfileBody_SendsNothingTheFleetDoesNotHold(t *testing.T) {
+	_, body := sampleBody(t)
 
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal(body, &raw)

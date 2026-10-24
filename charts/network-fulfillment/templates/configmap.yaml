@@ -23,6 +23,10 @@ data:
   # Read only when NETWORK_MODE=live (ADR 0026 Decision 10), so rendered only then.
   NETWORK_BASE_URL: {{ .Values.config.networkBaseUrl | quote }}
   NETWORK_VENDOR_ID: {{ .Values.config.networkVendorId | quote }}
+
+  # How often the node profile is declared (ADR 0027); "0" disables it. Quoted so
+  # that "0" reaches the process instead of being dropped as empty.
+  NETWORK_PROFILE_INTERVAL: {{ .Values.config.networkProfileInterval | quote }}
 {{- if .Values.networkNodes.nodes }}
 
   # What the network needs to register each site that is not yet one of its
