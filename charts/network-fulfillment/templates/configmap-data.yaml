@@ -1,4 +1,4 @@
-{{- if or .Values.productTranslation.mappings .Values.stubDemand.demands }}
+{{- if include "network-fulfillment.hasDataFiles" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -25,5 +25,11 @@ data:
       ]}
     {{- end }}
     ]}
+{{- end }}
+{{- if and (eq (include "network-fulfillment.networkMode" .) "live") .Values.networkNodes.nodes }}
+  # Strict JSON (retailnetwork.LoadNodesFile); requireNetwork has already checked
+  # the keys. toPrettyJson keeps lat and lon numbers.
+  nodes.json: |
+    {{- dict "nodes" .Values.networkNodes.nodes | toPrettyJson | nindent 4 }}
 {{- end }}
 {{- end }}

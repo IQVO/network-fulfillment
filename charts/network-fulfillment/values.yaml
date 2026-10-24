@@ -198,18 +198,28 @@ config:
   # the e2e suite all work with nothing configured -- and none of them
   # can accidentally acknowledge a real retailer's order.
   #
-  # live REQUIRES credentials below AND networkBaseUrl, and the pod
-  # refuses to start without them. That refusal is deliberate: silently
-  # degrading to stub would leave a pod that looks healthy while quietly
-  # acknowledging nothing the network sent. (ADR 0009 §4 removed the
-  # earlier sandbox tier: the network has no separate sandbox environment
-  # of its own to target.)
+  # live (ADR 0026) calls the retail network's Vendor API. It REQUIRES
+  # networkBaseUrl and networkVendorId (the chart refuses to render without
+  # them, and the binary refuses to start without them). That refusal is
+  # deliberate: silently degrading to stub would leave a pod that looks
+  # healthy while quietly acknowledging nothing the network sent. Live takes
+  # NO credential: neither the fleet nor the Vendor API has one. It also
+  # needs the database (always required) because its identifier maps and
+  # submission ledger live in Postgres (migration 0006). Any value other than
+  # stub or live is refused at render, because the binary would read it as stub.
+  # (ADR 0009 §4 removed the earlier sandbox tier: the network has no separate
+  # sandbox environment of its own to target.)
   networkMode: "stub"
 
-  # The live-mode target (ADR 0009 §4). Only read when config.networkMode
-  # is "live" -- ignored, and not required, in stub mode. No default: a
-  # live deployment must name its own target explicitly.
+  # NETWORK_BASE_URL, the Vendor API's base URL (ADR 0026). Only read when
+  # config.networkMode is "live"; rendered only then. No default: a live
+  # deployment must name its own target explicitly.
   networkBaseUrl: ""
+
+  # NETWORK_VENDOR_ID, the vendor account the service acts as (ADR 0026). The
+  # account must already exist on the network; this service never creates it.
+  # Only read when config.networkMode is "live"; rendered only then. No default.
+  networkVendorId: ""
 
   # order-management's in-cluster REST base URL. The one upstream this
   # context calls; the default matches the fleet's service naming.
@@ -227,20 +237,12 @@ config:
   # this context's own netfulfil_mfe remote dev port (web/vite.config.ts).
   corsAllowedOrigins: "http://localhost:5173,http://localhost:5188"
 
-# External-network credentials. Used ONLY when config.networkMode is
-# "live" -- in stub mode nothing here is read and no Secret is created,
-# which is what keeps local installs credential-free.
-#
-# Set existingSecret to point at a Secret you manage yourself (its keys
-# must be named NETWORK_CLIENT_ID / NETWORK_CLIENT_SECRET /
-# NETWORK_REFRESH_TOKEN). Prefer that over the inline values below for
-# anything that is not a throwaway sandbox: inline values land in the
-# release's stored manifest in plain text.
-credentials:
-  existingSecret: ""
-  clientId: ""
-  clientSecret: ""
-  refreshToken: ""
+# There is no credentials block: the live adapter (ADR 0026) authenticates with
+# nothing, and the only Secret this chart renders or references is the
+# database one below. NETWORK_CLIENT_ID, NETWORK_CLIENT_SECRET and
+# NETWORK_REFRESH_TOKEN were mounted for an adapter that never existed and no
+# code reads them; a values file that still sets credentials.* has those keys
+# ignored.
 
 # The Anti-Corruption Layer's dictionary: the network's product identifier
 # to our SKU, rendered into a ConfigMap and mounted as a file.
@@ -259,6 +261,30 @@ productTranslation:
   # - networkProductId: ASIN-XYZ123
   #   sku: sku-1
 
+# The node definitions the live adapter registers on the network for any site
+# that is not yet one of its nodes (ADR 0026 Decision 7), rendered into the data
+# ConfigMap as nodes.json and read from NETWORK_NODES_FILE.
+#
+# Used ONLY when config.networkMode is "live"; ignored in stub mode. OPTIONAL: a
+# site whose vendorNodeCode is already a node on the network is adopted without
+# a definition. A site with neither is logged at every poll and gets no demand.
+# The keys are the file's strict schema (the chart refuses a typo or a missing
+# required key): siteCode, nodeType, regionId, timezone, postalCode and
+# countryCode are required; subtype is optional; lat and lon are optional and go
+# together. The values are the network's to judge. The service reads the file
+# once, at boot: change it, then roll the pod.
+networkNodes:
+  nodes: []
+  # - siteCode: site-1
+  #   nodeType: FULFILLMENT_CENTER
+  #   subtype: SORTABLE
+  #   regionId: SP
+  #   timezone: America/Sao_Paulo
+  #   postalCode: 01000-000
+  #   countryCode: BR
+  #   lat: -23.55
+  #   lon: -46.63
+
 # Declarative demand for a STUB run: the same pattern as this fleet's
 # PATH_CATALOGUE_FILE, and the reason this context needs no write endpoint.
 #
@@ -267,9 +293,10 @@ productTranslation:
 # order becomes instantly infeasible, which reads like a promise bug rather
 # than an expired fixture.
 #
-# Ignored unless config.networkMode is "stub" — the binary REFUSES to boot
-# if a seed file is set against a real gateway, because seeded demand would
-# never be delivered and somebody would be waiting for it.
+# For config.networkMode "stub" only. The binary REFUSES to boot if a seed
+# file is set against the live gateway, because seeded demand would never be
+# delivered and somebody would be waiting for it, so the chart refuses to
+# render live mode with demands set.
 stubDemand:
   demands: []
   # - networkRef: po-4711
