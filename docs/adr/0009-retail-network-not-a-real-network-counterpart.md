@@ -1,6 +1,6 @@
 ---
-id: 0009-retail-network-not-amazon-counterpart
-slug: /adr/0009-retail-network-not-amazon-counterpart
+id: 0009-retail-network-not-a-real-network-counterpart
+slug: /adr/0009-retail-network-not-a-real-network-counterpart
 title: "9. The counterpart is retail-network, our own ecosystem service — not a real external network's vendor platform API"
 sidebar_label: "9. retail-network, not the real network"
 sidebar_position: 9
@@ -45,7 +45,7 @@ this record corrects, is *which* network sits on the other side of that
 boundary.
 
 A prior planning pass
-(`2026-09-25_224823-amazon-network-fulfillment-readiness.md`) took ADR
+(`the readiness review note`) took ADR
 0001 at face value and scoped the next phase as a real integration
 against the actual retailer's vendor platform API: real vendor
 credentials, a real sandbox environment, real product identifiers. The
