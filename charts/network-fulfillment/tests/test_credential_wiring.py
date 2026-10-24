@@ -37,6 +37,9 @@ LIVE = [
     "--set", "config.networkMode=live",
     "--set", "config.networkBaseUrl=https://vendor.invalid",
     "--set", "config.networkVendorId=V-1",
+    "--set", "config.inboundReceivingUrl=http://inbound-receiving.invalid",
+    "--set", "config.productMasterUrl=http://product-master.invalid",
+    "--set", "config.inboundReceiptConsumerGroup=network-fulfillment-inbound-receipts",
 ]
 CREDENTIAL_ENV_PREFIXES = ("NETWORK_CLIENT", "NETWORK_REFRESH")
 
@@ -195,7 +198,10 @@ def check_unknown_mode_is_refused() -> None:
         assert "config.networkMode" in stderr and "stub" in stderr, (
             f"networkMode={mode!r} was refused without explaining the allowed values. stderr was:\n{stderr}")
     docs = render(["--set", "config.networkMode=LIVE ", "--set", "config.networkBaseUrl=https://vendor.invalid",
-                   "--set", "config.networkVendorId=V-1"])
+                   "--set", "config.networkVendorId=V-1",
+                   "--set", "config.inboundReceivingUrl=http://inbound-receiving.invalid",
+                   "--set", "config.productMasterUrl=http://product-master.invalid",
+                   "--set", "config.inboundReceiptConsumerGroup=network-fulfillment-inbound-receipts"])
     assert docs, "a case/whitespace variant of live must render like the binary reads it"
     print("PASS: a mode other than stub or live is refused; LIVE (any case) is live")
 

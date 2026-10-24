@@ -221,6 +221,25 @@ config:
   # Only read when config.networkMode is "live"; rendered only then. No default.
   networkVendorId: ""
 
+  # INBOUND_RECEIVING_URL and PRODUCT_MASTER_URL, the REST base URLs of the two
+  # fleet contexts the inbound loop calls (ADR 0028): it registers an ASN for
+  # each seller shipment and resolves each GTIN to a SKU. Only read when
+  # config.networkMode is "live"; rendered only then; the chart and the binary
+  # both refuse live without them. No default: a deployment names its own.
+  inboundReceivingUrl: ""
+  productMasterUrl: ""
+
+  # INBOUND_INTAKE_INTERVAL: how often the inbound loop polls shipments and
+  # retries the ones that could not be registered yet (ADR 0028). Live only.
+  inboundIntakeInterval: "30s"
+
+  # INBOUND_RECEIPT_CONSUMER_GROUP: this service's consumer group on
+  # inbound-receiving's events topic, through which closed receipts (cartons and
+  # discrepancies included) come back to be reported to the network (ADR 0028).
+  # Durable and unique to this service. Live only; the chart and the binary both
+  # refuse live without it. No default: warehouse-infra names it.
+  inboundReceiptConsumerGroup: ""
+
   # order-management's in-cluster REST base URL. The one upstream this
   # context calls; the default matches the fleet's service naming.
   orderManagementUrl: "http://order-management.warehouse.svc.cluster.local"
