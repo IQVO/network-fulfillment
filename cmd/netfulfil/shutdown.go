@@ -98,15 +98,21 @@ type namedDone struct {
 }
 
 // watchDeaths reports, on the returned channel, the name of every watched
-// goroutine that finishes while ctx is still live — that is, one that died
-// on its own instead of being stopped by shutdown.
+// goroutine that finishes while the context IT runs on is still live — that
+// is, one that died on its own instead of being stopped by shutdown.
+//
+// The verdict comes from the goroutine's own context (namedDone.ctx), never
+// from ctx: the cache consumers obey the process context while ctx is a
+// context derived from it, and a cancellation reaches them one after the
+// other, so ctx can still read live after a consumer has already returned
+// because it was told to stop. ctx only bounds the watchers' own lifetime.
 func watchDeaths(ctx context.Context, watched []namedDone) <-chan string {
 	died := make(chan string, len(watched))
 	for _, w := range watched {
 		go func() {
 			select {
 			case <-w.done:
-				if ctx.Err() == nil {
+				if w.ctx.Err() == nil {
 					died <- w.name
 				}
 			case <-ctx.Done():

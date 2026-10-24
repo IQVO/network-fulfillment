@@ -132,11 +132,19 @@ type cacheConsumer struct {
 
 // runCacheConsumer runs one cache consumer in a goroutine and returns the
 // handle serve() supervises.
+//
+// A stop is silent only when the consumer's own context asked for it (Run
+// returns nil, or a context error, once ctx is done). Anything else is logged
+// with its error, including a context.Canceled returned while ctx is still
+// live: that one comes from inside the Kafka reader, not from us, and it is
+// the reason the process is about to exit 1.
 func runCacheConsumer(ctx context.Context, logger *slog.Logger, stoppedMsg string, run func(context.Context) error) cacheConsumer {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		err := run(ctx)
+		askedToStop := ctx.Err() != nil && (err == nil || errors.Is(err, context.Canceled))
+		if !askedToStop {
 			logger.Error(stoppedMsg, "err", err)
 		}
 	}()
