@@ -197,13 +197,19 @@ func joinErrors(errs []submissionErrorDTO) string {
 // A definitive refusal (definitiveRefusals) is recorded as FAILURE once and
 // returned as ErrWriteRefused every time after.
 func (g *LiveGateway) send(ctx context.Context, row Submission, op string, path []string) (Submission, error) {
+	return g.sendWith(ctx, row, http.MethodPost, op, path)
+}
+
+// sendWith is send for a write the Vendor API takes with another method (the
+// node profile is a PUT).
+func (g *LiveGateway) sendWith(ctx context.Context, row Submission, method, op string, path []string) (Submission, error) {
 	if row.Status == StatusFailure && row.TransactionID == "" {
 		return row, fmt.Errorf("%w earlier: %s", ErrWriteRefused, row.Errors)
 	}
 	if row.TransactionID != "" || row.Status.Terminal() {
 		return row, nil
 	}
-	txID, err := g.client.postAsync(ctx, op, path, row.IdempotencyKey, row.Body)
+	txID, err := g.client.writeAsync(ctx, method, op, path, row.IdempotencyKey, row.Body)
 	if err != nil {
 		return row, g.refuse(ctx, row, err)
 	}
@@ -589,13 +595,7 @@ func (g *LiveGateway) recordConfirmationOutcome(ctx context.Context, ref shared.
 		"networkRef", ref, "errors", failed.Errors)
 }
 
-// ---- the supply loop's seams (ADR 0027) ----
-
-// DeclareNodeProfile is declared here so the gateway satisfies the port; the
-// implementation follows in profile.go. (placeholder until then)
-func (g *LiveGateway) DeclareNodeProfile(_ context.Context, _ contract.NodeProfile) (contract.ProfileResult, error) {
-	return contract.ProfileResult{Outcome: contract.ProfileUnchanged}, nil
-}
+// ---- the supply loop's seam still open (ADR 0027, part 2) ----
 
 // SubmitAvailability is a documented, non-failing no-op: the inventory feed
 // belongs to part 2 of the supply loop, ADR 0027. It logs once at Info, then at
