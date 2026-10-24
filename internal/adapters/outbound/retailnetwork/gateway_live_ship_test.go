@@ -302,16 +302,13 @@ func TestLive_ATransactionTheNetworkFailsForAConfirmationIsRecordedAndLoggedNotT
 	}
 }
 
-// ---- the supply loop's seams (ADR 0027) ----
+// ---- the supply loop's seam still open (ADR 0027, part 2) ----
 
-func TestLive_TheSupplyLoopMethodsAreNonFailingNoOpsThatLogOnceAtInfoNamingADR0027(t *testing.T) {
+func TestLive_SubmitAvailabilityIsANonFailingNoOpThatLogsOnceAtInfoNamingADR0027(t *testing.T) {
 	f := readyFixture(t, nil)
 	ctx := context.Background()
 
 	for range 3 {
-		if err := f.g.DeclareCapability(ctx, contract.CapabilityDeclaration{SiteId: "FC-1", SKU: "SKU-1", AdvertisedQuantity: 5}); err != nil {
-			t.Fatalf("DeclareCapability: %v", err)
-		}
 		if err := f.g.SubmitAvailability(ctx, contract.AvailabilityUpdate{SiteId: "FC-1", SKU: "SKU-1", Quantity: 5}); err != nil {
 			t.Fatalf("SubmitAvailability: %v", err)
 		}
@@ -326,7 +323,7 @@ func TestLive_TheSupplyLoopMethodsAreNonFailingNoOpsThatLogOnceAtInfoNamingADR00
 			info = append(info, line)
 		}
 	}
-	if len(info) != 2 || !strings.Contains(info[0], "DeclareCapability") || !strings.Contains(info[1], "SubmitAvailability") {
-		t.Fatalf("INFO lines naming ADR 0027 = %q, want exactly one per method over three calls each", info)
+	if len(info) != 1 || !strings.Contains(info[0], "SubmitAvailability") {
+		t.Fatalf("INFO lines naming ADR 0027 = %q, want exactly one over three calls", info)
 	}
 }

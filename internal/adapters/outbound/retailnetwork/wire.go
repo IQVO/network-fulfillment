@@ -66,6 +66,9 @@ type vendorNodeDTO struct {
 	VendorNodeCode string `json:"vendorNodeCode"`
 	NodeType       string `json:"nodeType"`
 	Status         string `json:"status"`
+	// ProfileRevision is the revision of the latest profile the network knows;
+	// absent (0) before the first one (ADR 0027 §4, stale recovery).
+	ProfileRevision int `json:"profileRevision,omitempty"`
 }
 
 type vendorNodeListDTO struct {
@@ -131,8 +134,56 @@ type nodeRegistrationRequestDTO struct {
 
 // ---- the vocabulary the adapter sends and understands ----
 
+// dayHoursDTO is the local opening interval of one weekday.
+type dayHoursDTO struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+type cutoffSlotDTO struct {
+	LocalTime string   `json:"localTime"`
+	MaxOrders int      `json:"maxOrders,omitempty"`
+	Days      []string `json:"days,omitempty"`
+}
+
+type throughputCapDTO struct {
+	Value    int    `json:"value"`
+	TimeUnit string `json:"timeUnit"`
+	Unit     string `json:"unit"`
+}
+
+// nodeProfileRequestDTO is the profile body (ADR 0027 §3): holidays and
+// sortDwellMinutes are optional and left out, because the fleet holds neither.
+// OperatingHoursByDay is a map so that its encoding is sorted by key and a body
+// is byte-for-byte deterministic.
+type nodeProfileRequestDTO struct {
+	VendorID            string                 `json:"vendorId"`
+	ProfileRevision     int                    `json:"profileRevision"`
+	Timezone            string                 `json:"timezone"`
+	OperatingHoursByDay map[string]dayHoursDTO `json:"operatingHoursByDay"`
+	HandlingTimeMinutes int                    `json:"handlingTimeMinutes"`
+	Cutoffs             []cutoffSlotDTO        `json:"cutoffs"`
+	ThroughputCap       throughputCapDTO       `json:"throughputCap"`
+}
+
 const (
 	stateIssued = "ISSUED"
+
+	timeUnitDay = "DAY"
+	unitOrder   = "ORDER"
+
+	// The adapter declares a day it hands over on as open all day: the fleet
+	// holds no hours of its own, so the cutoffs and the handling time carry the
+	// constraint (ADR 0027 §3).
+	openAllDayStart = "00:00"
+	openAllDayEnd   = "23:59"
+
+	// errStaleProfileRevision is the code of a profile transaction that failed
+	// because the network already holds a revision at or above ours.
+	errStaleProfileRevision = "ErrStaleProfileRevision"
+	// The codes after which the same content can never succeed.
+	errIncompleteOperationalProfile = "ErrIncompleteOperationalProfile"
+	errCutoffOutsideOperatingHours  = "ErrCutoffOutsideOperatingHours"
 
 	decisionAccept = "ACCEPT"
 	decisionReject = "REJECT"

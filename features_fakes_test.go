@@ -215,6 +215,11 @@ func (p *fakePathCap) NextCutoff(_ shared.SiteId, after time.Time) (contract.Nex
 	return contract.NextCutoff{CutoffAt: after.Add(p.cutoffIn), Paths: p.paths}, true
 }
 
+// Schedule: these scenarios never declare a node profile.
+func (p *fakePathCap) Schedule(shared.SiteId, time.Time) (contract.CutoffSchedule, bool) {
+	return contract.CutoffSchedule{}, false
+}
+
 // fakeCapacity is wes-work-planning's remaining-admission-capacity figure per
 // path. A path with no entry is "never observed" (known=false).
 type fakeCapacity struct{ units map[string]int }

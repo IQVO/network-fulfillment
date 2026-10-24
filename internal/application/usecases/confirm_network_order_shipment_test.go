@@ -193,8 +193,8 @@ func (g errSubmitConfirmationGateway) SubmitShipmentConfirmation(context.Context
 	return g.err
 }
 
-func (errSubmitConfirmationGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
-	return nil
+func (errSubmitConfirmationGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
+	return contract.ProfileResult{}, nil
 }
 
 func (errSubmitConfirmationGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {

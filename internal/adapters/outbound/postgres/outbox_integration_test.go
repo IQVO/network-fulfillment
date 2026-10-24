@@ -301,8 +301,8 @@ func (stubGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, con
 func (stubGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
 	return nil
 }
-func (stubGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
-	return nil
+func (stubGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
+	return contract.ProfileResult{}, nil
 }
 func (stubGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {
 	return nil, nil

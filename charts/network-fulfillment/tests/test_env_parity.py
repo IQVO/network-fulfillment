@@ -23,8 +23,8 @@ Three assertions, for a stub render and for a live render:
      needed) through extraEnv. A new variable in the binary that is neither
      rendered nor listed there fails the test; that is the point.
   3. The mode-specific variables appear only in their mode: NETWORK_BASE_URL,
-     NETWORK_VENDOR_ID and NETWORK_NODES_FILE only in live, NETWORK_SEED_FILE only
-     in stub (the binary refuses it against the live gateway).
+     NETWORK_VENDOR_ID, NETWORK_NODES_FILE and NETWORK_PROFILE_INTERVAL only in live,
+     NETWORK_SEED_FILE only in stub (the binary refuses it against the live gateway).
 
 Run: python3 charts/network-fulfillment/tests/test_env_parity.py
 """
@@ -54,7 +54,7 @@ EXTRA_ENV_ONLY = {
     "SITE_ID",
 }
 
-LIVE_ONLY = {"NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE",
+LIVE_ONLY = {"NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE", "NETWORK_PROFILE_INTERVAL",
              "INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL", "INBOUND_INTAKE_INTERVAL",
              "INBOUND_RECEIPT_CONSUMER_GROUP"}
 STUB_ONLY = {"NETWORK_SEED_FILE"}

@@ -146,6 +146,18 @@ What exists today:
   skipped with a warning (ADR 0026, As built 1). Operations:
   [live adapter runbook](docs/operations/runbook.md#the-live-retail-network-adapter).
   Mode `stub` stays the default everywhere, including the cluster.
+- **Live retail-network adapter: the node profile** (ADR 0027 part 1). In live
+  mode a worker derives each site's operational profile (cutoffs, handling time,
+  throughput) only from the local caches (the CPT schedule and cycle-time p95 of
+  process-path-management, the remaining capacity of wes-work-planning) and
+  declares it with `PUT /vendor/nodes/{nodeId}/profile` under a `profileRevision`
+  this service owns: persisted before the call (migration 0010,
+  `network_node_profiles`), bumped only when the content changes and never
+  lowered. A profile the caches cannot support is skipped with a logged reason,
+  never guessed. `NETWORK_PROFILE_INTERVAL` (default `5m`, `0` disables) sets the
+  cadence; metrics `network_fulfillment.node_profile.declarations` and
+  `.revision`. Operations:
+  [node profile runbook](docs/operations/runbook.md#the-node-profile).
 - **Curated ACL files** — `PRODUCT_TRANSLATION_FILE` (network product id ->
   SKU; without it every order is rejected as untranslatable, and a warning is
   logged at startup; ADR 0013), `NETWORK_SEED_FILE` (stub demand; refuses
@@ -204,10 +216,12 @@ What exists today:
 
 Not built yet:
 
-- **Submitting `CapabilityOffer` outward (the supply loop, ADR 0027).**
-  `NetworkGateway.DeclareCapability` and `SubmitAvailability` exist on the port
-  and in the stub, and are logged no-ops in the live gateway (ADR 0026), but no
-  use case calls them yet. ADR 0027 is reserved for this and is not written.
+- **The inventory feed (the supply loop, ADR 0027 part 2).** The node profile is
+  built (above); `CapabilityOffer`s are still not submitted outward.
+  `NetworkGateway.SubmitAvailability` stays on the port and in the stub, and is a
+  logged no-op in the live gateway, and no use case calls it. ADR 0027 designs the
+  feed (one full feed per site, listings from the product dictionary) and part 2
+  builds it.
 - **A `PackageManifested`-driven shipment confirmation.** ADR 0014 chose
   the explicit endpoint until a persisted correlation exists.
 - **A real package count.** The label is requested for exactly one package.
@@ -349,6 +363,7 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `NETWORK_BASE_URL` | unset | Vendor API base URL; required when `NETWORK_MODE=live`, ignored otherwise |
 | `NETWORK_VENDOR_ID` | unset | vendor account the service acts as; required when `NETWORK_MODE=live`, ignored otherwise |
 | `NETWORK_NODES_FILE` | unset | optional, live only: node definitions to register on the network (strict JSON) |
+| `NETWORK_PROFILE_INTERVAL` | `5m` | live only: how often the node profile is derived and, if its content changed, declared (ADR 0027); `0` disables it |
 | `INBOUND_RECEIVING_URL` | unset | inbound-receiving base URL (`POST /asns`); required when `NETWORK_MODE=live` (ADR 0028), ignored otherwise |
 | `PRODUCT_MASTER_URL` | unset | product-master base URL (`GET /gtins/{gtin}`); required when `NETWORK_MODE=live`, ignored otherwise |
 | `INBOUND_INTAKE_INTERVAL` | `30s` | Go duration; cadence of the inbound intake and receipt-return loops (live only) |

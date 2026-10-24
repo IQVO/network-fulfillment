@@ -20,13 +20,14 @@ import (
 // ---- an in-memory Store with the semantics of PGStore ----
 
 type memStore struct {
-	mu     sync.Mutex
-	nodes  map[string]string
-	orders map[shared.NetworkRef]PurchaseOrder
-	byPo   map[string]shared.NetworkRef
-	subs   map[string]Submission
-	labels map[shared.NetworkRef][]Label
-	minted int
+	mu       sync.Mutex
+	nodes    map[string]string
+	orders   map[shared.NetworkRef]PurchaseOrder
+	byPo     map[string]shared.NetworkRef
+	subs     map[string]Submission
+	labels   map[shared.NetworkRef][]Label
+	profiles map[string]NodeProfileState
+	minted   int
 }
 
 var _ Store = (*memStore)(nil)
@@ -34,7 +35,7 @@ var _ Store = (*memStore)(nil)
 func newMemStore() *memStore {
 	return &memStore{
 		nodes: map[string]string{}, orders: map[shared.NetworkRef]PurchaseOrder{}, byPo: map[string]shared.NetworkRef{},
-		subs: map[string]Submission{}, labels: map[shared.NetworkRef][]Label{},
+		subs: map[string]Submission{}, labels: map[shared.NetworkRef][]Label{}, profiles: map[string]NodeProfileState{},
 	}
 }
 
@@ -162,6 +163,29 @@ func (s *memStore) row(kind SubmissionKind, subject string) (Submission, bool) {
 	return sub, ok
 }
 
+func (s *memStore) NodeProfileState(_ context.Context, site string) (NodeProfileState, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.profiles[site]
+	return st, ok, nil
+}
+
+// AdvanceNodeProfile has PGStore's guard: the pair only ever grows, a site with
+// no node is refused.
+func (s *memStore) AdvanceNodeProfile(_ context.Context, st NodeProfileState) (NodeProfileState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.nodes[st.SiteCode]; !ok {
+		return NodeProfileState{}, fmt.Errorf("%w: site %q has no node", ErrMappingConflict, st.SiteCode)
+	}
+	cur, ok := s.profiles[st.SiteCode]
+	if !ok || st.Revision > cur.Revision || (st.Revision == cur.Revision && st.Attempt > cur.Attempt) {
+		s.profiles[st.SiteCode] = st
+		return st, nil
+	}
+	return cur, nil
+}
+
 // ---- a stateful fake Vendor API on top of client_test.go's newFake ----
 
 type vendorSim struct {
@@ -178,8 +202,21 @@ type vendorSim struct {
 	outcome string         // status a new transaction ends with
 	outErrs []submissionErrorDTO
 	seq     int
+
+	// The node profile, as node-topology treats it (ADR 0027): a revision that is
+	// not above the one the network holds fails the transaction with
+	// ErrStaleProfileRevision.
+	profileCalls map[string]profileCall // transaction id -> the declaration it carries
+	networkRev   map[string]int         // node id -> the revision the network holds
+	hideRevision bool                   // the node view shows no profileRevision
+
 	// inject runs before routing; true means it answered. Called without the lock.
 	inject func(w http.ResponseWriter, r *http.Request) bool
+}
+
+type profileCall struct {
+	node     string
+	revision int
 }
 
 func newVendorSim() *vendorSim {
@@ -187,6 +224,7 @@ func newVendorSim() *vendorSim {
 		pages: map[string]purchaseOrderPageDTO{}, orders: map[string]purchaseOrderDTO{}, txs: map[string]*transactionDTO{},
 		bodies: map[string]string{}, txByKey: map[string]string{}, codes: map[string]string{}, answers: map[string]labelResponseDTO{},
 		created: map[string]int{}, outcome: txSuccess,
+		profileCalls: map[string]profileCall{}, networkRev: map[string]int{},
 	}
 }
 
@@ -198,10 +236,18 @@ func (v *vendorSim) handle(_ int, w http.ResponseWriter, r *http.Request) {
 	defer v.mu.Unlock()
 	path := r.URL.Path
 	switch {
-	case r.Method == http.MethodPost:
+	case r.Method == http.MethodPost || r.Method == http.MethodPut:
 		v.write(w, r)
 	case path == "/vendor/nodes":
-		ok(w, vendorNodeListDTO{Nodes: v.nodes})
+		ok(w, vendorNodeListDTO{Nodes: v.visibleNodesLocked()})
+	case strings.HasPrefix(path, "/vendor/nodes/"):
+		for _, n := range v.visibleNodesLocked() {
+			if n.NodeID == strings.TrimPrefix(path, "/vendor/nodes/") {
+				ok(w, n)
+				return
+			}
+		}
+		problem(w, http.StatusNotFound, "not-found")
 	case path == "/vendor/purchase-orders":
 		ok(w, v.pages[r.URL.Query().Get("nextToken")])
 	case strings.HasPrefix(path, "/vendor/purchase-orders/"):
@@ -224,14 +270,21 @@ func (v *vendorSim) handle(_ int, w http.ResponseWriter, r *http.Request) {
 }
 
 func txKind(path string) string {
-	switch path {
-	case "/vendor/nodes":
+	switch {
+	case path == "/vendor/nodes":
 		return "NODE_REGISTRATION"
-	case "/vendor/acknowledgements":
+	case strings.HasPrefix(path, "/vendor/nodes/") && strings.HasSuffix(path, "/profile"):
+		return "NODE_PROFILE"
+	case path == "/vendor/acknowledgements":
 		return "ACKNOWLEDGEMENT"
 	default:
 		return "SHIPMENT_CONFIRMATION"
 	}
+}
+
+// nodeOfProfilePath is the node id of /vendor/nodes/<id>/profile.
+func nodeOfProfilePath(path string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(path, "/vendor/nodes/"), "/profile")
 }
 
 // write handles a POST with the network's idempotency rules: the same key and
@@ -244,8 +297,9 @@ func (v *vendorSim) write(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		PoNumber string `json:"poNumber"`
-		Packages []struct {
+		PoNumber        string `json:"poNumber"`
+		ProfileRevision int    `json:"profileRevision"`
+		Packages        []struct {
 			PackageNo int `json:"packageNo"`
 		} `json:"packages"`
 	}
@@ -267,6 +321,9 @@ func (v *vendorSim) write(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.Unmarshal(body, &node)
 		v.codes[id] = node.VendorNodeCode
+		if tx.Kind == "NODE_PROFILE" {
+			v.profileCalls[id] = profileCall{node: nodeOfProfilePath(r.URL.Path), revision: req.ProfileRevision}
+		}
 		v.txs[id] = tx
 		v.settleLocked(tx, v.outcome, v.outErrs)
 	}
@@ -289,13 +346,56 @@ func (v *vendorSim) writeLabels(w http.ResponseWriter, slot, body, po string, pa
 }
 
 // settleLocked moves a transaction to status. A node registration that succeeds
-// gets its nodeId, and the node appears in the vendor's listing.
+// gets its nodeId, and the node appears in the vendor's listing. A profile
+// declaration that would succeed is judged the way node-topology judges it: a
+// revision not above the one the network holds fails with ErrStaleProfileRevision.
 func (v *vendorSim) settleLocked(tx *transactionDTO, status string, errs []submissionErrorDTO) {
 	tx.Status, tx.Errors = status, errs
 	if tx.Kind == "NODE_REGISTRATION" && status == txSuccess {
 		tx.NodeID = fmt.Sprintf("N-%d", 100+len(v.nodes))
 		v.nodes = append(v.nodes, vendorNodeDTO{NodeID: tx.NodeID, VendorID: "V-WS", VendorNodeCode: v.codes[tx.TransactionID], NodeType: "FULFILLMENT_CENTER", Status: "ACTIVE"})
 	}
+	if tx.Kind == "NODE_PROFILE" && status == txSuccess {
+		call := v.profileCalls[tx.TransactionID]
+		if held := v.networkRev[call.node]; call.revision <= held {
+			tx.Status = txFailure
+			tx.Errors = []submissionErrorDTO{{Code: errStaleProfileRevision, Message: fmt.Sprintf("revision %d is not newer than %d", call.revision, held), Path: "$.profileRevision"}}
+			return
+		}
+		v.networkRev[call.node] = call.revision
+	}
+}
+
+// visibleNodesLocked is the node listing, each node with the profile revision
+// the network holds for it (unless the view is set to show none).
+func (v *vendorSim) visibleNodesLocked() []vendorNodeDTO {
+	out := append([]vendorNodeDTO(nil), v.nodes...)
+	for i := range out {
+		if !v.hideRevision {
+			out[i].ProfileRevision = v.networkRev[out[i].NodeID]
+		}
+	}
+	return out
+}
+
+// holdRevision makes the network already hold revision rev for a node, as after
+// a wiped table on our side.
+func (v *vendorSim) holdRevision(nodeID string, rev int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.networkRev[nodeID] = rev
+}
+
+func (v *vendorSim) heldRevision(nodeID string) int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.networkRev[nodeID]
+}
+
+func (v *vendorSim) hideRevisions(hide bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.hideRevision = hide
 }
 
 func (v *vendorSim) setOutcome(status string, errs ...submissionErrorDTO) {

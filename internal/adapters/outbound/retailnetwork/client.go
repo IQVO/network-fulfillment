@@ -334,14 +334,32 @@ func (c *apiClient) listNodes(ctx context.Context) ([]vendorNodeDTO, error) {
 // postAsync sends an asynchronous write (202 {transactionId}) with its
 // idempotency key. body is sent exactly as given.
 func (c *apiClient) postAsync(ctx context.Context, op string, path []string, idemKey string, body []byte) (string, error) {
+	return c.writeAsync(ctx, http.MethodPost, op, path, idemKey, body)
+}
+
+// putAsync is postAsync for the writes the Vendor API takes as a PUT (the node
+// profile, ADR 0027).
+func (c *apiClient) putAsync(ctx context.Context, op string, path []string, idemKey string, body []byte) (string, error) {
+	return c.writeAsync(ctx, http.MethodPut, op, path, idemKey, body)
+}
+
+func (c *apiClient) writeAsync(ctx context.Context, method, op string, path []string, idemKey string, body []byte) (string, error) {
 	var accepted transactionAcceptedDTO
-	if _, err := c.call(ctx, request{op: op, method: http.MethodPost, path: path, idemKey: idemKey, body: body}, &accepted); err != nil {
+	if _, err := c.call(ctx, request{op: op, method: method, path: path, idemKey: idemKey, body: body}, &accepted); err != nil {
 		return "", err
 	}
 	if accepted.TransactionID == "" {
 		return "", fmt.Errorf("retail-network: %s: the answer carries no transactionId", op)
 	}
 	return accepted.TransactionID, nil
+}
+
+// getNode reads one of the vendor's nodes, as the network knows it (its latest
+// profile revision among other things).
+func (c *apiClient) getNode(ctx context.Context, nodeID string) (vendorNodeDTO, error) {
+	var node vendorNodeDTO
+	_, err := c.call(ctx, request{op: "getNode", method: http.MethodGet, path: []string{"vendor", "nodes", nodeID}, query: c.vendorQuery()}, &node)
+	return node, err
 }
 
 // requestLabels is the one synchronous write: 200 with the labels.
