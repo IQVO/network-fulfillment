@@ -23,10 +23,12 @@ Built: `NetworkOrder` aggregate, ACL boundary, use cases
 `RejectOverdueOrders` / `ReconcileSubmittedOrders` (SUBMITTED state,
 ADR 0001 §5) / `ConfirmNetworkOrderShipment` (explicit endpoint, ADR 0014),
 in-memory and Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to
-boot, never a silent fallback), stub gateway (`NetworkGateway` port also
-declares the live-mode methods — `DeclareCapability`/`SubmitAvailability`/
-`RequestLabel`/`SubmissionStatus` — but no live HTTP adapter exists yet;
-`NETWORK_MODE=live` errors clearly until one is built), poller (inbound
+boot, never a silent fallback), stub gateway (the default) and the live
+demand-loop gateway for the retail network's Vendor API (ADR 0026:
+`NETWORK_MODE=live` with `NETWORK_BASE_URL` and `NETWORK_VENDOR_ID`; node map,
+submission ledger and labels in migration 0006;
+`DeclareCapability`/`SubmitAvailability` are logged no-ops until the supply
+loop, ADR 0027), poller (inbound
 leg), READ-ONLY REST plus the one explicit write endpoint above, CloudEvents
 Kafka publishers + outbox, analytics projector, MCP adapter, `web/` remote,
 Helm chart. Also built (ADR 0001 §8): the `CapabilityOffer` aggregate and
@@ -37,9 +39,9 @@ comment for why inventory is REST, not a cache), and the
 `GET /capability-offers` / `list_capability_offers` read surface, opt-in via
 `CAPABILITY_OFFER_ENABLED`. The offer is persisted, not yet submitted to
 the network (`SubmitAvailability` has no caller).
-Not built: a live `retail-network` HTTP adapter, and the
-`adapters/outbound/network/` -> `outbound/retailnetwork/` package rename
-(still deferred).
+Not built: the supply loop (ADR 0027, reserved: node profile, `DeclareCapability`,
+`SubmitAvailability`, inventory feed), a real package count (labels use one
+package), reconciling a shipment confirmation (a FAILURE is logged at ERROR only).
 Operations: `docs/operations/runbook.md` (plus configuration, observability,
 troubleshooting); CI jobs and gremlins thresholds: `docs/development/testing.md`;
 doc map: `docs/overview/introduction.md`.
@@ -65,8 +67,8 @@ internal/adapters/outbound/{network,ordermanagement,inventoryclient,processpathc
 
 ## Hard rules
 
-1. **The network's vocabulary stops at `adapters/outbound/network/`**
-   (becomes `outbound/retailnetwork/` per ADR 0009). `purchaseOrderNumber`,
+1. **The network's vocabulary stops at `adapters/outbound/retailnetwork/`**
+   (ADR 0009/0026), plus migration 0006's tables. `purchaseOrderNumber`,
    `itemSequenceNumber`, `buyerProductIdentifier` (ASIN) and other
    real-retailer field names must never appear in `internal/domain` or
    anything published to the fleet; nor may `retail-network`'s (`poNumber`,
@@ -85,7 +87,9 @@ internal/adapters/outbound/{network,ordermanagement,inventoryclient,processpathc
    0017's per-shipment-group promising must not apply.
 6. **`NETWORK_MODE=live|stub`, default `stub`** (ADR 0009 removed
    `sandbox`). The kind cluster, `e2e-tests` and CI must never need a
-   credential. Log the chosen mode at startup.
+   credential. Log the chosen mode at startup. Live takes a base URL and a vendor
+   id, no credential; the chart renders exactly the env the binary reads
+   (`charts/network-fulfillment/tests/test_env_parity.py`). The cluster flip is infra.
 7. **A FirstOffset-replay Kafka cache needs a consumer group id unique per
    process instance** (hostname+PID+timestamp); a shared group resumes from
    an old offset and is marked ready with an empty cache.
