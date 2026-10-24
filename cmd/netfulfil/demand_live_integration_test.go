@@ -143,83 +143,96 @@ func TestLiveDemand_PollToShipmentConfirmation(t *testing.T) {
 	})
 	ref := rig.text(t, ctx, `SELECT network_ref FROM network_orders`)
 
-	t.Run("the demand loop ran against the network", func(t *testing.T) {
-		if !strings.HasPrefix(ref, "NR-") || strings.Contains(ref, livePO) {
-			t.Fatalf("network ref %q must be minted, never derived from the purchase order number", ref)
-		}
-		expectEqual(t, "node registrations", rig.network.writeCount("/vendor/nodes"), 1)
-		if codes := rig.network.nodeCodes(); !slices.Equal(codes, []string{liveSite}) {
-			t.Fatalf("nodes on the network = %v, want [%s]", codes, liveSite)
-		}
-		expectEqual(t, "mapped node", rig.text(t, ctx, `SELECT node_id FROM network_nodes WHERE site_code = $1`, liveSite), "N-1")
-		expectEqual(t, "order site", rig.text(t, ctx, `SELECT site_id FROM network_orders WHERE network_ref = $1`, ref), liveSite)
-
-		// The network's own deadline, not the local 24 hours.
-		var ackBy time.Time
-		if err := rig.pool.QueryRow(ctx, `SELECT acknowledge_by FROM network_orders WHERE network_ref = $1`, ref).Scan(&ackBy); err != nil {
-			t.Fatal(err)
-		}
-		if d := ackBy.Sub(rig.network.ackByOf(livePO)).Abs(); d > time.Second {
-			t.Fatalf("acknowledge_by %s is %s away from the network's ackBy %s", ackBy, d, rig.network.ackByOf(livePO))
-		}
-	})
-
-	t.Run("one held order, one acknowledgement, then the release", func(t *testing.T) {
-		raises, orders, releases, cancels := rig.planner.snapshot()
-		expectEqual(t, "order-management raise requests", raises, 1)
-		expectEqual(t, "order-management orders", orders, 1)
-		expectEqual(t, "order-management cancels", cancels, 0)
-		if !slices.Equal(releases, []string{"om-live-1"}) {
-			t.Fatalf("order-management releases = %v, want [om-live-1]", releases)
-		}
-		if lines := rig.planner.heldLines(); !slices.Equal(lines, []string{liveSKU + " x2"}) {
-			t.Fatalf("order-management lines = %v, want [%s x2] (the listing translated to the SKU)", lines, liveSKU)
-		}
-		expectEqual(t, "acknowledgement requests", rig.network.requestCount(http.MethodPost, "/vendor/acknowledgements"), 1)
-		expectEqual(t, "acknowledgement writes", rig.network.writeCount("/vendor/acknowledgements"), 1)
-		expectEqual(t, "network order state", rig.network.orderState(livePO), "ACKNOWLEDGED")
-		expectEqual(t, "acknowledgement ledger", rig.text(t, ctx, `SELECT status FROM network_submissions WHERE kind = 'ACKNOWLEDGEMENT' AND subject = $1`, ref), "SUCCESS")
-		if body := rig.network.bodyOf("/vendor/acknowledgements"); !strings.Contains(body, `"decision":"ACCEPT"`) || !strings.Contains(body, `"quantity":2`) {
-			t.Fatalf("acknowledgement body = %s, want an ACCEPT echoing the ordered quantity", body)
-		}
-	})
-
-	t.Run("an explicit shipment confirmation requests the label and confirms once", func(t *testing.T) {
-		confirm := rig.env.url("/network-orders/" + ref + "/shipment-confirmation")
-		if code, body := e2eDo(t, ctx, http.MethodPost, confirm, ""); code != http.StatusNoContent {
-			t.Fatalf("confirm shipment = %d %s, want 204", code, body)
-		}
-		expectEqual(t, "CONFIRMED network orders", rig.count(t, ctx, `SELECT count(*) FROM network_orders WHERE network_ref = $1 AND state = 'CONFIRMED'`, ref), 1)
-		expectEqual(t, "label requests", rig.network.requestCount(http.MethodPost, "/vendor/shipping-labels"), 1)
-		expectEqual(t, "shipment confirmation requests", rig.network.requestCount(http.MethodPost, "/vendor/shipment-confirmations"), 1)
-		expectEqual(t, "shipment confirmation writes", rig.network.writeCount("/vendor/shipment-confirmations"), 1)
-		if body := rig.network.bodyOf("/vendor/shipping-labels"); !strings.Contains(body, `"packages":[{"packageNo":1}]`) {
-			t.Fatalf("label body = %s, want exactly one package", body)
-		}
-		if body := rig.network.bodyOf("/vendor/shipment-confirmations"); !strings.Contains(body, `"trackingNumbers":["TRK-`+livePO+`-1"]`) {
-			t.Fatalf("shipment confirmation body = %s, want the labelled tracking number", body)
-		}
-		e2eWaitFor(t, ctx, 15*time.Second, "the network shipped the order", func() bool { return rig.network.orderState(livePO) == "SHIPPED" })
-		expectEqual(t, "labels persisted", rig.count(t, ctx, `SELECT count(*) FROM network_labels WHERE network_ref = $1`, ref), 1)
-		expectEqual(t, "confirmation ledger", rig.text(t, ctx, `SELECT status FROM network_submissions WHERE kind = 'SHIPMENT_CONFIRMATION' AND subject = $1`, ref), "SUCCESS")
-
-		// A replay is a no-op for the network.
-		if code, body := e2eDo(t, ctx, http.MethodPost, confirm, ""); code != http.StatusNoContent {
-			t.Fatalf("replayed confirm = %d %s, want 204", code, body)
-		}
-		expectEqual(t, "label requests after a replay", rig.network.requestCount(http.MethodPost, "/vendor/shipping-labels"), 1)
-		expectEqual(t, "confirmation requests after a replay", rig.network.requestCount(http.MethodPost, "/vendor/shipment-confirmations"), 1)
-	})
-
-	t.Run("the events leave through the outbox", func(t *testing.T) {
-		want := []string{"NetworkOrderReceived|" + ref, "NetworkOrderSubmitted|" + ref, "NetworkOrderAcknowledged|" + ref, "NetworkOrderShipmentConfirmed|" + ref}
-		events := e2eEventsOn(t, ctx, rig.env.brokers, outboundkafka.Topic, want...)
-		for _, w := range want {
-			expectEqual(t, w+" key", events[w].Key, ref)
-		}
-	})
+	t.Run("the demand loop ran against the network", func(t *testing.T) { expectDemandLoopRan(t, ctx, rig, ref) })
+	t.Run("one held order, one acknowledgement, then the release", func(t *testing.T) { expectOneAnswerThenRelease(t, ctx, rig, ref) })
+	t.Run("an explicit shipment confirmation requests the label and confirms once", func(t *testing.T) { expectShipmentConfirmedOnce(t, ctx, rig, ref) })
+	t.Run("the events leave through the outbox", func(t *testing.T) { expectOutboxEvents(t, ctx, rig, ref) })
 
 	mustStop(t, stop)
+}
+
+// expectDemandLoopRan checks that the node was registered and mapped, the order was minted, and the network's own deadline kept.
+func expectDemandLoopRan(t *testing.T, ctx context.Context, rig *liveRig, ref string) {
+	t.Helper()
+	if !strings.HasPrefix(ref, "NR-") || strings.Contains(ref, livePO) {
+		t.Fatalf("network ref %q must be minted, never derived from the purchase order number", ref)
+	}
+	expectEqual(t, "node registrations", rig.network.writeCount("/vendor/nodes"), 1)
+	if codes := rig.network.nodeCodes(); !slices.Equal(codes, []string{liveSite}) {
+		t.Fatalf("nodes on the network = %v, want [%s]", codes, liveSite)
+	}
+	expectEqual(t, "mapped node", rig.text(t, ctx, `SELECT node_id FROM network_nodes WHERE site_code = $1`, liveSite), "N-1")
+	expectEqual(t, "order site", rig.text(t, ctx, `SELECT site_id FROM network_orders WHERE network_ref = $1`, ref), liveSite)
+
+	// The network's own deadline, not the local 24 hours.
+	var ackBy time.Time
+	if err := rig.pool.QueryRow(ctx, `SELECT acknowledge_by FROM network_orders WHERE network_ref = $1`, ref).Scan(&ackBy); err != nil {
+		t.Fatal(err)
+	}
+	if d := ackBy.Sub(rig.network.ackByOf(livePO)).Abs(); d > time.Second {
+		t.Fatalf("acknowledge_by %s is %s away from the network's ackBy %s", ackBy, d, rig.network.ackByOf(livePO))
+	}
+}
+
+// expectOneAnswerThenRelease checks that one held order in order-management, one acknowledgement on the network, then the release.
+func expectOneAnswerThenRelease(t *testing.T, ctx context.Context, rig *liveRig, ref string) {
+	t.Helper()
+	raises, orders, releases, cancels := rig.planner.snapshot()
+	expectEqual(t, "order-management raise requests", raises, 1)
+	expectEqual(t, "order-management orders", orders, 1)
+	expectEqual(t, "order-management cancels", cancels, 0)
+	if !slices.Equal(releases, []string{"om-live-1"}) {
+		t.Fatalf("order-management releases = %v, want [om-live-1]", releases)
+	}
+	if lines := rig.planner.heldLines(); !slices.Equal(lines, []string{liveSKU + " x2"}) {
+		t.Fatalf("order-management lines = %v, want [%s x2] (the listing translated to the SKU)", lines, liveSKU)
+	}
+	expectEqual(t, "acknowledgement requests", rig.network.requestCount(http.MethodPost, "/vendor/acknowledgements"), 1)
+	expectEqual(t, "acknowledgement writes", rig.network.writeCount("/vendor/acknowledgements"), 1)
+	expectEqual(t, "network order state", rig.network.orderState(livePO), "ACKNOWLEDGED")
+	expectEqual(t, "acknowledgement ledger", rig.text(t, ctx, `SELECT status FROM network_submissions WHERE kind = 'ACKNOWLEDGEMENT' AND subject = $1`, ref), "SUCCESS")
+	if body := rig.network.bodyOf("/vendor/acknowledgements"); !strings.Contains(body, `"decision":"ACCEPT"`) || !strings.Contains(body, `"quantity":2`) {
+		t.Fatalf("acknowledgement body = %s, want an ACCEPT echoing the ordered quantity", body)
+	}
+}
+
+// expectShipmentConfirmedOnce checks that an explicit shipment confirmation requests the label and confirms once, and a replay sends nothing.
+func expectShipmentConfirmedOnce(t *testing.T, ctx context.Context, rig *liveRig, ref string) {
+	t.Helper()
+	confirm := rig.env.url("/network-orders/" + ref + "/shipment-confirmation")
+	if code, body := e2eDo(t, ctx, http.MethodPost, confirm, ""); code != http.StatusNoContent {
+		t.Fatalf("confirm shipment = %d %s, want 204", code, body)
+	}
+	expectEqual(t, "CONFIRMED network orders", rig.count(t, ctx, `SELECT count(*) FROM network_orders WHERE network_ref = $1 AND state = 'CONFIRMED'`, ref), 1)
+	expectEqual(t, "label requests", rig.network.requestCount(http.MethodPost, "/vendor/shipping-labels"), 1)
+	expectEqual(t, "shipment confirmation requests", rig.network.requestCount(http.MethodPost, "/vendor/shipment-confirmations"), 1)
+	expectEqual(t, "shipment confirmation writes", rig.network.writeCount("/vendor/shipment-confirmations"), 1)
+	if body := rig.network.bodyOf("/vendor/shipping-labels"); !strings.Contains(body, `"packages":[{"packageNo":1}]`) {
+		t.Fatalf("label body = %s, want exactly one package", body)
+	}
+	if body := rig.network.bodyOf("/vendor/shipment-confirmations"); !strings.Contains(body, `"trackingNumbers":["TRK-`+livePO+`-1"]`) {
+		t.Fatalf("shipment confirmation body = %s, want the labelled tracking number", body)
+	}
+	e2eWaitFor(t, ctx, 15*time.Second, "the network shipped the order", func() bool { return rig.network.orderState(livePO) == "SHIPPED" })
+	expectEqual(t, "labels persisted", rig.count(t, ctx, `SELECT count(*) FROM network_labels WHERE network_ref = $1`, ref), 1)
+	expectEqual(t, "confirmation ledger", rig.text(t, ctx, `SELECT status FROM network_submissions WHERE kind = 'SHIPMENT_CONFIRMATION' AND subject = $1`, ref), "SUCCESS")
+
+	// A replay is a no-op for the network.
+	if code, body := e2eDo(t, ctx, http.MethodPost, confirm, ""); code != http.StatusNoContent {
+		t.Fatalf("replayed confirm = %d %s, want 204", code, body)
+	}
+	expectEqual(t, "label requests after a replay", rig.network.requestCount(http.MethodPost, "/vendor/shipping-labels"), 1)
+	expectEqual(t, "confirmation requests after a replay", rig.network.requestCount(http.MethodPost, "/vendor/shipment-confirmations"), 1)
+}
+
+// expectOutboxEvents checks that the events leave through the outbox, keyed by the network ref.
+func expectOutboxEvents(t *testing.T, ctx context.Context, rig *liveRig, ref string) {
+	t.Helper()
+	want := []string{"NetworkOrderReceived|" + ref, "NetworkOrderSubmitted|" + ref, "NetworkOrderAcknowledged|" + ref, "NetworkOrderShipmentConfirmed|" + ref}
+	events := e2eEventsOn(t, ctx, rig.env.brokers, outboundkafka.Topic, want...)
+	for _, w := range want {
+		expectEqual(t, w+" key", events[w].Key, ref)
+	}
 }
 
 // TestLiveDemand_RestartAfterAcknowledgementSubmitted is scenario 2, the
