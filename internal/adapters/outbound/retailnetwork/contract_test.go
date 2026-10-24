@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"gopkg.in/yaml.v3"
+
+	"github.com/claudioed/network-fulfillment/internal/application/contract"
 )
 
 // The contract test (ADR 0026 Decision 9). testdata/vendor-connectivity-openapi.yaml
@@ -174,6 +176,11 @@ func TestContract_RequestBodiesTheAdapterBuildsValidateAgainstTheSpec(t *testing
 		RegionID: "R-SP", Timezone: "America/Sao_Paulo", PostalCode: "01310-100", CountryCode: "BR", Lat: &lat, Lon: &lon})
 	nodeMinimal, _ := buildNodeRegistrationBody("V-WS", NodeDefinition{SiteCode: "site-1", NodeType: "FULFILLMENT_CENTER",
 		RegionID: "R-SP", Timezone: "America/Sao_Paulo", PostalCode: "01310-100", CountryCode: "BR"})
+	profile, _ := buildNodeProfileBody("V-WS", 3, sampleProfile())
+	profileMinimal, _ := buildNodeProfileBody("V-WS", 1, contract.NodeProfile{
+		SiteId: "FC-1", Timezone: "UTC", HandlingTime: time.Minute, ThroughputPerDay: 1,
+		Cutoffs: []contract.ProfileCutoff{{LocalTime: "00:00", Days: weekdays(time.Sunday)}},
+	})
 
 	cases := []struct {
 		name, schema string
@@ -185,6 +192,8 @@ func TestContract_RequestBodiesTheAdapterBuildsValidateAgainstTheSpec(t *testing
 		{"shipment confirmation", "ShipmentConfirmationRequest", ship},
 		{"node registration", "NodeRegistrationRequest", node},
 		{"node registration, required fields only", "NodeRegistrationRequest", nodeMinimal},
+		{"node profile", "NodeProfileRequest", profile},
+		{"node profile, smallest valid", "NodeProfileRequest", profileMinimal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,17 +217,21 @@ func TestContract_TheSchemaActuallyRejectsABadBody(t *testing.T) {
 	// A validator that accepts everything would make the test above vacuous.
 	spec := loadSpec(t)
 	bad := map[string]string{
-		"AcknowledgementRequest":      `{"vendorId":"V-WS","poNumber":"PO-1","decision":"MAYBE","lines":[{"lineNo":1,"quantity":1}]}`,
-		"LabelRequest":                `{"vendorId":"V-WS","poNumber":"PO-1","packages":[]}`,
-		"ShipmentConfirmationRequest": `{"vendorId":"V-WS","poNumber":"PO-1","shippedAt":"2026-10-24T12:00:00Z","trackingNumbers":[]}`,
-		"NodeRegistrationRequest":     `{"vendorId":"V-WS","vendorNodeCode":"s","nodeType":"PARCEL_SORTER","regionId":"r","timezone":"t","postalCode":"p","countryCode":"BR"}`,
+		"AcknowledgementRequest":                          `{"vendorId":"V-WS","poNumber":"PO-1","decision":"MAYBE","lines":[{"lineNo":1,"quantity":1}]}`,
+		"LabelRequest":                                    `{"vendorId":"V-WS","poNumber":"PO-1","packages":[]}`,
+		"ShipmentConfirmationRequest":                     `{"vendorId":"V-WS","poNumber":"PO-1","shippedAt":"2026-10-24T12:00:00Z","trackingNumbers":[]}`,
+		"NodeRegistrationRequest":                         `{"vendorId":"V-WS","vendorNodeCode":"s","nodeType":"PARCEL_SORTER","regionId":"r","timezone":"t","postalCode":"p","countryCode":"BR"}`,
+		"NodeProfileRequest":                              `{"vendorId":"V-WS","profileRevision":0,"timezone":"UTC","operatingHoursByDay":{"monday":{"start":"00:00","end":"23:59"}},"handlingTimeMinutes":30,"cutoffs":[{"localTime":"18:00"}],"throughputCap":{"value":10,"timeUnit":"DAY","unit":"ORDER"}}`,
+		"NodeProfileRequest, a cutoff with maxOrders 0":   `{"vendorId":"V-WS","profileRevision":1,"timezone":"UTC","operatingHoursByDay":{},"handlingTimeMinutes":30,"cutoffs":[{"localTime":"18:00","maxOrders":0}],"throughputCap":{"value":10,"timeUnit":"DAY","unit":"ORDER"}}`,
+		"NodeProfileRequest, a weekday the network lacks": `{"vendorId":"V-WS","profileRevision":1,"timezone":"UTC","operatingHoursByDay":{"someday":{"start":"00:00","end":"23:59"}},"handlingTimeMinutes":30,"cutoffs":[],"throughputCap":{"value":10,"timeUnit":"DAY","unit":"ORDER"}}`,
 	}
 	for name, body := range bad {
 		var instance any
 		if err := json.Unmarshal([]byte(body), &instance); err != nil {
 			t.Fatal(err)
 		}
-		if err := spec.schema(t, name).Validate(instance); err == nil {
+		schema, _, _ := strings.Cut(name, ",")
+		if err := spec.schema(t, schema).Validate(instance); err == nil {
 			t.Errorf("%s accepted %s", name, body)
 		}
 	}
@@ -246,6 +259,10 @@ func TestContract_DTOsNameOnlyRealPropertiesAndRequestsSendEveryRequiredOne(t *t
 		"LabelRequest":                reflect.TypeOf(labelRequestDTO{}),
 		"ShipmentConfirmationRequest": reflect.TypeOf(shipmentConfirmationRequestDTO{}),
 		"NodeRegistrationRequest":     reflect.TypeOf(nodeRegistrationRequestDTO{}),
+		"NodeProfileRequest":          reflect.TypeOf(nodeProfileRequestDTO{}),
+		"CutoffSlot":                  reflect.TypeOf(cutoffSlotDTO{}),
+		"ThroughputCap":               reflect.TypeOf(throughputCapDTO{}),
+		"DayHours":                    reflect.TypeOf(dayHoursDTO{}),
 	}
 	for name, typ := range responses {
 		for _, f := range jsonFields(typ) {
@@ -279,8 +296,11 @@ func TestContract_EveryValueTheAdapterSendsOrBranchesOnExistsInTheSpec(t *testin
 		{"reject reason", "RejectReason", "", []string{reasonCannotMeetShipBy, reasonUnknownListing}},
 		{"purchase order state", "PurchaseOrderState", "", []string{stateIssued}},
 		{"transaction status", "SubmissionStatus", "", []string{txProcessing, txSuccess, txFailure}},
-		{"submission kind", "SubmissionKind", "", []string{string(KindAcknowledgement), string(KindShipmentConfirmation), string(KindNodeRegistration)}},
+		{"submission kind", "SubmissionKind", "", []string{string(KindAcknowledgement), string(KindShipmentConfirmation), string(KindNodeRegistration), string(KindNodeProfile)}},
 		{"node type", "NodeType", "", []string{"FULFILLMENT_CENTER", "INBOUND_CROSS_DOCK", "RETURNS_CENTER"}},
+		{"throughput time unit", "ThroughputCap", "timeUnit", []string{timeUnitDay}},
+		{"throughput unit", "ThroughputCap", "unit", []string{unitOrder}},
+		{"weekday", "Weekday", "", []string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}},
 	}
 	for _, c := range checks {
 		enum := spec.enum(t, c.schema, c.prop)
@@ -340,6 +360,12 @@ func TestContract_RecordedTransactionsAreValidAndDecode(t *testing.T) {
 		{"still processing", `{"transactionId":"tx-3","vendorId":"V-WS","kind":"SHIPMENT_CONFIRMATION","status":"PROCESSING",
 			"receivedAt":"2026-10-24T12:00:00Z"}`,
 			func(tx transactionDTO) bool { return tx.Status == txProcessing && tx.ProcessedAt == nil }},
+		{"a stale profile revision is a failed transaction, not an HTTP refusal", `{"transactionId":"tx-4","vendorId":"V-WS","kind":"NODE_PROFILE","status":"FAILURE",
+			"receivedAt":"2026-10-24T12:00:00Z","processedAt":"2026-10-24T12:00:05Z",
+			"errors":[{"code":"ErrStaleProfileRevision","message":"revision 2 is not newer than 3","path":"$.profileRevision"}]}`,
+			func(tx transactionDTO) bool {
+				return tx.Kind == string(KindNodeProfile) && tx.Status == txFailure && tx.Errors[0].Code == errStaleProfileRevision
+			}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -363,6 +389,13 @@ func TestContract_RecordedNodesLabelsAndProblemsAreValidAndDecode(t *testing.T) 
 		t.Errorf("decoded nodes = %+v, %v", list, err)
 	}
 
+	profiled := `{"nodeId":"N-1","vendorId":"V-WS","vendorNodeCode":"site-1","nodeType":"FULFILLMENT_CENTER","status":"ACTIVE","regionId":"R-SP","timezone":"America/Sao_Paulo","handlingTimeMinutes":45,"profileRevision":7}`
+	spec.validate(t, "VendorNode", []byte(profiled))
+	var node vendorNodeDTO
+	if err := json.Unmarshal([]byte(profiled), &node); err != nil || node.ProfileRevision != 7 {
+		t.Errorf("decoded node = %+v, %v, want profile revision 7", node, err)
+	}
+
 	labels := `{"poNumber":"PO-7f3c","labels":[{"packageNo":1,"labelRef":"LB-1","trackingNumber":"TRK-1","carrier":"CARRIER"}]}`
 	spec.validate(t, "LabelResponse", []byte(labels))
 	var lr labelResponseDTO
@@ -384,7 +417,7 @@ func TestContract_EveryRouteTheClientCallsExistsWithItsRequiredParameters(t *tes
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "shipping-labels"):
 			ok(w, map[string]any{"poNumber": "PO-1", "labels": []any{}})
-		case r.Method == http.MethodPost:
+		case r.Method == http.MethodPost || r.Method == http.MethodPut:
 			w.WriteHeader(http.StatusAccepted)
 			ok(w, map[string]string{"transactionId": "tx-1"})
 		default:
@@ -397,14 +430,16 @@ func TestContract_EveryRouteTheClientCallsExistsWithItsRequiredParameters(t *tes
 	_, _ = c.getPurchaseOrder(ctx, "PO-1")
 	_, _ = c.getTransaction(ctx, "tx-1")
 	_, _ = c.listNodes(ctx)
+	_, _ = c.getNode(ctx, "N-1")
 	_, _ = c.postAsync(ctx, "submitAcknowledgement", []string{"vendor", "acknowledgements"}, "k1", []byte("{}"))
 	_, _ = c.postAsync(ctx, "submitShipmentConfirmation", []string{"vendor", "shipment-confirmations"}, "k2", []byte("{}"))
 	_, _ = c.postAsync(ctx, "registerVendorNode", []string{"vendor", "nodes"}, "k3", []byte("{}"))
+	_, _ = c.putAsync(ctx, "declareNodeProfile", []string{"vendor", "nodes", "N-1", "profile"}, "k5", []byte("{}"))
 	_, _ = c.requestLabels(ctx, "k4", []byte("{}"))
 
 	reqs := f.requests()
-	if len(reqs) != 8 {
-		t.Fatalf("requests = %d, want 8", len(reqs))
+	if len(reqs) != 10 {
+		t.Fatalf("requests = %d, want 10", len(reqs))
 	}
 	for _, r := range reqs {
 		item := lookupPath(paths, r.Path)
@@ -418,9 +453,9 @@ func TestContract_EveryRouteTheClientCallsExistsWithItsRequiredParameters(t *tes
 			continue
 		}
 		refs := parameterRefs(op)
-		if r.Method == http.MethodPost {
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
 			if !slices.Contains(refs, "#/components/parameters/IdempotencyKey") || r.IdemKey == "" {
-				t.Errorf("POST %s: the spec requires Idempotency-Key (listed=%v) and the client sent %q", r.Path, refs, r.IdemKey)
+				t.Errorf("%s %s: the spec requires Idempotency-Key (listed=%v) and the client sent %q", r.Method, r.Path, refs, r.IdemKey)
 			}
 			continue
 		}

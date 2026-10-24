@@ -30,6 +30,12 @@ var (
 	// ErrBadPackageCount: a label was requested for fewer than one package.
 	ErrBadPackageCount = errors.New("retail-network: an order has at least one package")
 
+	// ErrBadProfile: the profile handed to DeclareNodeProfile cannot be put on
+	// the wire (no cutoff, a malformed time, a day that does not exist, no
+	// handling time, no throughput, or two cutoffs at one time on a shared day).
+	// It is a programming error of the caller, found before any I/O.
+	ErrBadProfile = errors.New("retail-network: this node profile cannot be sent")
+
 	// ErrWriteRefused: the network answered a write with a definitive refusal
 	// (for example ack-window-closed). The ledger row is FAILURE and the write
 	// is never sent again; the wrapped *APIError carries the problem.
