@@ -1,6 +1,7 @@
 package retailnetwork
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,7 @@ func newFake(t *testing.T, h func(n int, w http.ResponseWriter, r *http.Request)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := int(f.calls.Add(1))
 		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body)) // a handler may read the body too
 		f.mu.Lock()
 		f.seen = append(f.seen, seen{r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("Idempotency-Key"), r.Header.Get("Content-Type"), string(body)})
 		f.mu.Unlock()
