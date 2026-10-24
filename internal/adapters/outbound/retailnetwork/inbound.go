@@ -238,7 +238,7 @@ func (g *LiveGateway) SubmitInboundReceipt(ctx context.Context, r contract.Inbou
 		return err
 	}
 	if row, err = g.send(ctx, row, "submitInboundReceipt", pathInboundReceipts); err != nil {
-		return err
+		return asReceiptRefusal(err)
 	}
 	if row.Status == StatusSuccess {
 		return nil
@@ -249,7 +249,16 @@ func (g *LiveGateway) SubmitInboundReceipt(ctx context.Context, r contract.Inbou
 	}
 	if status == contract.SubmissionFailure {
 		failed, _, _ := g.store.Submission(ctx, row.Kind, row.Subject)
-		return fmt.Errorf("%w: the network failed the inbound receipt of %s: %s", ErrWriteRefused, r.ShipmentRef, failed.Errors)
+		return fmt.Errorf("%w: %w: the network failed the inbound receipt of %s: %s", contract.ErrReceiptRefused, ErrWriteRefused, r.ShipmentRef, failed.Errors)
 	}
 	return nil
+}
+
+// asReceiptRefusal marks a definitive refusal so the use case parks the receipt
+// instead of retrying it forever; every other error stays a retry.
+func asReceiptRefusal(err error) error {
+	if errors.Is(err, ErrWriteRefused) {
+		return fmt.Errorf("%w: %w", contract.ErrReceiptRefused, err)
+	}
+	return err
 }

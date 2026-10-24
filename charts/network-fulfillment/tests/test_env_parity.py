@@ -55,7 +55,8 @@ EXTRA_ENV_ONLY = {
 }
 
 LIVE_ONLY = {"NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE",
-             "INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL", "INBOUND_INTAKE_INTERVAL"}
+             "INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL", "INBOUND_INTAKE_INTERVAL",
+             "INBOUND_RECEIPT_CONSUMER_GROUP"}
 STUB_ONLY = {"NETWORK_SEED_FILE"}
 
 # The calls that read the environment. `get(` is the accessor loadBootConfig and
@@ -89,6 +90,7 @@ config:
   networkVendorId: V-1
   inboundReceivingUrl: http://inbound-receiving.invalid
   productMasterUrl: http://product-master.invalid
+  inboundReceiptConsumerGroup: network-fulfillment-inbound-receipts
 productTranslation:
   mappings:
     - networkProductId: LST-1

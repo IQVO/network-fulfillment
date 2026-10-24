@@ -197,7 +197,7 @@ func TestInbound_ReceiptTheNetworkFailsIsReportedAsAnError(t *testing.T) {
 	_, _ = f.g.PollDemand(context.Background(), t0)
 	f.sim.setOutcome(txFailure, submissionErrorDTO{Code: "ErrCartonNotOnManifest", Message: "no such carton"})
 	err := f.g.SubmitInboundReceipt(context.Background(), receiptFor("SHP-1"))
-	if !errors.Is(err, ErrWriteRefused) || !strings.Contains(err.Error(), "no such carton") {
+	if !errors.Is(err, ErrWriteRefused) || !errors.Is(err, contract.ErrReceiptRefused) || !strings.Contains(err.Error(), "no such carton") {
 		t.Fatalf("err = %v, want ErrWriteRefused carrying the network's errors", err)
 	}
 }
@@ -207,8 +207,8 @@ func TestInbound_ADefinitiveRefusalIsRecordedOnceAndNeverResent(t *testing.T) {
 	_, _ = f.g.PollDemand(context.Background(), t0)
 	f.sim.inject = refuseFirst(http.MethodPost, "/vendor/inbound-receipts", 1, http.StatusUnprocessableEntity, "validation-failed")
 	for range 2 {
-		if err := f.g.SubmitInboundReceipt(context.Background(), receiptFor("SHP-1")); !errors.Is(err, ErrWriteRefused) {
-			t.Fatalf("err = %v, want ErrWriteRefused", err)
+		if err := f.g.SubmitInboundReceipt(context.Background(), receiptFor("SHP-1")); !errors.Is(err, ErrWriteRefused) || !errors.Is(err, contract.ErrReceiptRefused) {
+			t.Fatalf("err = %v, want ErrWriteRefused and ErrReceiptRefused", err)
 		}
 	}
 	if n := len(f.requestsTo(http.MethodPost, "/vendor/inbound-receipts")); n != 1 {

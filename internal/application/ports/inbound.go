@@ -70,3 +70,21 @@ type GtinCache interface {
 type AsnRegistrar interface {
 	RegisterAsn(ctx context.Context, asn contract.AsnRegistration) error
 }
+
+// ReceiptProjection is the local projection of inbound-receiving's receipt
+// events, keyed by ASN number and kept only for the ASNs this service
+// registered, plus the queue of closed receipts still to be reported. Every
+// Record* call claims the CloudEvents id in the same transaction as its write,
+// so a redelivery is a no-op; an event about an ASN that is not ours is dropped
+// without error.
+type ReceiptProjection interface {
+	RecordCartonReceived(ctx context.Context, eventID string, f contract.ReceivedCartonFact) error
+	RecordFinding(ctx context.Context, eventID string, f contract.CartonFinding) error
+	RecordClosed(ctx context.Context, eventID string, f contract.ReceiptClosedFact, now time.Time) error
+	// DueReceipts returns the closed receipts whose next attempt is at or
+	// before now and that are not reported yet, oldest first, at most limit.
+	DueReceipts(ctx context.Context, now time.Time, limit int) ([]contract.ReceiptFacts, error)
+	MarkReceiptSent(ctx context.Context, asnNumber string, now time.Time) error
+	MarkReceiptRetry(ctx context.Context, asnNumber, lastError string, next time.Time) error
+	MarkReceiptRejected(ctx context.Context, asnNumber, lastError string) error
+}

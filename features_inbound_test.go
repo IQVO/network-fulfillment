@@ -21,6 +21,13 @@ import (
 const bddInboundSite shared.SiteId = "site-1"
 
 type inboundWorld struct {
+	// the receipt return
+	manifest contract.InboundShipment
+	facts    contract.ReceiptFacts
+	queue    *bddReceiptQueue
+	returns  *usecases.ReturnInboundReceipts
+	down     bool
+
 	gateway   *retailnetwork.StubGateway
 	repo      *bddInboundRepo
 	book      map[string]contract.GtinResolution
@@ -229,4 +236,201 @@ func (w *world) registerInboundSteps(sc *godog.ScenarioContext) {
 		return w.shipmentIsBecause(ref, contract.InboundStatus(s), b)
 	})
 	sc.Step(`^inbound-receiving was asked to register (\d+) ASNs?$`, w.receivingWasAskedToRegister)
+	w.registerReceiptSteps(sc)
+}
+
+// ---- the receipt return (features/inbound_receipt_return.feature) ----
+
+// bddReceiptQueue is the one-receipt projection the steps close.
+type bddReceiptQueue struct {
+	facts   *contract.ReceiptFacts
+	closed  bool
+	sent    bool
+	next    time.Time
+	retries int
+}
+
+func (q *bddReceiptQueue) RecordCartonReceived(context.Context, string, contract.ReceivedCartonFact) error {
+	return nil
+}
+func (q *bddReceiptQueue) RecordFinding(context.Context, string, contract.CartonFinding) error {
+	return nil
+}
+func (q *bddReceiptQueue) RecordClosed(context.Context, string, contract.ReceiptClosedFact, time.Time) error {
+	return nil
+}
+func (q *bddReceiptQueue) DueReceipts(_ context.Context, now time.Time, _ int) ([]contract.ReceiptFacts, error) {
+	if !q.closed || q.sent || q.next.After(now) {
+		return nil, nil
+	}
+	f := *q.facts
+	f.Attempts = q.retries
+	return []contract.ReceiptFacts{f}, nil
+}
+func (q *bddReceiptQueue) MarkReceiptSent(context.Context, string, time.Time) error {
+	q.sent = true
+	return nil
+}
+func (q *bddReceiptQueue) MarkReceiptRetry(_ context.Context, _ string, _ string, next time.Time) error {
+	q.retries++
+	q.next = next
+	return nil
+}
+func (q *bddReceiptQueue) MarkReceiptRejected(context.Context, string, string) error { return nil }
+
+// downGateway fails every receipt while the network is down, and otherwise
+// hands over to the real stub gateway.
+type downGateway struct {
+	*retailnetwork.StubGateway
+	iw *inboundWorld
+}
+
+func (g downGateway) SubmitInboundReceipt(ctx context.Context, r contract.InboundReceipt) error {
+	if g.iw.down {
+		return fmt.Errorf("the network is down")
+	}
+	return g.StubGateway.SubmitInboundReceipt(ctx, r)
+}
+
+func (w *world) receiptWorld() *inboundWorld {
+	iw := w.inbound()
+	if iw.queue != nil {
+		return iw
+	}
+	iw.manifest = contract.InboundShipment{Ref: "SHP-1", SiteId: bddInboundSite}
+	iw.facts = contract.ReceiptFacts{Shipment: iw.manifest, ReceiptID: "rcpt-1", ClosedAt: w.clock.Now()}
+	iw.queue = &bddReceiptQueue{facts: &iw.facts, next: w.clock.Now()}
+	iw.returns = &usecases.ReturnInboundReceipts{Receipts: iw.queue, Gateway: downGateway{iw.gateway, iw}, Clock: w.clock}
+	return iw
+}
+
+func (w *world) manifestLists(ref, a, b, c string) error {
+	iw := w.receiptWorld()
+	iw.facts.Shipment.Ref = ref
+	for _, sscc := range []string{a, b, c} {
+		iw.facts.Shipment.Cartons = append(iw.facts.Shipment.Cartons, contract.InboundCarton{SSCC: sscc, Kind: contract.CartonMixed})
+	}
+	return nil
+}
+
+func (w *world) dockReceived(sscc string, qty int64, gtin, condition string) error {
+	iw := w.receiptWorld()
+	iw.facts.Cartons = append(iw.facts.Cartons, contract.ReceivedCartonFact{SSCC: sscc, Contents: []contract.ReceivedContent{{GTIN: gtin, Qty: qty, Condition: map[string]string{"good": "Good", "damaged": "Damaged"}[condition]}}})
+	return nil
+}
+
+func (w *world) dockFoundOffManifest(sscc string) error {
+	iw := w.receiptWorld()
+	iw.facts.Findings = append(iw.facts.Findings, contract.CartonFinding{Kind: contract.FindingUnexpectedCarton, SSCC: sscc})
+	return nil
+}
+
+func (w *world) dockRaised(kind, sscc string) error {
+	iw := w.receiptWorld()
+	iw.facts.Findings = append(iw.facts.Findings, contract.CartonFinding{Kind: kind, SSCC: sscc})
+	return nil
+}
+
+func (w *world) receivingCloses(string) error {
+	w.receiptWorld().queue.closed = true
+	return nil
+}
+
+func (w *world) receiptReturnRuns() error {
+	_, err := w.receiptWorld().returns.Execute(context.Background())
+	return err
+}
+
+func (w *world) networkIsDown() error { w.receiptWorld().down = true; return nil }
+func (w *world) networkIsBack() error { w.receiptWorld().down = false; return nil }
+
+func (w *world) networkReceipt(ref string) (contract.InboundReceipt, bool) {
+	return w.receiptWorld().gateway.InboundReceipt(ref)
+}
+
+func (w *world) networkHolds(ref string, n int) error {
+	r, ok := w.networkReceipt(ref)
+	if !ok || len(r.Cartons) != n {
+		return fmt.Errorf("receipt for %s = %+v (held: %v), want %d cartons", ref, r, ok, n)
+	}
+	return nil
+}
+
+func (w *world) networkHoldsNone(ref string) error {
+	if _, ok := w.networkReceipt(ref); ok {
+		return fmt.Errorf("the network holds a receipt for %s", ref)
+	}
+	return nil
+}
+
+func (w *world) receiptCarton(sscc string) (contract.ReceiptCarton, error) {
+	r, _ := w.networkReceipt("SHP-1")
+	for _, c := range r.Cartons {
+		if c.SSCC == sscc {
+			return c, nil
+		}
+	}
+	return contract.ReceiptCarton{}, fmt.Errorf("the receipt has no carton %s: %+v", sscc, r.Cartons)
+}
+
+func (w *world) cartonIsWithItems(sscc, status string, qty int64, gtin string) error {
+	c, err := w.receiptCarton(sscc)
+	if err != nil {
+		return err
+	}
+	if string(c.Status) != status || len(c.Items) != 1 || c.Items[0].GTIN != gtin || c.Items[0].QtyEaches != qty {
+		return fmt.Errorf("carton %s = %+v, want %s with %d of %s", sscc, c, status, qty, gtin)
+	}
+	return nil
+}
+
+func (w *world) cartonIsWithoutItems(sscc, status string) error {
+	c, err := w.receiptCarton(sscc)
+	if err != nil {
+		return err
+	}
+	if string(c.Status) != status || len(c.Items) != 0 {
+		return fmt.Errorf("carton %s = %+v, want %s with no items", sscc, c, status)
+	}
+	return nil
+}
+
+func (w *world) cartonHasCodes(sscc, codes string) error {
+	c, err := w.receiptCarton(sscc)
+	if err != nil {
+		return err
+	}
+	if got := strings.Join(c.ComplianceCodes, ","); got != codes {
+		return fmt.Errorf("carton %s codes = %q, want %q", sscc, got, codes)
+	}
+	return nil
+}
+
+func (w *world) networkWasSent(n int) error {
+	// The stub keeps the first receipt of a shipment; a second send would not show,
+	// so count what the queue handed over.
+	if !w.receiptWorld().queue.sent && n > 0 {
+		return fmt.Errorf("no receipt was reported")
+	}
+	if _, ok := w.networkReceipt("SHP-1"); ok != (n == 1) {
+		return fmt.Errorf("receipt held = %v, want %d", ok, n)
+	}
+	return nil
+}
+
+func (w *world) registerReceiptSteps(sc *godog.ScenarioContext) {
+	sc.Step(`^the manifest of shipment "([^"]*)" lists cartons "([^"]*)", "([^"]*)" and "([^"]*)"$`, w.manifestLists)
+	sc.Step(`^the dock received carton "([^"]*)" with (\d+) eaches of "([^"]*)" in (good|damaged) condition$`, w.dockReceived)
+	sc.Step(`^the dock found carton "([^"]*)" that is not on the manifest$`, w.dockFoundOffManifest)
+	sc.Step(`^the dock raised "([^"]*)" on carton "([^"]*)"$`, w.dockRaised)
+	sc.Step(`^receiving closes on shipment "([^"]*)"$`, w.receivingCloses)
+	sc.Step(`^the receipt return runs$`, w.receiptReturnRuns)
+	sc.Step(`^the network is down$`, w.networkIsDown)
+	sc.Step(`^the network is back$`, w.networkIsBack)
+	sc.Step(`^the network holds a receipt for "([^"]*)" with (\d+) cartons$`, w.networkHolds)
+	sc.Step(`^the network holds no receipt for "([^"]*)"$`, w.networkHoldsNone)
+	sc.Step(`^carton "([^"]*)" of the receipt is "([A-Z]+)" with (\d+) eaches of "([^"]*)"$`, w.cartonIsWithItems)
+	sc.Step(`^carton "([^"]*)" of the receipt is "([A-Z]+)" with no items$`, w.cartonIsWithoutItems)
+	sc.Step(`^carton "([^"]*)" of the receipt has the compliance codes "([^"]*)"$`, w.cartonHasCodes)
+	sc.Step(`^the network was sent (\d+) receipt$`, w.networkWasSent)
 }

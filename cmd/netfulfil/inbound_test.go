@@ -19,8 +19,8 @@ func TestLoadInboundConfig(t *testing.T) {
 		}
 	})
 	t.Run("live reads and trims both URLs", func(t *testing.T) {
-		cfg, err := loadInboundConfig(get(map[string]string{"INBOUND_RECEIVING_URL": " http://r ", "PRODUCT_MASTER_URL": "http://p\t"}), retailnetwork.ModeLive)
-		if err != nil || !cfg.enabled || cfg.inboundReceivingURL != "http://r" || cfg.productMasterURL != "http://p" {
+		cfg, err := loadInboundConfig(get(map[string]string{"INBOUND_RECEIVING_URL": " http://r ", "PRODUCT_MASTER_URL": "http://p\t", "INBOUND_RECEIPT_CONSUMER_GROUP": " grp "}), retailnetwork.ModeLive)
+		if err != nil || !cfg.enabled || cfg.inboundReceivingURL != "http://r" || cfg.productMasterURL != "http://p" || cfg.receiptConsumerGroup != "grp" {
 			t.Fatalf("cfg=%+v err=%v", cfg, err)
 		}
 	})
@@ -34,10 +34,11 @@ func checkMissingInboundURLs(t *testing.T, get func(map[string]string) func(stri
 		vars       map[string]string
 		want, miss []string
 	}{
-		{"neither names both", nil, []string{"INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL"}, nil},
-		{"no receiving URL names only it", map[string]string{"PRODUCT_MASTER_URL": "http://p"}, []string{"INBOUND_RECEIVING_URL"}, []string{"PRODUCT_MASTER_URL"}},
-		{"no product-master URL names only it", map[string]string{"INBOUND_RECEIVING_URL": "http://r"}, []string{"PRODUCT_MASTER_URL"}, []string{"INBOUND_RECEIVING_URL"}},
-		{"blank is missing", map[string]string{"INBOUND_RECEIVING_URL": "  ", "PRODUCT_MASTER_URL": "\t"}, []string{"INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL"}, nil},
+		{"none names all three", nil, []string{"INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL", "INBOUND_RECEIPT_CONSUMER_GROUP"}, nil},
+		{"no consumer group names only it", map[string]string{"INBOUND_RECEIVING_URL": "http://r", "PRODUCT_MASTER_URL": "http://p"}, []string{"INBOUND_RECEIPT_CONSUMER_GROUP"}, []string{"INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL"}},
+		{"no receiving URL names only it", map[string]string{"PRODUCT_MASTER_URL": "http://p", "INBOUND_RECEIPT_CONSUMER_GROUP": "g"}, []string{"INBOUND_RECEIVING_URL"}, []string{"PRODUCT_MASTER_URL"}},
+		{"no product-master URL names only it", map[string]string{"INBOUND_RECEIVING_URL": "http://r", "INBOUND_RECEIPT_CONSUMER_GROUP": "g"}, []string{"PRODUCT_MASTER_URL"}, []string{"INBOUND_RECEIVING_URL"}},
+		{"blank is missing", map[string]string{"INBOUND_RECEIVING_URL": "  ", "PRODUCT_MASTER_URL": "\t", "INBOUND_RECEIPT_CONSUMER_GROUP": "g"}, []string{"INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL"}, []string{"INBOUND_RECEIPT_CONSUMER_GROUP"}},
 	}
 	for _, tc := range cases {
 		_, err := loadInboundConfig(get(tc.vars), retailnetwork.ModeLive)
@@ -63,7 +64,7 @@ func TestLoadBootConfig_LiveWithoutTheInboundURLsIsRefused(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "INBOUND_RECEIVING_URL") {
 		t.Fatalf("err = %v, want the missing inbound URL named", err)
 	}
-	vars["INBOUND_RECEIVING_URL"], vars["PRODUCT_MASTER_URL"] = "http://r", "http://p"
+	vars["INBOUND_RECEIVING_URL"], vars["PRODUCT_MASTER_URL"], vars["INBOUND_RECEIPT_CONSUMER_GROUP"] = "http://r", "http://p", "g"
 	cfg, err := loadBootConfig(func(k string) string { return vars[k] })
 	if err != nil || !cfg.inbound.enabled {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)

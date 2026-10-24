@@ -150,16 +150,18 @@ func run(ctx context.Context) int {
 	})
 
 	// The inbound loop (ADR 0028): live mode only, stopped before the pool closes.
-	loop, err := wireInboundLoop(cfg.inbound, in.gateway, in.sites, in.pool, circuitBreakerMetrics, logger)
+	loop, stopLoop, err := startInboundLoop(ctx, stop, cfg, in, circuitBreakerMetrics, logger)
 	if err != nil {
 		logger.Error("cannot wire the inbound loop", "err", err)
 		return 1
 	}
-	loopCtx, stopLoop := context.WithCancel(ctx)
-	loop.start(loopCtx)
 	defer loop.stop(stopLoop, inboundLoopStopBudget)
 
-	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
+	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
+	if loop.failed() && code == 0 {
+		code = 1 // a dead receipt consumer is a failure, whatever the signal said
+	}
+	return code
 }
 
 // bootInfra builds the pieces that must exist before any use case, in

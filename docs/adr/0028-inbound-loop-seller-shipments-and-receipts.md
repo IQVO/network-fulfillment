@@ -117,29 +117,47 @@ attempts every due `PENDING` shipment, oldest first, at most 100 per pass.
   `4xx`, a breaker per dependency, `circuit_breaker_state{dependency="inbound-receiving"}`
   and `"product-master"`), because those calls are idempotent by construction.
 
-### 4. Receipt return (steps 3 and 4 of the build)
-
-Decided here, built in the commits that follow.
+### 4. Receipt return
 
 - A consumer group of our own (`INBOUND_RECEIPT_CONSUMER_GROUP`, mandatory in live mode, the
-  chart renders it) reads `warehouse.inbound-receiving.events` (readers `MaxWait` 500 ms),
-  dispatches on the full CloudEvents `type`, ignores the rest, and projects
-  `ReceiptCartonReceived`, `CartonDiscrepancyRaised` and `ReceiptClosed` into local tables
-  keyed by ASN number, **only for ASNs this service registered** (`inbound_shipments` is the
-  filter), deduplicated on the CloudEvents `id`.
-- On `ReceiptClosed` the receipt is built from the projection: per carton `RECEIVED` (every
-  content `Good`), `DAMAGED` (any `Damaged`), `MISSING` (a `MissingCarton` discrepancy
-  whose `expected` is the manifest SSCC; no items), `UNEXPECTED` (an `UnexpectedCarton`
-  discrepancy; goods on the dock are reported, with whatever was counted), `items[{gtin,
-  qtyEaches}]` from the received contents, `complianceCodes` from the carton's other
-  discrepancy kinds in UPPER_SNAKE (`CaseQtyMismatch` becomes `CASE_QTY_MISMATCH`,
-  `CartonOverLimit` becomes `CARTON_OVER_LIMIT`, ...). Finding without an SSCC
-  (`UnknownGtin`, `UnlabelledCarton`) cannot be attached to a carton of the manifest and is
-  carried on the receipt's first carton only if the network's schema allows it; otherwise it
-  is logged and kept in the projection. The receipt is submitted once per shipment
-  (`SubmitInboundReceipt`), retried with backoff from a due-queue, and the `transactionId`
-  recorded.
-- `ReceiptClosed` carries no site and no node; both come from the shipment record.
+  chart renders it and refuses to render without it) reads inbound-receiving's
+  `warehouse.inbound-receiving.events` (kafka-go reader, `MaxWait` 500 ms, start at the earliest
+  offset for a new group, commit after handling). It is a **durable** group, unlike the replay
+  caches' per-process groups: a receipt closed while the pod was down is read when it returns.
+  It dispatches on the full CloudEvents `type`, ignores every other type, retries a failing
+  handler three times and then dead-letters to `<topic>.dlq` (the analytics consumer's rule),
+  and projects `ReceiptCartonReceived`, `CartonDiscrepancyRaised` and `ReceiptClosed` into local
+  tables (migration 0009) keyed by **ASN number**, only for ASNs in `inbound_shipments`; the id of
+  every applied CloudEvent is kept in the same transaction, so a redelivery changes nothing. The
+  ASN number is the Kafka key (inbound-receiving's rule); `CartonDiscrepancyRaised` carries none in
+  its data, so the key is the source. Same key and topic means the carton and discrepancy events of
+  a receipt arrive before its `ReceiptClosed`; the receipt is built at report time from the
+  projection, not at close time.
+- A consumer that stops on its own (a real fetch error, not a cancel) makes the process shut down
+  with exit code 1, like the capability caches: a service that silently stopped hearing about
+  receipts is worse than one that restarts.
+- `ReturnInboundReceipts` (a ticker, the same `INBOUND_INTAKE_INTERVAL`) reports every closed,
+  unreported receipt: per carton **RECEIVED** (every counted unit Good), **DAMAGED** (any
+  `Damaged`), **MISSING** (a manifest carton never accepted: the close raises `MissingCarton` for it
+  and, a closed receipt being the fact, the report does not depend on that event), **UNEXPECTED** (a
+  carton off the manifest that the dock accepted or flagged `UnexpectedCarton`; items are what was
+  counted, empty when the scan was refused); `items[{gtin, qtyEaches}]` are the counted eaches per
+  GTIN summed over conditions, in GTIN order; `complianceCodes` are the carton's other discrepancy
+  kinds in UPPER_SNAKE (`CaseQtyMismatch` becomes `CASE_QTY_MISMATCH`, `CartonOverLimit` becomes
+  `CARTON_OVER_LIMIT`), sorted, without duplicates, at most 20 (the network's limit). `receivedAt` is
+  the close; the node comes from the shipment record (`ReceiptClosed` has none).
+- **What cannot be reported**: a finding with no SSCC (`UnknownGtin`, `UnlabelledCarton`) and a
+  carton the dock accepted without a readable SSCC (it has only an internal LPN). The receipt has
+  no place for either (a carton is identified by its SSCC, and one not on the manifest is only
+  accepted as `UNEXPECTED`); both are logged at `WARN` and stay in the projection.
+- **Exactly once**: `SubmitInboundReceipt` is idempotent (Decision 2: ledger row, stored body,
+  deterministic key). The loop marks the receipt `SENT` after the call returns; a crash in between
+  replays the same stored request. A failure is retried with the same 1 minute to 1 hour backoff as
+  the intake and logged at `WARN`; a refusal that can never succeed (`contract.ErrReceiptRefused`,
+  from a definitive 4xx or from the transaction ending in `FAILURE`) parks the receipt as
+  `REJECTED` and is logged at `ERROR` with the network's errors. The transaction id is in the ledger
+  (`network_submissions`, kind `INBOUND_RECEIPT`, subject = the shipment reference), next to its
+  status.
 
 ### 5. Catalogue packaging to product-master (step 4)
 
@@ -149,11 +167,11 @@ Decided in the commit that builds it, only if the contracts allow it without gue
 
 - A seller shipment is an ASN before it arrives, once, whatever the poll replays, and the
   record of it survives a restart.
-- Three new boot variables in live mode (`INBOUND_RECEIVING_URL`, `PRODUCT_MASTER_URL`, and
-  with step 3 `INBOUND_RECEIPT_CONSUMER_GROUP`), each a boot error naming it and a chart
+- Three new boot variables in live mode (`INBOUND_RECEIVING_URL`, `PRODUCT_MASTER_URL`,
+  `INBOUND_RECEIPT_CONSUMER_GROUP`), each a boot error naming it and a chart
   render error; `INBOUND_INTAKE_INTERVAL` is optional. Stub mode reads none and runs no
   loop.
-- Migration `0008` (three tables and the widened kind check). It admits `NODE_PROFILE` too,
+- Migrations `0008` (three tables and the widened kind check) and `0009` (the receipt projection and queue). It admits `NODE_PROFILE` too,
   so it is correct whichever of this and ADR 0027's migration `0007` lands first.
 - The vendored Vendor API contract is refreshed (blob `fa5545b7b66b8f51afeed0b1e5a4581f46a9f890`,
   last changed on vendor-connectivity's `develop` by commit
@@ -187,3 +205,8 @@ Filled in as each step lands (see the pull request for the state of steps 3 and 
    `httptest` fakes: one ASN for a pallet-and-mixed-carton shipment, GTINs resolved once,
    the cursor persisted, a restart that registers nothing twice, an unknown GTIN that waits
    and then registers, and a verdict that parks the shipment.
+2. **Step 3** is built as Decision 4 says. `demand_inbound_receipt_integration_test.go` produces
+   the events inbound-receiving would publish onto a real Kafka topic and checks the whole
+   report: the statuses, items and compliance codes of the vendor receipt, a foreign ASN ignored,
+   a redelivered close counted once, the transaction in the ledger, nothing sent twice across a
+   restart, and a receipt the network fails parked as `REJECTED`.

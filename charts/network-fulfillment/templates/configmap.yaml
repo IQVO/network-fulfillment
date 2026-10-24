@@ -30,6 +30,10 @@ data:
   INBOUND_RECEIVING_URL: {{ .Values.config.inboundReceivingUrl | quote }}
   PRODUCT_MASTER_URL: {{ .Values.config.productMasterUrl | quote }}
   INBOUND_INTAKE_INTERVAL: {{ .Values.config.inboundIntakeInterval | quote }}
+  # This service's own consumer group on inbound-receiving's events topic (the
+  # receipt return, ADR 0028). Durable: a receipt closed while the pod was down
+  # is read when it comes back. Mandatory in live mode.
+  INBOUND_RECEIPT_CONSUMER_GROUP: {{ .Values.config.inboundReceiptConsumerGroup | quote }}
 {{- if .Values.networkNodes.nodes }}
 
   # What the network needs to register each site that is not yet one of its

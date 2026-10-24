@@ -711,3 +711,15 @@ last_error, next_attempt_at FROM inbound_shipments ORDER BY shipped_at;`
 **Signals.** `inbound shipments processed` (Info) and `inbound shipment not registered
 yet, retrying` (Warn) log lines; `circuit_breaker_state{dependency="inbound-receiving"}` and
 `{dependency="product-master"}` on `GET /metrics`.
+
+**The receipt return.** `SELECT asn_number, status, attempts, last_error, next_attempt_at FROM
+inbound_receipts;` shows each closed receipt: `SENT` (the network has it; the transaction id is
+in `network_submissions` where `kind = 'INBOUND_RECEIPT'`), `PENDING` with `last_error` (retrying
+with the same backoff), `REJECTED` (the network refused it for good; `inbound receipt refused, it
+will not be retried` at `ERROR`, with the network's errors in `last_error`; fix the cause, then
+`UPDATE inbound_receipts SET status = 'PENDING', next_attempt_at = now() WHERE asn_number = ...`;
+the stored request is replayed byte for byte). The consumer's group is
+`INBOUND_RECEIPT_CONSUMER_GROUP`: check its lag on `warehouse.inbound-receiving.events`; messages it
+could not handle are on `warehouse.inbound-receiving.events.dlq`. A receipt that never closes is
+not reported: the dock has to close it in inbound-receiving. If the consumer stops on its own the
+process exits with code 1 (`the receipt consumer stopped on its own; shutting down`).

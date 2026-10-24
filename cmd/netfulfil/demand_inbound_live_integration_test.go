@@ -37,26 +37,15 @@ type inboundRig struct {
 
 func startInboundRig(t *testing.T, ctx context.Context) *inboundRig {
 	t.Helper()
-	rig := &inboundRig{liveRig: startLiveRig(t, ctx)}
-	rig.inbound = newInboundNetwork(t, rig.network)
-	rig.receive = newFakeInboundReceiving(t)
-	rig.master = newFakeProductMaster(t)
+	live := startLiveRig(t, ctx)
+	rig := &inboundRig{liveRig: live, inbound: live.inbound, receive: live.receive, master: live.master}
 	rig.network.addNode(liveSite) // the site is already a node: adopted by its vendorNodeCode
 	return rig
 }
 
 func (r *inboundRig) start(t *testing.T, ctx context.Context, overrides map[string]string) func() (int, error) {
 	t.Helper()
-	vars := map[string]string{
-		"NETWORK_BASE_URL":        r.inbound.srv.URL,
-		"INBOUND_RECEIVING_URL":   r.receive.srv.URL,
-		"PRODUCT_MASTER_URL":      r.master.srv.URL,
-		"INBOUND_INTAKE_INTERVAL": "300ms",
-	}
-	for k, v := range overrides {
-		vars[k] = v
-	}
-	return r.liveRig.start(t, ctx, vars)
+	return r.liveRig.start(t, ctx, overrides)
 }
 
 func shipmentTree(id string) fakeShipment {

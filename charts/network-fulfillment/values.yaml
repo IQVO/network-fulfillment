@@ -233,6 +233,13 @@ config:
   # retries the ones that could not be registered yet (ADR 0028). Live only.
   inboundIntakeInterval: "30s"
 
+  # INBOUND_RECEIPT_CONSUMER_GROUP: this service's consumer group on
+  # inbound-receiving's events topic, through which closed receipts (cartons and
+  # discrepancies included) come back to be reported to the network (ADR 0028).
+  # Durable and unique to this service. Live only; the chart and the binary both
+  # refuse live without it. No default: warehouse-infra names it.
+  inboundReceiptConsumerGroup: ""
+
   # order-management's in-cluster REST base URL. The one upstream this
   # context calls; the default matches the fleet's service naming.
   orderManagementUrl: "http://order-management.warehouse.svc.cluster.local"

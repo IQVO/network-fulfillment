@@ -202,6 +202,9 @@ schema (retailnetwork.LoadNodesFile) so a typo fails the render, not the boot.
 {{- if not .Values.config.productMasterUrl -}}
 {{- $missing = append $missing "config.productMasterUrl (PRODUCT_MASTER_URL)" -}}
 {{- end -}}
+{{- if not .Values.config.inboundReceiptConsumerGroup -}}
+{{- $missing = append $missing "config.inboundReceiptConsumerGroup (INBOUND_RECEIPT_CONSUMER_GROUP)" -}}
+{{- end -}}
 {{- if $missing -}}
 {{- fail (printf "config.networkMode=live requires %s to be set: the binary refuses to boot in live mode without them" (join " and " $missing)) -}}
 {{- end -}}
