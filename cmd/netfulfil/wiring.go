@@ -18,29 +18,73 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/resilience"
 )
 
-// wireGateway wires the outbound network gateway for the NETWORK_MODE env
-// var, returning the parsed mode alongside it so the composition root can
-// both log it at startup and expose it on the status surface — the
-// running value must be verifiable, not assumed. NETWORK_BASE_URL is the
-// live-mode target (ADR 0009 §4); read here so it reaches the gateway
-// even though no live adapter exists yet to dial it with.
-func wireGateway(logger *slog.Logger) (ports.NetworkGateway, retailnetwork.Mode, error) {
-	mode := retailnetwork.ParseMode(os.Getenv("NETWORK_MODE"))
-	baseURL := os.Getenv("NETWORK_BASE_URL")
-	if mode == retailnetwork.ModeLive && baseURL == "" {
-		return nil, mode, fmt.Errorf("NETWORK_MODE=live requires NETWORK_BASE_URL to be set")
+// loadNetworkNodes reads NETWORK_NODES_FILE (ADR 0026 Decision 7): what the
+// network needs to register each site that is not yet one of its nodes.
+//
+// It runs before the database is dialled, like the product dictionary, so a
+// malformed file stops the boot early and by name. The file is optional only
+// when every site is already a node on the network (adoption): a site with
+// neither a node nor a definition is logged by the gateway at each poll, not
+// fatal. Stub mode never reads it.
+func loadNetworkNodes(logger *slog.Logger, cfg networkConfig) ([]retailnetwork.NodeDefinition, error) {
+	if cfg.mode != retailnetwork.ModeLive {
+		return nil, nil
 	}
-	if mode == retailnetwork.ModeLive {
-		// Refusing to boot is deliberate. A deployment that asked for a
-		// real network and silently got a stub would look healthy while
-		// answering nobody.
-		return nil, mode, fmt.Errorf("NETWORK_MODE=live is not wired yet (ADR 0026 step in progress)")
+	if cfg.nodesFile == "" {
+		logger.Info("no NETWORK_NODES_FILE set; live mode can only adopt sites that already are nodes on the network")
+		return nil, nil
 	}
-	gateway := retailnetwork.NewStubGateway(logger)
-	logger.Info("network gateway wired", "mode", mode, "baseURL", baseURL)
-	return gateway, mode, nil
+	nodes, err := retailnetwork.LoadNodesFile(cfg.nodesFile)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("network node definitions loaded", "file", cfg.nodesFile, "nodes", len(nodes))
+	return nodes, nil
+}
+
+// wireGateway wires the outbound network gateway for the NETWORK_MODE the
+// boot configuration carries; the composition root logs the mode at startup
+// and exposes it on the status surface, because the running value must be
+// verifiable, not assumed.
+//
+// Stub is the default and talks to nobody. Live (ADR 0026) calls the Vendor
+// API at NETWORK_BASE_URL as NETWORK_VENDOR_ID and keeps its identifier maps
+// and submission ledger in the service's own Postgres, which is why it takes
+// the pool. The sites it converges onto network nodes are SITE_ID plus every
+// site of the node definitions. The client's timeout, retry and breaker
+// behaviour is the one ADR 0026 Decision 8 fixes: it has no environment knob.
+//
+// Refusing to boot on a bad live configuration is deliberate. A deployment that
+// asked for a real network and silently got a stub would look healthy while
+// answering nobody.
+func wireGateway(
+	logger *slog.Logger,
+	cfg networkConfig,
+	nodes []retailnetwork.NodeDefinition,
+	pool *pgxpool.Pool,
+	breaker resilience.StateRecorder,
+) (ports.NetworkGateway, error) {
+	if cfg.mode != retailnetwork.ModeLive {
+		logger.Info("network gateway wired", "mode", cfg.mode)
+		return retailnetwork.NewStubGateway(logger), nil
+	}
+	gateway, err := retailnetwork.NewLiveGateway(retailnetwork.LiveConfig{
+		BaseURL:  cfg.baseURL,
+		VendorID: cfg.vendorID,
+		Sites:    []string{string(siteId())},
+		Nodes:    nodes,
+		Store:    retailnetwork.NewPGStore(pool),
+		Logger:   logger,
+		Recorder: breaker,
+	})
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("network gateway wired", "mode", cfg.mode, "baseURL", cfg.baseURL, "vendorId", cfg.vendorID, "site", siteId(), "nodeDefinitions", len(nodes))
+	return gateway, nil
 }
 
 // seedStubDemand loads NETWORK_SEED_FILE into the stub gateway.
@@ -103,15 +147,15 @@ func loadProductTranslation(logger *slog.Logger) (ports.ProductTranslation, erro
 // circuit_breaker_state gauge (ADR 0004), served at GET /metrics; they
 // never fail (see NewCircuitBreakerMetrics' own doc comment), so there
 // is no degraded-but-non-fatal branch to log, unlike order-management's
-// OTel-instrument-name variant.
-func wirePlanner() (ports.FulfillmentPlanner, *telemetry.CircuitBreakerMetrics) {
+// OTel-instrument-name variant. The metrics are built by the caller because the
+// retail-network breaker (ADR 0026 Decision 8) reports into the same gauge.
+func wirePlanner(metrics *telemetry.CircuitBreakerMetrics) ports.FulfillmentPlanner {
 	omBase := os.Getenv("ORDER_MANAGEMENT_URL")
 	if omBase == "" {
 		omBase = "http://localhost:8080"
 	}
 	rawPlanner := ordermanagement.NewPlanner(omBase, nil)
-	metrics := telemetry.NewCircuitBreakerMetrics()
-	return ordermanagement.NewBreakerClient(rawPlanner, metrics), metrics
+	return ordermanagement.NewBreakerClient(rawPlanner, metrics)
 }
 
 // wireUseCases builds the use cases this composition root serves,
