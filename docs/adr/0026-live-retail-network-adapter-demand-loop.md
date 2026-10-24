@@ -208,13 +208,19 @@ mutations for lack of an idempotency-key contract; here every write has one
 ### 9. Contract test
 
 `testdata/vendor-connectivity-openapi.yaml` is a byte copy of
-`vendor-connectivity` `apis/openapi.yaml` at commit
-`1582ecae365e4ff80228b9acfef328e2a062e22a` (`develop`, 2026-10-24). A test loads
-it, validates every request body the adapter builds against the component schemas
-(required fields, enums, types, `additionalProperties`) and decodes recorded
-responses through the adapter's own DTOs. **Drift note:** the copy is not
-refreshed automatically; when `vendor-connectivity` changes its contract, copy the
-new file over it, record the new commit here and fix what the test reports.
+`vendor-connectivity` `apis/openapi.yaml` (blob
+`7393aeb57374eb7e38d98272a6851a5ee4ba36a1`, last changed by commit
+`26c54625e72343d5e1e7ede651dcfe03ed149706`, copied from its `develop` at
+`802cfe28096ac25288522063db3ab92aba60de06` on 2026-10-24). The repository already
+carries a JSON Schema validator (`google/jsonschema-go`, through the MCP SDK), so
+the test loads the spec, resolves its component schemas and validates every request
+body the adapter builds (types, required fields, enums, no property the schema does
+not list, because the server refuses unknown fields), checks recorded responses
+against the schemas and decodes them through the adapter's own DTOs, and drives each
+client operation against a recording server to prove the route exists with its
+`Idempotency-Key` or `vendorId` parameter. **Drift note:** the copy is not refreshed
+automatically; when `vendor-connectivity` changes its contract, copy the new file
+over it, record the new commit here and fix what the test reports.
 
 ### 10. Configuration
 

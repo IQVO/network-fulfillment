@@ -23,8 +23,12 @@ func (nopGateway) PollDemand(context.Context, time.Time) ([]contract.InboundDema
 	return nil, nil
 }
 
-func (nopGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, contract.Acknowledgement) error { return nil }
-func (nopGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef, time.Time) error  { return nil }
+func (nopGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, contract.Acknowledgement) error {
+	return nil
+}
+func (nopGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef, time.Time) error {
+	return nil
+}
 func (nopGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
 	return nil
 }
