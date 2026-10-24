@@ -127,7 +127,7 @@ sequenceDiagram
 
 Source: `internal/application/usecases/reconcile_submitted_orders.go`,
 `cmd/netfulfil/main.go` (`runReconcile`),
-`internal/adapters/outbound/network/gateway.go` (`StubGateway.SubmissionStatus`).
+`internal/adapters/outbound/retailnetwork/stub.go` (`StubGateway.SubmissionStatus`).
 
 Omitted: release and cancel run only when a `localOrderId` is linked, which
 is always the case on this path. The stub reconciles any acknowledged

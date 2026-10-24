@@ -66,5 +66,5 @@ difference is flagged in the last section. Code wins over this page.
 | "Not acknowledged" error | `ErrNotAcknowledged` | Returned by `LinkLocalOrder` when the state is not `SUBMITTED`/`ACKNOWLEDGED`. The name predates the `SUBMITTED` state. |
 | "Linked" local order | `LocalOrderId` on the aggregate, recorded by `RecordHold` at raise time | `LinkLocalOrder` (at `SUBMITTED`) is now a no-op for the id `RecordHold` already stored; `ErrLocalOrderAlreadyLinked` still means a different id. |
 | "Deadline at risk" | `AcknowledgementDeadlineAtRisk` | ADR 0001 §6 says "approaching" the deadline. The code fires only once it is already **past** (`AcknowledgementOverdue`). |
-| Purchase order / ASIN / `poNumber` | `NetworkRef` / `NetworkProductId` | By design (Hard rule 1). The counterpart's names never appear outside `adapters/outbound/network/`. |
+| Purchase order / ASIN / `poNumber` | `NetworkRef` / `NetworkProductId` | By design (Hard rule 1). The counterpart's names never appear outside `adapters/outbound/retailnetwork/`. |
 | "Planner" | `FulfillmentPlanner` | This is `order-management` seen through a port. It does not plan anything itself. |
