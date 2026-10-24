@@ -184,20 +184,43 @@ func e2eFreeAddr(t *testing.T) string {
 	return l.Addr().String()
 }
 
+// e2eCreateTopic creates topic and waits for its leader. The broker container
+// counts as ready once its start-up log line shows, which is before it
+// reliably answers admin requests: a CI run had the very first CreateTopics
+// reset by the peer ("connection reset by peer") and failed the test before the
+// service even started. So the whole exchange is retried until the broker
+// answers; a topic created by an attempt whose reply was lost is already there.
 func e2eCreateTopic(t *testing.T, ctx context.Context, broker, topic string) {
 	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var err error
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if err = e2eTryCreateTopic(ctx, broker, topic); err == nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("create topic %s: %v", topic, err)
+}
+
+func e2eTryCreateTopic(ctx context.Context, broker, topic string) error {
 	conn, err := kafkago.DialContext(ctx, "tcp", broker)
 	if err != nil {
-		t.Fatalf("dial kafka: %v", err)
+		return err
 	}
 	defer func() { _ = conn.Close() }()
-	if err := conn.CreateTopics(kafkago.TopicConfig{Topic: topic, NumPartitions: 1, ReplicationFactor: 1}); err != nil {
-		t.Fatalf("create topic %s: %v", topic, err)
+	err = conn.CreateTopics(kafkago.TopicConfig{Topic: topic, NumPartitions: 1, ReplicationFactor: 1})
+	if err != nil && !errors.Is(err, kafkago.TopicAlreadyExists) {
+		return err
 	}
-	e2eWaitFor(t, ctx, 30*time.Second, "topic "+topic+" has a leader", func() bool {
-		parts, err := conn.ReadPartitions(topic)
-		return err == nil && len(parts) == 1 && parts[0].Leader.Host != ""
-	})
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if parts, err := conn.ReadPartitions(topic); err == nil && len(parts) == 1 && parts[0].Leader.Host != "" {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("topic %s has no leader", topic)
 }
 
 func e2eWaitFor(t *testing.T, ctx context.Context, timeout time.Duration, what string, cond func() bool) {
