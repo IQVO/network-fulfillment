@@ -335,4 +335,5 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w.registerEventSteps(sc)
 	w.registerOfferSteps(sc)
 	w.registerReportSteps(sc)
+	w.registerHardeningSteps(sc)
 }
