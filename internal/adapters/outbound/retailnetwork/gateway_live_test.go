@@ -26,14 +26,27 @@ func failFirst(method, path string, n, status int, header map[string]string) fun
 	}
 }
 
-// slowFirst makes the first n requests for a GET path outlive the call timeout.
-func slowFirst(path string, n int, d time.Duration) func(http.ResponseWriter, *http.Request) bool {
+// slowFirst makes the first n requests for method+path outlive the call timeout
+// (the handler behind it still runs afterwards, as a real server would).
+func slowFirst(method, path string, n int, d time.Duration) func(http.ResponseWriter, *http.Request) bool {
 	var count atomic.Int32
 	return func(_ http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodGet && r.URL.Path == path && int(count.Add(1)) <= n {
+		if r.Method == method && r.URL.Path == path && int(count.Add(1)) <= n {
 			time.Sleep(d)
 		}
 		return false
+	}
+}
+
+// refuseFirst answers the first n requests for method+path with a problem of the given type.
+func refuseFirst(method, path string, n, status int, slug string) func(http.ResponseWriter, *http.Request) bool {
+	var count atomic.Int32
+	return func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != method || r.URL.Path != path || int(count.Add(1)) > n {
+			return false
+		}
+		problem(w, status, slug)
+		return true
 	}
 }
 
@@ -333,7 +346,7 @@ func TestLive_PollDemandRetriesA5xxAndATimeout(t *testing.T) {
 	f := readyFixture(t, func(c *fixtureCfg) { c.client = func(cc *clientConfig) { cc.callTimeout = 50 * time.Millisecond } })
 	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}})
 	fail5xx := failFirst(http.MethodGet, "/vendor/purchase-orders", 1, http.StatusServiceUnavailable, nil)
-	slow := slowFirst("/vendor/nodes", 1, 300*time.Millisecond)
+	slow := slowFirst(http.MethodGet, "/vendor/nodes", 1, 300*time.Millisecond)
 	f.sim.inject = func(w http.ResponseWriter, r *http.Request) bool { return slow(w, r) || fail5xx(w, r) }
 
 	if refs := f.poll(t); len(refs) != 1 {

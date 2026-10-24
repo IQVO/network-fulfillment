@@ -335,6 +335,12 @@ func (v *vendorSim) addOrder(po purchaseOrderDTO) {
 	v.orders[po.PoNumber] = po
 }
 
+func (v *vendorSim) addTx(tx transactionDTO) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.txs[tx.TransactionID] = &tx
+}
+
 // ---- fixtures ----
 
 type syncBuffer struct {

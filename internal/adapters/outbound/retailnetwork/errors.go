@@ -29,6 +29,11 @@ var (
 
 	// ErrBadPackageCount: a label was requested for fewer than one package.
 	ErrBadPackageCount = errors.New("retail-network: an order has at least one package")
+
+	// ErrWriteRefused: the network answered a write with a definitive refusal
+	// (for example ack-window-closed). The ledger row is FAILURE and the write
+	// is never sent again; the wrapped *APIError carries the problem.
+	ErrWriteRefused = errors.New("retail-network: the network refused this write")
 )
 
 // APIError is the network answering with a problem (RFC 9457) that is not worth
