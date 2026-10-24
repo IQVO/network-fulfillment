@@ -271,4 +271,87 @@ and tested in part 1 and are meant to be reused as they are.
 
 ## As built (part 1)
 
-Filled in when part 1 is complete (see the section below once the code lands).
+Part 1 is on `develop` as this ADR's first deliverable; part 2 (Decisions 9 to 12) is
+not built and `SubmitAvailability` is still the documented, non-failing, log-once
+no-op of ADR 0026. What the code does, where it differs from or adds to the Decisions:
+
+1. **The port.** `NetworkGateway.DeclareNodeProfile(ctx, contract.NodeProfile)
+   (contract.ProfileResult, error)` replaces `DeclareCapability`; `CapabilityDeclaration`
+   is gone. `ProcessPathCapability` gained `Schedule(siteId, after)`, answered by the
+   process-path cache from the weekly `CPTScheduleChanged` data (a cutoff it cannot
+   read, for example a time that is not `HH:mm`, is left out; a schedule with none
+   left is "not found"; the next occurrence is looked for within 8 days). Three narrow
+   ports serve the use case: `ProfileDeclarer`, `ProfileHistory` (`LastDeclared`,
+   implemented by the live gateway from its persisted content) and `ProfileMetrics`.
+   The stub records the last profile per site, returns `unchanged` and sends nothing.
+2. **Results.** `ProfileResult.Outcome` is one of `declared` (written in this call,
+   outcome not read yet), `confirmed` (settled `SUCCESS` in this call), `pending` (an
+   earlier write still processing, or another declarer holds the revision),
+   `unchanged` (the content is already settled), `failed`, and the three `skipped_*`
+   the use case itself reports. A refusal by the network is a result; a call that could
+   not be made is an error and the next pass repeats it.
+3. **Derivation (Decision 3).** Cutoffs that share a local time are one cutoff
+   whatever the ship method (days united, earliest next occurrence, paths united). A
+   path counts for the handling time only with a known, positive `cycleTimeP95` that
+   fits the longest gap of the schedule; for a slot's ceiling it counts by ADR 0017's
+   rule against the time left to that slot's next occurrence (so an unknown cycle time
+   stays eligible there, as it does for the offer). A slot with no occurrence in the
+   look-ahead has an unknown ceiling. The ceiling memory is keyed by the slot's local
+   time and days, so a slot that changed shape starts from what is observed. The
+   fingerprint hashes the zone, the handling time in whole minutes, the throughput and
+   the slots (sorted), and nothing else. A `LastDeclared` that cannot be read leaves the
+   site for the next pass (reported `failed`), because declaring without it could lower
+   a ceiling.
+4. **The body.** `buildNodeProfileBody` is deterministic byte for byte (the weekday map
+   is encoded sorted) and is built and validated before any I/O and before a revision
+   is taken: no zone, no cutoff, a time that is not `HH:mm`, a day outside Sunday to
+   Saturday, a negative ceiling, no handling time, no throughput, or two cutoffs at one
+   time on a shared day is `ErrBadProfile`, never a request. `operatingHoursByDay` is
+   `00:00` to `23:59` on each weekday that has a cutoff and absent on the others (the end
+   is inclusive in node-topology, which is why `23:59` holds a cutoff at `23:59`);
+   `holidays` and `sortDwellMinutes` are not sent; an unknown ceiling omits `maxOrders`.
+   The handling time is rounded up to whole minutes in both the use case and the body.
+5. **The revision (Decision 4).** `network_node_profiles.site_code` references
+   `network_nodes`, so a site with no node has no revision and `DeclareNodeProfile`
+   answers `ErrSiteNotRegistered` (the use case reports `skipped_no_node` at `INFO`).
+   `AdvanceNodeProfile` is one guarded upsert on `(revision, attempt)` and returns the
+   state in force: when another replica has already taken that revision for other
+   content, the call sends nothing and reports `pending` at that revision. Stale
+   recovery is bounded per call: the first call can write twice (the stale write, then
+   the recovered one); a later pass that finds a stale `FAILURE` row recovers with one
+   write. The recovered revision is `max(ours, the network's) + 1`.
+6. **Failures (Decision 5).** A failure learned in a call is logged at `ERROR` with the
+   network's list; the same standing refusal on later passes is logged at `WARN`
+   (`stays failed until the profile changes`), so an operator sees it once loudly. A
+   write the network refused outright (a `422` on the `PUT`) leaves a `FAILURE` row
+   with no transaction id and is final for that content. A retryable failure is
+   retried on the next pass at the same revision, as attempt 2, 3, ...: the key is
+   `nf-profile-<site>-<revision>-<attempt>` from attempt 2.
+7. **The worker (Decision 6).** `cmd/netfulfil/profile.go`: live mode only,
+   one pass at boot and then every `NETWORK_PROFILE_INTERVAL` (a malformed or negative
+   value warns and keeps `5m`; `0` disables with a `WARN`). The sites are the live
+   gateway's own (`LiveGateway.Sites`: `SITE_ID` plus the node file's). Shutdown waits
+   for the worker inside the existing 10 second budget. The chart renders
+   `NETWORK_PROFILE_INTERVAL` from `config.networkProfileInterval`, in live mode only.
+8. **Metrics (Decision 8).** The counter has the unit `{declaration}` and the gauge
+   `{revision}`; the gauge is only recorded when an attempt concerned a revision.
+
+**Evidence.** The request body and every route are checked against the vendored
+`testdata/vendor-connectivity-openapi.yaml`, whose blob is identical to the
+`apis/openapi.yaml` of vendor-connectivity on its `develop` (checked at the time of
+writing; the file is the contract and is vendored on purpose). The gateway runs
+against a stateful fake Vendor API that judges a revision the way node-topology does (a
+revision not above the one held fails the transaction with `ErrStaleProfileRevision`,
+and the node view shows the revision), covering the first declaration, the unchanged
+content, a restart, a call that never got an answer, both stale paths, a lagging node
+view, retryable and final failures, a refused `PUT`, and a lost revision race. The
+store runs against a real Postgres (testcontainers, build tag `integration`): the
+guarded write, 16 racing writers, a reopen, and migration 0007 up, down and up with
+data in it.
+
+**Not verified.** There is no test against a running node-topology or a real network:
+the fake models their documented rule, not their code. No deployment was changed (the
+cluster stays `NETWORK_MODE=stub`), so the worker has not run against a real
+`CPTScheduleChanged` stream. `ErrIncompleteOperationalProfile` and
+`ErrCutoffOutsideOperatingHours` are treated as final from the vendor-connectivity and
+node-topology sources, not from a sample of the live service.
