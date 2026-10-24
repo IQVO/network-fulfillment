@@ -74,7 +74,8 @@ Built: node mapping (adopt or register), `PollDemand`, `SubmitAcknowledgement`
 (accept, and reject with a reason), `SubmissionStatus`, `RequestLabel`,
 `SubmitShipmentConfirmation`, and `NETWORK_MODE=live` boot. **Not built, and not
 failing:** `DeclareCapability` and `SubmitAvailability` are explicit no-ops in the
-live gateway that log once per call at DEBUG and name ADR 0027; the node profile
+live gateway that log at Info on the first call of each method and at Debug after
+that, and name ADR 0027 (amended, see As built 2); the node profile
 and the inventory feed do not exist yet. Vendor onboarding (`POST /vendors`) is a
 network partner-manager operation, not part of the vendor-facing protocol: the
 vendor account `NETWORK_VENDOR_ID` must already exist (the platform seeds it) and
@@ -126,7 +127,8 @@ programming errors and return an error before any I/O.
 
 ### 4. Identifiers are mapped and persisted (migration 0006)
 
-Four tables, all in this service's Postgres and all written by the adapter:
+Five tables (`network_purchase_orders` and its lines are two), all in this
+service's Postgres and all written by the adapter:
 
 - `network_nodes (site_code PK, node_id UNIQUE, ...)`: `siteCode <-> nodeId`.
 - `network_purchase_orders (network_ref PK, po_number UNIQUE, vendor_id, node_id,
@@ -164,7 +166,9 @@ order this context already answered, or one the network ended (`EXPIRED`,
 `CANCELLED`). A purchase order on a node the adapter has no map for triggers a
 `GET /vendor/nodes` refresh (the node's `vendorNodeCode` is the site code it was
 registered under); if the node is still unknown the poll fails and the next tick
-retries, nothing is skipped.
+retries, nothing is skipped. **Amended, see As built 1 and 4:** the node refresh is
+not triggered by an unknown node but runs at the start of every poll, and a
+purchase order whose node is still unmapped is skipped with a warning, not failed.
 
 ### 6. Reconciliation
 
@@ -244,8 +248,10 @@ listing of every SKU the dictionary knows, which the demand loop cannot provide.
 ## Consequences
 
 - The fleet can answer real purchase orders: acknowledged, rejected with the right
-  reason, reconciled, labelled and confirmed, and a kill between any two of those
-  steps ends with one order here and one write on the network.
+  reason, reconciled, labelled and confirmed. The ledger row is written before the
+  call, so a process death between two of those steps is designed to end with one
+  order here and one write on the network; what is tested is a graceful stop (see
+  As built 8), not a `SIGKILL`.
 - Acknowledgement deadlines are the network's, which for a late-evening order is far
   shorter than 24 hours.
 - Known residuals, none introduced here: a shipment confirmation whose HTTP call
@@ -253,10 +259,11 @@ listing of every SKU the dictionary knows, which the demand loop cannot provide.
   ([ADR 0018](./0018-godog-bdd-acceptance-tests.md) finding 3); the network's
   `FAILURE` of a shipment confirmation is recorded but no use case reconciles it; a
   single package per order until a fleet fact carries the real count.
-- One new migration (0006), four tables, one optional config file, two new env
+- One new migration (0006), five tables, one optional config file, two new env
   vars (`NETWORK_VENDOR_ID`, `NETWORK_NODES_FILE`), no new dependency module (the
-  contract test promotes `google/jsonschema-go` and `yaml.v3`, already in
-  `go.sum`).
+  contract test promotes `google/jsonschema-go` v0.4.3 and `gopkg.in/yaml.v3`
+  v3.0.1 from indirect to direct in `go.mod`; neither version changed and both
+  were already in `go.sum`).
 - The package is renamed `outbound/network/` to `outbound/retailnetwork/`
   ([ADR 0009](./0009-retail-network-not-amazon-counterpart.md) §2) in the same
   change; the stub, its seed loader and `NETWORK_SEED_FILE` move with it unchanged.
@@ -274,3 +281,95 @@ listing of every SKU the dictionary knows, which the demand loop cannot provide.
 - **Mapping `ACKNOWLEDGEMENT_DEADLINE_MISSED` to `CANNOT_MEET_SHIP_BY`.** The write
   would be refused (`ack-window-closed`) and would claim a reason that is not true.
 - **Making `/readyz` depend on the network.** Rejected, Decision 10.
+
+## As built
+
+Where the code differs from, or fixes, what the Decisions above say. The Decisions
+stay as written; this section wins where they disagree. Status is unchanged
+(Accepted).
+
+1. **A purchase order on an unmapped node is skipped, not failed (amends Decision
+   5).** `PollDemand` converges the nodes at the start of every poll (list, adopt,
+   register), then maps each purchase order's `nodeId` to a site. A node that is
+   still unmapped skips that purchase order with a `WARN`
+   (`purchase order skipped, its node is not mapped to any of our sites`, fields
+   `nodeId` and `poNumber`) and the pass goes on, so one stray node cannot stop the
+   other sites' demand. There is no metric for the skip: the log line is the only
+   signal. **Residual risk, recorded on purpose:** the poller's watermark lives in
+   the process and starts at zero. A pass that skipped an order still counts as
+   clean, so the watermark moves past it and the next ticks (which look back only
+   `pollOverlap`, 2 minutes) do not ask for it again. It is read again on the next
+   boot, when the watermark is zero again and the network returns everything it
+   still lists as `ISSUED`; if the node is mapped by then it is received, and if
+   not, the network expires it at its `ackBy`. A skipped order can therefore be
+   lost to expiry, and the `WARN` is what tells an operator to map the node.
+2. **Supply-loop no-ops are quiet (amends Decision 1).** `DeclareCapability` and
+   `SubmitAvailability` log at `Info` the first time each is called in a process
+   and at `Debug` after that, so the recompute ticker does not fill the log.
+3. **Which refusals are final (refines Decisions 4 and 6).** Only a definitive
+   refusal becomes a verdict: `409` `ack-window-closed`, `illegal-transition`,
+   `confirm-without-label` and `label-before-acceptance`, and `422`
+   `validation-failed`. The ledger row is stored as `FAILURE` and every later call
+   returns `ErrWriteRefused` without a request; `SubmissionStatus` turns it into the
+   `FAILURE` that `ReconcileSubmittedOrders` acts on. Everything else stays an
+   error and is retried on the next tick: a `409` `concurrent-update`, `403`,
+   `404`, `422` `idempotency-key-reused`, `429` after its retries, `5xx` and
+   transport errors. A network `FAILURE` of a **shipment confirmation** is logged at
+   `ERROR` (`the network failed a shipment confirmation; the order stays accepted
+   there until an operator acts`) and not returned, because no use case reconciles a
+   confirmation; the ledger row keeps the errors.
+4. **Identifier shapes (refines Decision 4).** `NetworkLineRef` is `line-<lineNo>`
+   and `NetworkProductId` is the listing id, both derived once when the purchase
+   order is first stored. Idempotency keys are `nf-ack-<ref>`, `nf-ship-<ref>`,
+   `nf-node-<site>` and `nf-label-<ref>`. The label request is the one synchronous
+   write and has **no ledger row**: its deterministic key makes a retry of the same
+   body a replay on the network. Labels are stored only after the answer checks out
+   (one label per package, each with a tracking number); a response that does not
+   persists nothing and returns an error. Once labels are stored `RequestLabel`
+   returns them whatever count is asked, so the **first package count wins**
+   (the same key with another body would be `idempotency-key-reused`).
+5. **Configuration (refines Decisions 7 and 10).** `LiveConfig` takes `Sites` and
+   `Nodes`. The sites converged onto network nodes are `SITE_ID` (default
+   `site-1`) plus every site of the node definitions. Node definitions come from
+   `NETWORK_NODES_FILE` (strict JSON, `retailnetwork.LoadNodesFile`; a typo'd key, a
+   missing field, half a coordinate or a duplicate site is a boot error). A site
+   whose `vendorNodeCode` is already a node on the network is **adopted** (its
+   `nodeId` is stored) with or without a definition, and a mapped site is never
+   registered again. A site with neither a node nor a definition is a `WARN` at
+   every poll, not a boot error.
+   The environment, exactly: `NETWORK_MODE` (default `stub`; anything but `live`
+   is `stub`); `NETWORK_BASE_URL` and `NETWORK_VENDOR_ID`, read only in live mode,
+   with one boot error naming every one that is missing; `NETWORK_NODES_FILE`,
+   optional and live only; `NETWORK_SEED_FILE`, stub only and refused against the
+   live gateway; `DATABASE_URL` and `KAFKA_BROKERS`, mandatory in every mode. There
+   is no timeout, retry or backoff variable: Decision 8's numbers are fixed in
+   code.
+6. **Boot order.** The gateway is built after the Postgres pool (the live one
+   keeps its maps and ledger there), so a live boot without a reachable database
+   never gets as far as the network. The node file is read before the database is
+   dialled, like the product dictionary.
+7. **One breaker gauge.** order-management's breaker and the network's report into
+   one `telemetry.CircuitBreakerMetrics`, so
+   `circuit_breaker_state{dependency="retail-network"}` is on `GET /metrics` next to
+   `dependency="order-management"`.
+8. **What the restart test proves.** `TestLiveDemand_RestartAfterAcknowledgementSubmitted`
+   stops the service with a context cancel (a graceful shutdown), not a `SIGKILL`,
+   between the acknowledgement being sent and its reconciliation, and starts it on
+   the same database. It shows one order in order-management and one write on the
+   network. A hard kill is covered only by the design (ledger row and body before
+   the call, transaction id stored as soon as the `202` is read, an unsent row
+   resent from the stored body), not by a test that kills the process.
+9. **The vendored contract's source and how to refresh it (amends Decision 9).**
+   `testdata/vendor-connectivity-openapi.yaml` is `apis/openapi.yaml` at blob
+   `7393aeb57374eb7e38d98272a6851a5ee4ba36a1`, last changed on that service's
+   `develop` by commit `26c54625e72343d5e1e7ede651dcfe03ed149706`
+   (`git log -1 --format=%H origin/develop -- apis/openapi.yaml`); `develop` was at
+   `802cfe28096ac25288522063db3ab92aba60de06` when it was copied. To refresh it:
+   `git show origin/develop:apis/openapi.yaml` from a current checkout of that
+   service, written byte for byte over the vendored file (no re-formatting);
+   `git hash-object` of the result must equal `git rev-parse
+   origin/develop:apis/openapi.yaml`; run
+   `go test ./internal/adapters/outbound/retailnetwork/...` (the contract test) and fix
+   what it reports; then update the three hashes above. Nothing compares the copy
+   with the service automatically, so a drift stays invisible until someone does
+   this.
