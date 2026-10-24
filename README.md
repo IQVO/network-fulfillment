@@ -6,7 +6,7 @@
 > CloudEvents 1.0 event envelopes, RFC 7807, hexagonal architecture) but is
 > **not a production system** and is **not affiliated with, endorsed by, or
 > representative of any real-world
-> company**. References to a major e-commerce retailer's Selling Partner API describe a public
+> company**. References to a major e-commerce retailer's vendor platform API describe a public
 > API this exercise integrates against as a learning target.
 
 The anti-corruption layer between the `warehouse-systems` fleet and an

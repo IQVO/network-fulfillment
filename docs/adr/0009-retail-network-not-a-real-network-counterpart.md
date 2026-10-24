@@ -1,13 +1,13 @@
 ---
-id: 0009-retail-network-not-amazon-counterpart
-slug: /adr/0009-retail-network-not-amazon-counterpart
-title: "9. The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API"
+id: 0009-retail-network-not-a-real-network-counterpart
+slug: /adr/0009-retail-network-not-a-real-network-counterpart
+title: "9. The counterpart is retail-network, our own ecosystem service — not a real external network's vendor platform API"
 sidebar_label: "9. retail-network, not the real network"
 sidebar_position: 9
-description: "ADR 0009 (Accepted) amends ADR 0001: the external retail fulfillment network this context is Conformist to is retail-network, a new service inside our own ecosystem playing that role — not an integration against a real e-commerce retailer's Selling Partner API. Renames the ACL adapter package, defers (not drops) a real SP-API adapter, and tightens the PII rule to zero ship-to data in this context at all."
+description: "ADR 0009 (Accepted) amends ADR 0001: the external retail fulfillment network this context is Conformist to is retail-network, a new service inside our own ecosystem playing that role — not an integration against a real e-commerce retailer's vendor platform API. Renames the ACL adapter package, defers (not drops) a real vendor platform API adapter, and tightens the PII rule to zero ship-to data in this context at all."
 ---
 
-# 9. The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API
+# 9. The counterpart is retail-network, our own ecosystem service — not a real external network's vendor platform API
 
 > Renumbered from ADR-0002 (2026-10) because this repo had two ADRs both
 > numbered 0002 (this one and `0002-mcp-and-analytics-data-product.md`,
@@ -35,7 +35,7 @@ rejected as one decision.
 This repo's [ADR 0001](./0001-network-fulfillment-bounded-context.md)
 (Accepted 2026-09-23) established `network-fulfillment` as **Conformist**
 to "an external retail fulfillment network (a major e-commerce retailer's
-Selling Partner API, Vendor Direct Fulfillment)" and an **Anti-Corruption
+vendor platform API, Vendor Direct Fulfillment)" and an **Anti-Corruption
 Layer** for everything downstream in this fleet. Its reasoning — the
 Conformist relationship, the PII boundary, the external SLA, the
 throughput-constrained advertised-availability concept, fill-or-kill
@@ -45,9 +45,9 @@ this record corrects, is *which* network sits on the other side of that
 boundary.
 
 A prior planning pass
-(`2026-09-25_224823-amazon-network-fulfillment-readiness.md`) took ADR
+(`the readiness review note`) took ADR
 0001 at face value and scoped the next phase as a real integration
-against the actual retailer's Selling Partner API: real vendor
+against the actual retailer's vendor platform API: real vendor
 credentials, a real sandbox environment, real product identifiers. The
 user corrected this explicitly: **not the real one, our own ecosystem.**
 The counterpart that issues purchase orders, watches our acknowledgement
@@ -93,23 +93,23 @@ real e-commerce retailer's network:
   delay is a configurable simulation knob (`TX_PROCESSING_DELAY`, default
   5s) instead of the real program's actual ~15 minutes.
 
-### A real SP-API adapter is deferred, not dropped
+### A real vendor platform API adapter is deferred, not dropped
 
 Nothing about choosing `retail-network` as the near-term counterpart
 forecloses a real integration against the actual retailer's Selling
 Partner API later. The port this repo already sketched, `NetworkGateway`
 (`PollDemand`, `SubmitAnswer`, `SubmitAvailability`, `DeclareCapability`,
 `RequestLabel`, `SubmitShipmentConfirmation`, `SubmissionStatus`), is
-written in this fleet's own vocabulary specifically so a real SP-API
+written in this fleet's own vocabulary specifically so a real vendor platform API
 adapter could be added later as a second implementation behind the same
 port — an adapter swap, not a redesign.
-`references/network-fulfillment-sp-api-boundary.md` (this fleet's own
+the vendor boundary reference note (this fleet's own
 operating skill) already carries the real finding that would matter if
-that work is ever picked up: no SP-API operation accepts a capability
+that work is ever picked up: no vendor platform API operation accepts a capability
 declaration, so a real integration would need to fall back to
 inference-only (dropping `DeclareCapability`'s live effect, not the call
 itself). That reference stays valid and is not superseded by this
-record — it describes the real Selling Partner API, which is simply not
+record — it describes the real vendor platform API, which is simply not
 being built against right now.
 
 ## Decision
@@ -122,7 +122,7 @@ unchanged and still governs.
 ### 1. The counterpart is named: `retail-network`
 
 Every place ADR 0001 or this repo's own docs said "an external retail
-fulfillment network (a major e-commerce retailer's Selling Partner API,
+fulfillment network (a major e-commerce retailer's vendor platform API,
 Vendor Direct Fulfillment)" now means, concretely: `retail-network`, a
 bounded context in this same fleet's GitHub organization, built to play
 that structural role, reachable only over its own Vendor API
@@ -237,12 +237,12 @@ unchanged by this record.
 
 - This repo's own historical docs (ADR 0001's text, `README.md`'s
   framing, existing prose referencing a major e-commerce retailer's
-  Selling Partner API as the *actual* near-term integration target) now
+  vendor platform API as the *actual* near-term integration target) now
   needs care when read: ADR 0001's *reasoning* stands, but its literal
   upstream description is superseded by this record for the near term.
   Future readers should read ADR 0001 for the *shape* of the boundary and
   this ADR for *who* is actually on the other side of it today.
-- A real SP-API adapter, if ever built, is now explicitly a second, later
+- A real vendor platform API adapter, if ever built, is now explicitly a second, later
   effort behind the same `NetworkGateway` port — deferred work that must
   not be silently assumed done because `retail-network` exists and looks
   similar.
@@ -255,7 +255,7 @@ unchanged by this record.
 - Scaffolding the `retail-network` repository itself — that is Phase 2 of
   `2026-09-25_231500-retail-network-in-ecosystem.md`, a separate,
   future PR.
-- Reversing the deferral of a real SP-API adapter into an outright
+- Reversing the deferral of a real vendor platform API adapter into an outright
   cancellation. It stays available as a future adapter swap.
 
 ## Rollout

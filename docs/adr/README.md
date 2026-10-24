@@ -14,7 +14,7 @@ to update when a record is added or its Status line changes.
 | [0006](0006-horizontal-autoscaling-and-pgxpool-tuning.md) | Per-workload HorizontalPodAutoscaler and pgxpool MaxConns/statement_timeout tuning | Accepted |
 | [0007](0007-migrations-direct-postgres-connection.md) | Run golang-migrate against a direct Postgres connection, not PgBouncer | Accepted |
 | [0008](0008-cloudevents-mandatory-event-envelope.md) | CloudEvents 1.0 as the mandatory event envelope | Accepted (2026-09-30) |
-| [0009](0009-retail-network-not-amazon-counterpart.md) | The counterpart is retail-network, our own ecosystem service — not a real external network's Selling Partner API | Accepted (2026-09-26); amends 0001 |
+| [0009](0009-retail-network-not-a-real-network-counterpart.md) | The counterpart is retail-network, our own ecosystem service — not a real external network's vendor platform API | Accepted (2026-09-26); amends 0001 |
 | [0010](0010-web-mfe-remote-and-frontend-chart.md) | web/ is a Module Federation remote, served by its own chart Deployment | Accepted |
 | [0011](0011-boot-retry-for-istio-first-dial-reset.md) | Retry the first outbound dial at boot to survive the Istio sidecar race | Accepted |
 | [0012](0012-network-seed-file-stub-demand-seeding.md) | NETWORK_SEED_FILE seeds demand into the stub gateway only | Accepted |
@@ -33,7 +33,6 @@ to update when a record is added or its Status line changes.
 | [0025](0025-postgres-and-kafka-are-the-only-runtime.md) | Postgres and Kafka are the only runtime: `DATABASE_URL` and `KAFKA_BROKERS` mandatory, no in-memory mode or log publisher, relay and capability pipeline always on, `/readyz` checks both | Accepted (2026-10-19); supersedes the optional-runtime parts of ADR 0003 and ADR 0022 |
 | [0026](0026-live-retail-network-adapter-demand-loop.md) | Live retail-network adapter: the demand loop (node map, polling, acknowledgements with reasons, reconciliation by persisted transaction id, labels, shipment confirmation; `NETWORK_MODE=live`) | Accepted (2026-10-24); implements 0009 §2 and §4, closes the gateway deferral of 0004, amends the `NetworkGateway` port of 0001; migration 0006. The supply loop is the reserved ADR 0027 |
 
-[`0002-retail-network-not-amazon-counterpart.md`](0002-retail-network-not-amazon-counterpart.md)
 is a redirect stub ("Moved to ADR 0009"), kept so old links resolve; it is
 not a separate decision. ADR 0009 was renumbered from 0002 on 2026-10-05
 to remove the duplicate number.
