@@ -24,7 +24,9 @@ var _ ports.NetworkGateway = (*StubGateway)(nil)
 type StubGateway struct {
 	mu sync.Mutex
 
-	pending []contract.InboundDemand
+	pending  []contract.InboundDemand
+	inbound  []contract.InboundShipment
+	receipts map[string]contract.InboundReceipt
 
 	acknowledged map[shared.NetworkRef]bool
 	reasons      map[shared.NetworkRef]shared.RejectionReason
@@ -41,6 +43,7 @@ func NewStubGateway(logger *slog.Logger) *StubGateway {
 		acknowledged: make(map[shared.NetworkRef]bool),
 		reasons:      make(map[shared.NetworkRef]shared.RejectionReason),
 		confirmed:    make(map[shared.NetworkRef]bool),
+		receipts:     make(map[string]contract.InboundReceipt),
 		logger:       logger,
 	}
 }
@@ -178,4 +181,48 @@ func (g *StubGateway) Acknowledgement(ref shared.NetworkRef) (accepted bool, sub
 	defer g.mu.Unlock()
 	v, ok := g.acknowledged[ref]
 	return v, ok
+}
+
+// ---- the inbound loop (ADR 0028) ----
+
+var _ ports.InboundGateway = (*StubGateway)(nil)
+
+// SeedInbound adds shipments the next PollInboundShipments returns, for local
+// runs and tests.
+func (g *StubGateway) SeedInbound(shipments ...contract.InboundShipment) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.inbound = append(g.inbound, shipments...)
+}
+
+// PollInboundShipments returns the seeded shipments of site shipped after since.
+func (g *StubGateway) PollInboundShipments(_ context.Context, site shared.SiteId, since time.Time) ([]contract.InboundShipment, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []contract.InboundShipment
+	for _, s := range g.inbound {
+		if s.SiteId == site && s.ShippedAt.After(since) {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// SubmitInboundReceipt records the receipt, once per shipment.
+func (g *StubGateway) SubmitInboundReceipt(_ context.Context, r contract.InboundReceipt) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, done := g.receipts[r.ShipmentRef]; !done {
+		g.receipts[r.ShipmentRef] = r
+	}
+	g.logger.Info("stub network inbound receipt", "shipment", r.ShipmentRef, "cartons", len(r.Cartons))
+	return nil
+}
+
+// InboundReceipt reports the receipt submitted for a shipment, if any.
+func (g *StubGateway) InboundReceipt(shipmentRef string) (contract.InboundReceipt, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	r, ok := g.receipts[shipmentRef]
+	return r, ok
 }
