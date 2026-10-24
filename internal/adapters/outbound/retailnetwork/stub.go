@@ -1,17 +1,9 @@
-// Package network holds the outbound adapter for the external retail
-// network, and the NETWORK_MODE switch that decides which one is wired.
-//
-// This package is the ONLY place in the codebase that may know the
-// network's own vocabulary. Nothing above it — no use case, no domain
-// type, no other adapter — names a purchase order, an ASIN, a selling
-// party or an acknowledgement code (ADR 0001 §2, §4).
-package network
+package retailnetwork
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,55 +12,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-// Mode selects which gateway implementation is wired at boot.
-type Mode string
-
-const (
-	// ModeStub talks to nobody. It is the DEFAULT, deliberately: the
-	// kind cluster and the e2e suite must never need credentials, and a
-	// live network call must be impossible to make by accident (ADR
-	// 0009 §4).
-	ModeStub Mode = "stub"
-
-	// ModeLive targets the real network. Requires credentials and
-	// NETWORK_BASE_URL; not yet implemented (ADR 0001 rollout step 5 /
-	// ADR 0009's deferred SP-API adapter).
-	ModeLive Mode = "live"
-)
-
-// ParseMode reads NETWORK_MODE. Anything unrecognised — including the
-// empty string, and the retired "sandbox" (ADR 0009 §4 removed it: the
-// network has no separate sandbox tier) — is stub. Failing CLOSED matters
-// more than failing loudly here: a typo in a deployment manifest must not
-// be the reason this service starts submitting real acknowledgements to
-// a real retailer.
-func ParseMode(s string) Mode {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case string(ModeLive):
-		return ModeLive
-	default:
-		return ModeStub
-	}
-}
-
-// NewGateway wires the gateway for a mode and (for live) a base URL.
-//
-// live returns an explicit error rather than silently degrading to the
-// stub. A deployment that ASKED for a real network and got a fake one
-// would look healthy while quietly answering nobody — the worst possible
-// failure for this context. baseURL is accepted now (and required by the
-// caller for live, see cmd/netfulfil's wireGateway) so NETWORK_BASE_URL is
-// already wired end to end; the live adapter itself is Phase 3 work.
-func NewGateway(mode Mode, baseURL string, logger *slog.Logger) (ports.NetworkGateway, error) {
-	switch mode {
-	case ModeStub:
-		return NewStubGateway(logger), nil
-	case ModeLive:
-		return nil, fmt.Errorf("NETWORK_MODE=live is not implemented yet: no credentialed adapter exists for NETWORK_BASE_URL=%q (ADR 0001 rollout step 5, ADR 0009 §\"A real SP-API adapter is deferred, not dropped\")", baseURL)
-	default:
-		return nil, fmt.Errorf("unknown network mode %q", mode)
-	}
-}
+var _ ports.NetworkGateway = (*StubGateway)(nil)
 
 // StubGateway implements the network protocol against nothing at all. It
 // records what was submitted so tests and local runs can assert on it,
@@ -83,6 +27,7 @@ type StubGateway struct {
 	pending []contract.InboundDemand
 
 	acknowledged map[shared.NetworkRef]bool
+	reasons      map[shared.NetworkRef]shared.RejectionReason
 	confirmed    map[shared.NetworkRef]bool
 
 	logger *slog.Logger
@@ -94,6 +39,7 @@ func NewStubGateway(logger *slog.Logger) *StubGateway {
 	}
 	return &StubGateway{
 		acknowledged: make(map[shared.NetworkRef]bool),
+		reasons:      make(map[shared.NetworkRef]shared.RejectionReason),
 		confirmed:    make(map[shared.NetworkRef]bool),
 		logger:       logger,
 	}
@@ -134,12 +80,13 @@ func (g *StubGateway) PollDemand(_ context.Context, _ time.Time) ([]contract.Inb
 // failed BEFORE reaching here (e.g. the order-management call errored)
 // is deliberately left in pending, so the next PollDemand hands it back
 // for a retry rather than losing it.
-func (g *StubGateway) SubmitAcknowledgement(_ context.Context, ref shared.NetworkRef, accepted bool) error {
+func (g *StubGateway) SubmitAcknowledgement(_ context.Context, ref shared.NetworkRef, answer contract.Acknowledgement) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.acknowledged[ref] = accepted
+	g.acknowledged[ref] = answer.Accepted
+	g.reasons[ref] = answer.Reason
 	g.pending = removeByRef(g.pending, ref)
-	g.logger.Info("stub network acknowledgement", "networkRef", ref, "accepted", accepted)
+	g.logger.Info("stub network acknowledgement", "networkRef", ref, "accepted", answer.Accepted, "reason", answer.Reason)
 	return nil
 }
 
@@ -156,11 +103,11 @@ func removeByRef(pending []contract.InboundDemand, ref shared.NetworkRef) []cont
 	return out
 }
 
-func (g *StubGateway) SubmitShipmentConfirmation(_ context.Context, ref shared.NetworkRef) error {
+func (g *StubGateway) SubmitShipmentConfirmation(_ context.Context, ref shared.NetworkRef, shippedAt time.Time) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.confirmed[ref] = true
-	g.logger.Info("stub network shipment confirmation", "networkRef", ref)
+	g.logger.Info("stub network shipment confirmation", "networkRef", ref, "shippedAt", shippedAt)
 	return nil
 }
 
@@ -179,15 +126,24 @@ func (g *StubGateway) DeclareCapability(_ context.Context, offer contract.Capabi
 	return nil
 }
 
-// RequestLabel returns a deterministic fake label — never a ship-to name,
-// address or phone number, same as a real adapter would be restricted to
-// (ADR 0009 §3).
-func (g *StubGateway) RequestLabel(_ context.Context, ref shared.NetworkRef) (contract.LabelResult, error) {
-	return contract.LabelResult{
-		LabelRef:       "stub-label-" + string(ref),
-		TrackingNumber: "stub-tracking-" + string(ref),
-		Carrier:        "STUB_CARRIER",
-	}, nil
+// RequestLabel returns deterministic fake labels, one per package — never a
+// ship-to name, address or phone number, same as a real adapter would be
+// restricted to (ADR 0009 §3). Package 1 keeps the plain "<ref>" suffix; the
+// others add "-<n>".
+func (g *StubGateway) RequestLabel(_ context.Context, ref shared.NetworkRef, packageCount int) ([]contract.LabelResult, error) {
+	labels := make([]contract.LabelResult, 0, max(packageCount, 1))
+	for n := 1; n <= max(packageCount, 1); n++ {
+		suffix := string(ref)
+		if n > 1 {
+			suffix = fmt.Sprintf("%s-%d", ref, n)
+		}
+		labels = append(labels, contract.LabelResult{
+			LabelRef:       "stub-label-" + suffix,
+			TrackingNumber: "stub-tracking-" + suffix,
+			Carrier:        "STUB_CARRIER",
+		})
+	}
+	return labels, nil
 }
 
 // SubmissionStatus reconciles instantly and deterministically: the stub
@@ -205,6 +161,14 @@ func (g *StubGateway) SubmissionStatus(_ context.Context, ref shared.NetworkRef)
 		return contract.SubmissionSuccess, nil
 	}
 	return contract.SubmissionPending, nil
+}
+
+// RejectionReason reports the reason submitted with a rejection of ref (empty
+// for an acceptance or when nothing was submitted).
+func (g *StubGateway) RejectionReason(ref shared.NetworkRef) shared.RejectionReason {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.reasons[ref]
 }
 
 // Acknowledgement reports what was submitted for a ref, and whether

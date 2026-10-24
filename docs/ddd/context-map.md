@@ -7,7 +7,7 @@ side, the pattern, and the technology.
 
 ```mermaid
 flowchart LR
-    RN["retail-network<br/>external counterpart<br/>stub only"]
+    RN["retail-network<br/>external counterpart<br/>stub by default, live opt-in"]
     NF["network-fulfillment<br/>Supporting"]
     OM["order-management<br/>Generic/Supporting"]
     INV["inventory-storage<br/>Core"]
@@ -18,7 +18,7 @@ flowchart LR
     AGT["MCP clients<br/>AI agents"]
     SUB["any subscriber<br/>none found"]
 
-    RN -->|"U to D: CF + ACL<br/>poll demand, submit answer, status, shipment<br/>NetworkGateway port, stub only"| NF
+    RN -->|"U to D: CF + ACL<br/>poll demand, submit answer, status, shipment<br/>NetworkGateway port, stub or live"| NF
     OM -->|"U to D: C/S, NF is Customer<br/>REST POST /orders, /orders/id/release, DELETE /orders/id"| NF
     INV -.->|"U to D: OHS / CF<br/>REST GET /inventory/sku/usable<br/>always on"| NF
     PPM -.->|"U to D: OHS+PL / CF<br/>Kafka ProcessPath* + CPTScheduleChanged<br/>always-on cache"| NF
@@ -29,7 +29,7 @@ flowchart LR
     FE -. "U/D none: deliberately absent, no PackageManifested correlation, ADR 0014" .- NF
 ```
 
-Source: `internal/adapters/outbound/network/gateway.go`,
+Source: `internal/adapters/outbound/retailnetwork/mode.go`,
 `internal/adapters/outbound/ordermanagement/planner.go`,
 `internal/adapters/outbound/inventoryclient/client.go`,
 `internal/adapters/outbound/processpathcache/consumer.go`,
@@ -59,7 +59,7 @@ quantities per SKU and never reads a SKU's classification or dimensions.
 
 | Upstream | Downstream | Pattern | Technology | Status | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| `retail-network` (external network role) | network-fulfillment | **Conformist + Anti-Corruption Layer** | `ports.NetworkGateway`: `PollDemand`, `SubmitAcknowledgement`, `SubmissionStatus`, `SubmitShipmentConfirmation` | **Stub only.** `NETWORK_MODE=live` refuses to boot (no adapter) | `internal/adapters/outbound/network/gateway.go` (`NewGateway`, `StubGateway`); ADR 0001 §2, ADR 0009 |
+| `retail-network` (external network role) | network-fulfillment | **Conformist + Anti-Corruption Layer** | `ports.NetworkGateway`: `PollDemand`, `SubmitAcknowledgement`, `SubmissionStatus`, `SubmitShipmentConfirmation` | **Stub by default;** `NETWORK_MODE=live` wires the Vendor API demand loop (ADR 0026) | `internal/adapters/outbound/retailnetwork/` (`StubGateway`, `LiveGateway`); ADR 0001 §2, ADR 0009, ADR 0026 |
 | `order-management` | network-fulfillment | **Customer/Supplier** (NF is the Customer; OM ADR 0020 is the Supplier's half) | REST: `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` behind one circuit breaker | **Live** | `internal/adapters/outbound/ordermanagement/planner.go`, `breaker.go`; `cmd/netfulfil/main.go` `wirePlanner` |
 | `inventory-storage` | network-fulfillment | **Open Host / Conformist** | REST `GET /inventory/{sku}/usable` | **Wired, always on** | `internal/adapters/outbound/inventoryclient/client.go`; the `ports.InventoryAvailability` doc comment explains why this is REST rather than a cache |
 | `process-path-management` | network-fulfillment | **Open Host + Published Language / Conformist** | Kafka `warehouse.process-path-management.events`, CE types `...processpath.ProcessPathCreated`, `...ProcessPathUpdated`, `...ProcessPathDeactivated`, `...cptschedule.CPTScheduleChanged`; per-process group `network-fulfillment-process-path-capability-cache-<host>-<pid>-<ts>` | **Wired, always on** | `internal/adapters/outbound/processpathcache/consumer.go` |
@@ -74,7 +74,7 @@ quantities per SKU and never reads a SKU's classification or dimensions.
 - **Conformist + ACL toward the network.** Conformist because the
   network owns the protocol (one answer, 24h, fill-or-kill) and the
   identifier formats (`NetworkRef` is opaque). ACL because none of that
-  vocabulary crosses `adapters/outbound/network/`: the fleet sees SKUs,
+  vocabulary crosses `adapters/outbound/retailnetwork/`: the fleet sees SKUs,
   quantities and a deadline only.
 - **Customer/Supplier with `order-management`.** This is a negotiated,
   two-sided contract. The companion OM ADR 0020 added

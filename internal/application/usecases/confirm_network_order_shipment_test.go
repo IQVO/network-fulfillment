@@ -185,11 +185,11 @@ func (errSubmitConfirmationGateway) PollDemand(context.Context, time.Time) ([]co
 	return nil, nil
 }
 
-func (errSubmitConfirmationGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, bool) error {
+func (errSubmitConfirmationGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, contract.Acknowledgement) error {
 	return nil
 }
 
-func (g errSubmitConfirmationGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error {
+func (g errSubmitConfirmationGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef, time.Time) error {
 	return g.err
 }
 
@@ -201,8 +201,8 @@ func (errSubmitConfirmationGateway) SubmitAvailability(context.Context, contract
 	return nil
 }
 
-func (errSubmitConfirmationGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
-	return contract.LabelResult{}, nil
+func (errSubmitConfirmationGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {
+	return nil, nil
 }
 
 func (errSubmitConfirmationGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {

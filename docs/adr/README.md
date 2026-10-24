@@ -6,7 +6,7 @@ to update when a record is added or its Status line changes.
 
 | # | Title | Status (as stated in the ADR) |
 | --- | --- | --- |
-| [0001](0001-network-fulfillment-bounded-context.md) | Network Fulfillment as a bounded context — conformist to the network, anti-corruption layer for the fleet | Accepted (2026-09-23). Amended by 0009 (counterpart, PII rule, no `sandbox`), 0014 (shipment-confirmation trigger) and 0024 (orphaned-hold sweep closes the open gap in Consequences) |
+| [0001](0001-network-fulfillment-bounded-context.md) | Network Fulfillment as a bounded context — conformist to the network, anti-corruption layer for the fleet | Accepted (2026-09-23). Amended by 0009 (counterpart, PII rule, no `sandbox`), 0014 (shipment-confirmation trigger), 0024 (orphaned-hold sweep closes the open gap in Consequences) and 0026 (the `NetworkGateway` port: acknowledgement reason, `AcknowledgeBy`, label and shipment arguments) |
 | [0002](0002-mcp-and-analytics-data-product.md) | An MCP server and an analytics data product, on the same terms as the other eight bounded contexts | Accepted (2026-09-26) |
 | [0003](0003-transactional-outbox.md) | Transactional outbox for the network-fulfillment Published Language | Accepted; envelope description superseded by 0008; per-key ordering amended by 0021 |
 | [0004](0004-resilience-circuit-breakers-retry-dlq-shutdown.md) | Circuit breaker, Kafka DLQ, and graceful shutdown hardening | Accepted; §6 (per-phase retries) amended by 0023 |
@@ -31,6 +31,7 @@ to update when a record is added or its Status line changes.
 | [0023](0023-analytics-claim-and-apply-in-one-transaction.md) | The analytics consumer's dedupe claim and projection write commit in one transaction (`analyticsstore.UnitOfWork`) | Accepted (2026-10-13); amends 0004 §6 |
 | [0024](0024-orphaned-order-management-hold-sweep.md) | Sweep orphaned order-management holds past the acknowledgement window: record the hold id at raise, `SweepOrphanedHolds` cancels it after `ORPHAN_HOLD_GRACE`, reports `OrphanedHoldCancelled` | Accepted (2026-10-17); builds on 0001 §6 and order-management ADR 0020 (gap OM-0020); migration 0005 |
 | [0025](0025-postgres-and-kafka-are-the-only-runtime.md) | Postgres and Kafka are the only runtime: `DATABASE_URL` and `KAFKA_BROKERS` mandatory, no in-memory mode or log publisher, relay and capability pipeline always on, `/readyz` checks both | Accepted (2026-10-19); supersedes the optional-runtime parts of ADR 0003 and ADR 0022 |
+| [0026](0026-live-retail-network-adapter-demand-loop.md) | Live retail-network adapter: the demand loop (node map, polling, acknowledgements with reasons, reconciliation by persisted transaction id, labels, shipment confirmation; `NETWORK_MODE=live`) | Accepted (2026-10-24); implements 0009 §2 and §4, closes the gateway deferral of 0004, amends the `NetworkGateway` port of 0001; migration 0006. The supply loop is the reserved ADR 0027 |
 
 is a redirect stub ("Moved to ADR 0009"), kept so old links resolve; it is
 not a separate decision. ADR 0009 was renumbered from 0002 on 2026-10-05

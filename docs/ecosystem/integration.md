@@ -43,7 +43,7 @@ flowchart LR
     MCP -->|"GET /reports/..."| REP
 ```
 
-Source: `internal/adapters/outbound/network/gateway.go`,
+Source: `internal/adapters/outbound/retailnetwork/mode.go`,
 `internal/adapters/outbound/ordermanagement/planner.go`,
 `internal/adapters/outbound/inventoryclient/client.go`,
 `internal/adapters/outbound/processpathcache/consumer.go`,
@@ -58,7 +58,7 @@ inside the diagram for `{id}` / `{sku}`.
 
 | Peer | Direction | Protocol | Contract | Default | On failure |
 | --- | --- | --- | --- | --- | --- |
-| retail network (`retail-network` plays the role, ADR 0009) | upstream | in-process port `ports.NetworkGateway` | poll demand, submit acknowledgement, submission status, shipment confirmation | stub only | see [The network](#the-network) |
+| retail network (`retail-network` plays the role, ADR 0009) | upstream | in-process port `ports.NetworkGateway` | poll demand, submit acknowledgement (with a reason), submission status, request label, shipment confirmation | `stub` (`live` is ADR 0026, opt-in) | see [The network](#the-network) |
 | `order-management` | downstream of our call (we are its Customer) | REST, synchronous | `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` | always on | error propagates, one circuit breaker, no retry |
 | `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | always on | SKU skipped for that recompute pass |
 | `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | always on | bad message logged and skipped, no DLQ |
@@ -76,26 +76,33 @@ Kong the REST API is at `/api/network-fulfillment` and the reports API at
 
 `ports.NetworkGateway` (`internal/application/ports/ports.go`) is the only
 route to the external network, and `NETWORK_MODE` picks its implementation
-(`internal/adapters/outbound/network/gateway.go`):
+(`internal/adapters/outbound/retailnetwork/mode.go`):
 
 - `stub` (default, and any unrecognised value): `StubGateway`, in process
   memory, no network call at all.
-- `live`: boot fails. With `NETWORK_BASE_URL` empty the error is
-  `NETWORK_MODE=live requires NETWORK_BASE_URL to be set`, otherwise
-  `NETWORK_MODE=live is not implemented yet`. There is no live adapter on
-  `develop`.
+- `live` ([ADR 0026](../adr/0026-live-retail-network-adapter-demand-loop.md)):
+  `LiveGateway`, the demand loop against the retail network's Vendor API at
+  `NETWORK_BASE_URL` as `NETWORK_VENDOR_ID`. It polls purchase orders, answers
+  each once (accept, or reject with a reason mapped inside the adapter),
+  reconciles by a persisted transaction id, requests labels and confirms
+  shipments. Every write carries a deterministic `Idempotency-Key`; calls are
+  retried with backoff behind one circuit breaker. The network's identifiers
+  (purchase order number, listing, node, transaction) live only in the
+  adapter's tables (migration 0006). `DeclareCapability` and `SubmitAvailability`
+  are logged no-ops until the supply loop (ADR 0027). Without `NETWORK_BASE_URL`
+  or `NETWORK_VENDOR_ID` the boot fails, naming each missing one.
 
-What the stub does for each port method:
+What the stub does for each port method (the live behaviour is in ADR 0026):
 
 | Port method | Called by | Stub behaviour |
 | --- | --- | --- |
 | `PollDemand(since)` | poller, every `POLL_INTERVAL` | returns every seeded unit still pending; ignores `since` |
-| `SubmitAcknowledgement(ref, accepted)` | `ReceiveNetworkDemand` | records the answer and removes the unit from the pending list |
+| `SubmitAcknowledgement(ref, {accepted, reason})` | `ReceiveNetworkDemand`, `ReconcileSubmittedOrders` (resend) | records the answer and removes the unit from the pending list |
 | `SubmissionStatus(ref)` | `ReconcileSubmittedOrders` | `SUCCESS` for a ref this process submitted, `PENDING` otherwise (so after a restart every earlier submission is `PENDING`) |
-| `SubmitShipmentConfirmation(ref)` | `ConfirmNetworkOrderShipment` | records it |
+| `SubmitShipmentConfirmation(ref, shippedAt)` | `ConfirmNetworkOrderShipment` | records it |
 | `SubmitAvailability(update)` | nobody yet | records it |
 | `DeclareCapability(offer)` | nobody | documented no-op: the real API has no such operation |
-| `RequestLabel(ref)` | nobody yet | deterministic fake `{labelRef, trackingNumber, carrier}` |
+| `RequestLabel(ref, packageCount)` | `ConfirmNetworkOrderShipment` (one package), before it records `CONFIRMED` | deterministic fake `{labelRef, trackingNumber, carrier}` per package |
 
 Demand gets into the stub only from `NETWORK_SEED_FILE` (ADR 0012); the
 chart renders it from `stubDemand.demands`. No ship-to PII exists anywhere in

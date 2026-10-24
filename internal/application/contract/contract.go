@@ -56,7 +56,12 @@ type InboundDemand struct {
 	NetworkRef     shared.NetworkRef
 	SiteId         shared.SiteId
 	RequiredShipBy time.Time
-	Lines          []InboundLine
+	// AcknowledgeBy is the deadline the network itself set for answering this
+	// demand (ADR 0026). Zero means the network gave none, and the local
+	// acknowledgement window from receipt applies; non-zero replaces that
+	// window, so the sweeps judge the order by the network's real clock.
+	AcknowledgeBy time.Time
+	Lines         []InboundLine
 }
 
 // InboundLine is one line of untranslated inbound demand.
@@ -95,7 +100,16 @@ type CapabilityDeclaration struct {
 	AdvertisedQuantity int
 }
 
-// LabelResult is what RequestLabel returns: exactly the three fields ADR
+// Acknowledgement is our one answer to a piece of demand (ADR 0026): accept it
+// in full, or reject it with the reason this context gives. The reason is OUR
+// vocabulary (shared.RejectionReason); mapping it to whatever the network calls
+// it is the adapter's job. Reason is empty exactly when Accepted is true.
+type Acknowledgement struct {
+	Accepted bool
+	Reason   shared.RejectionReason
+}
+
+// LabelResult is what RequestLabel returns, once per package: exactly the three fields ADR
 // 0009 §3 allows to cross into this context — never a ship-to name,
 // address or phone number, in either direction.
 type LabelResult struct {
@@ -122,6 +136,12 @@ const (
 	// distinct from OUR domain rejecting the demand. ReconcileSubmittedOrders
 	// rejects the order with RejectionReasonSubmissionFailed.
 	SubmissionFailure SubmissionStatusValue = "FAILURE"
+	// SubmissionNotSent: the gateway holds no record that the answer was ever
+	// sent (a crash between recording the order as SUBMITTED and the call that
+	// tells the network). The network cannot settle what it never received, so
+	// ReconcileSubmittedOrders sends the answer again; the gateway keeps that
+	// call idempotent (ADR 0026).
+	SubmissionNotSent SubmissionStatusValue = "NOT_SENT"
 )
 
 // HeldOrderRequest asks order-management for an allocated-but-held

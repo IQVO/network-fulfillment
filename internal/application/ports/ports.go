@@ -58,26 +58,31 @@ type NetworkGateway interface {
 	PollDemand(ctx context.Context, since time.Time) ([]contract.InboundDemand, error)
 
 	// SubmitAcknowledgement tells the network we will fulfil the order
-	// in full, or will not fulfil it at all. accepted=false is a
-	// rejection; the protocol has no middle answer.
-	SubmitAcknowledgement(ctx context.Context, ref shared.NetworkRef, accepted bool) error
+	// in full, or will not fulfil it at all. Accepted=false is a
+	// rejection and carries our reason; the protocol has no middle
+	// answer. It is idempotent per ref: calling it again after a crash or
+	// a failed call never creates a second answer on the network
+	// (ADR 0026).
+	SubmitAcknowledgement(ctx context.Context, ref shared.NetworkRef, answer contract.Acknowledgement) error
 
 	// SubmitAvailability tells the network what we claim we can ship for
-	// one SKU at one site (ADR 0001's submitInventoryUpdate signal).
+	// one SKU at one site (ADR 0001's submitInventoryUpdate signal). The
+	// live adapter treats it as a documented, non-failing no-op until the
+	// supply loop (ADR 0027) exists.
 	SubmitAvailability(ctx context.Context, update contract.AvailabilityUpdate) error
 
-	// DeclareCapability would tell the network our cutoffs and cycle
-	// times directly. See contract.CapabilityDeclaration's doc comment:
-	// the network's real API has no such operation, so every adapter in
-	// this codebase today treats this as a documented no-op kept for
-	// port-shape completeness and for a future program that might accept
-	// one.
+	// DeclareCapability tells the network our cutoffs and cycle times.
+	// Every adapter in this codebase treats it as a documented no-op today
+	// (the stub always; the live adapter until ADR 0027 builds the node
+	// profile), kept for port-shape completeness.
 	DeclareCapability(ctx context.Context, offer contract.CapabilityDeclaration) error
 
-	// RequestLabel asks the network for a shipping label, returning only
-	// {labelRef, trackingNumber, carrier} — never ship-to PII (ADR 0009
-	// §3).
-	RequestLabel(ctx context.Context, ref shared.NetworkRef) (contract.LabelResult, error)
+	// RequestLabel asks the network for the shipping labels of an order that
+	// leaves in packageCount packages (at least one), returning only
+	// {labelRef, trackingNumber, carrier} per package — never ship-to PII
+	// (ADR 0009 §3). The count is the caller's: this context holds no other
+	// package data, and none is needed (ADR 0026). Idempotent per ref.
+	RequestLabel(ctx context.Context, ref shared.NetworkRef, packageCount int) ([]contract.LabelResult, error)
 
 	// SubmissionStatus reconciles a previously-submitted acknowledgement
 	// against the network's own transaction-status record (ADR 0001 §5).
@@ -86,9 +91,11 @@ type NetworkGateway interface {
 	// commitment.
 	SubmissionStatus(ctx context.Context, ref shared.NetworkRef) (contract.SubmissionStatusValue, error)
 
-	// SubmitShipmentConfirmation tells the network the order has
-	// shipped.
-	SubmitShipmentConfirmation(ctx context.Context, ref shared.NetworkRef) error
+	// SubmitShipmentConfirmation tells the network the order shipped at
+	// shippedAt, with the tracking numbers of the labels RequestLabel
+	// returned for it. It is an error to confirm an order that has no label.
+	// Idempotent per ref: the first shippedAt wins (ADR 0026).
+	SubmitShipmentConfirmation(ctx context.Context, ref shared.NetworkRef, shippedAt time.Time) error
 }
 
 // FulfillmentPlanner is order-management, seen from here through the

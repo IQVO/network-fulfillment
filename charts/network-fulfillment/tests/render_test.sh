@@ -85,6 +85,28 @@ expect_refusal "grace period under 20" "terminationGracePeriodSeconds" "${base[@
 expect_refusal "analytics without a DSN source" "analytics.database.url or analytics.database.existingSecret" \
   "${base[@]}" --set analytics.enabled=true
 
+# --- NETWORK_MODE=live (ADR 0026) ------------------------------------------
+# Live takes a base URL and a vendor id and no credential; the chart refuses what
+# the binary refuses at boot, and nothing else (tests/test_env_parity.py owns the
+# exact variable list, tests/test_credential_wiring.py the Secret wiring).
+live=(--set config.networkMode=live
+  --set config.networkBaseUrl=https://vendor.invalid
+  --set config.networkVendorId=V-1)
+expect_refusal "live without a base URL and a vendor id" "config.networkBaseUrl" "${base[@]}" --set config.networkMode=live
+expect_refusal "live without a vendor id" "config.networkVendorId" "${base[@]}" \
+  --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid
+expect_refusal "live without a database" "database.url or database.existingSecret" "${kafka[@]}" "${live[@]}"
+expect_refusal "an unsupported network mode" "config.networkMode" "${base[@]}" --set config.networkMode=sandbox
+
+live_cm="$(render "${live[@]}" --show-only templates/configmap.yaml)" || fail "live mode with its values must render"
+grep -q 'NETWORK_BASE_URL: "https://vendor.invalid"' <<<"$live_cm" || fail "live: NETWORK_BASE_URL is not rendered"
+grep -q 'NETWORK_VENDOR_ID: "V-1"' <<<"$live_cm" || fail "live: NETWORK_VENDOR_ID is not rendered"
+live_api="$(render "${live[@]}" --show-only templates/deployment.yaml)"
+[[ "$(env_value "$live_api" NETWORK_MODE)" == "live" ]] || fail "live: NETWORK_MODE must reach the api Deployment"
+if grep -qE '(^  |- name: )NETWORK_(CLIENT|REFRESH)' <<<"$(render "${live[@]}")"; then fail "live mode renders a credential variable that no code reads"; fi
+stub_cm="$(render --show-only templates/configmap.yaml)"
+if grep -qE '^  NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
+
 # Tolerated: a legacy kafka.enabled: true, and the explicit real values.
 render --set kafka.enabled=true >/dev/null || fail "kafka.enabled=true (legacy) must still render"
 render --set config.eventPublisher=kafka \

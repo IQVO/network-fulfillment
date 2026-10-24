@@ -9,18 +9,27 @@ data:
   PORT: {{ .Values.config.port | quote }}
 
   # NETWORK_MODE decides which external-network adapter is wired:
-  #   stub - no external calls, no credentials (the default)
-  #   live - the real network, real credentials
+  #   stub - no external calls (the default)
+  #   live - the retail network's Vendor API (ADR 0026); it takes no credential
   # The binary FAILS CLOSED: an unrecognised value falls back to stub, and
-  # live REFUSES TO BOOT without credentials and NETWORK_BASE_URL rather
+  # live REFUSES TO BOOT without NETWORK_BASE_URL and NETWORK_VENDOR_ID rather
   # than silently degrading. That refusal is the point -- a context that
   # quietly stopped talking to the network would look healthy while
   # acknowledging nothing. (ADR 0009 section 4 removed the earlier sandbox tier.)
+  # The chart refuses what the binary would refuse, at render time.
   NETWORK_MODE: {{ .Values.config.networkMode | quote }}
-{{- if .Values.config.networkBaseUrl }}
+{{- if eq (include "network-fulfillment.networkMode" .) "live" }}
 
-  # The live-mode target (ADR 0009 section 4). Read only when NETWORK_MODE=live.
+  # Read only when NETWORK_MODE=live (ADR 0026 Decision 10), so rendered only then.
   NETWORK_BASE_URL: {{ .Values.config.networkBaseUrl | quote }}
+  NETWORK_VENDOR_ID: {{ .Values.config.networkVendorId | quote }}
+{{- if .Values.networkNodes.nodes }}
+
+  # What the network needs to register each site that is not yet one of its
+  # nodes (ADR 0026 Decision 7), mounted from the data ConfigMap. Without it live
+  # mode can only adopt sites that already are nodes on the network.
+  NETWORK_NODES_FILE: /etc/network-fulfillment/nodes.json
+{{- end }}
 {{- end }}
 
   # order-management's REST base URL. This is the one upstream this

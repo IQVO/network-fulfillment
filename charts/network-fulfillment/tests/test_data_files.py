@@ -57,6 +57,33 @@ stubDemand:
 """
 
 
+LIVE_NODES = """
+config:
+  networkMode: live
+  networkBaseUrl: https://vendor.invalid
+  networkVendorId: V-1
+networkNodes:
+  nodes:
+    - siteCode: site-1
+      nodeType: FULFILLMENT_CENTER
+      subtype: SORTABLE
+      regionId: SP
+      timezone: America/Sao_Paulo
+      postalCode: 01000-000
+      countryCode: BR
+      lat: -23.55
+      lon: -46.63
+    - siteCode: site-2
+      nodeType: FULFILLMENT_CENTER
+      regionId: RJ
+      timezone: America/Sao_Paulo
+      postalCode: 20000-000
+      countryCode: BR
+"""
+
+LIVE_ONLY_ENV = ("NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE")
+
+
 def render(values: str | None) -> list[dict]:
     # Postgres and Kafka are the only runtime: the chart refuses to render
     # without a database source and kafka.brokers (tests/render_test.sh owns
@@ -308,7 +335,82 @@ def check_orphan_hold_sweep_knobs_reach_the_container() -> None:
     print("PASS: orphan-hold sweep knobs are in the ConfigMap, mounted via envFrom, default on/1h, off and 0 kept")
 
 
+def check_nodes_file_is_valid_json_and_wired() -> None:
+    """NETWORK_NODES_FILE (ADR 0026): a live deployment's node definitions, as a mounted file."""
+    docs = render(LIVE_NODES)
+    cm = data_configmap(docs)
+    assert cm is not None and "nodes.json" in cm["data"], "networkNodes.nodes produced no nodes.json in live mode"
+    nodes = json.loads(cm["data"]["nodes.json"])["nodes"]
+    assert [n["siteCode"] for n in nodes] == ["site-1", "site-2"], nodes
+    assert nodes[0]["lat"] == -23.55 and nodes[0]["lon"] == -46.63, (
+        f"lat/lon must survive as JSON numbers, got {nodes[0].get('lat')!r}, {nodes[0].get('lon')!r}"
+    )
+    assert "lat" not in nodes[1] and "subtype" not in nodes[1], f"optional keys appeared from nowhere: {nodes[1]}"
+
+    env = env_map(docs)
+    assert env.get("NETWORK_NODES_FILE") == "/etc/network-fulfillment/nodes.json", env.get("NETWORK_NODES_FILE")
+    mounts = {m["mountPath"] for m in container(docs).get("volumeMounts", [])}
+    assert str(Path(env["NETWORK_NODES_FILE"]).parent) in mounts, (
+        f"NETWORK_NODES_FILE={env['NETWORK_NODES_FILE']} is not inside a mounted path ({sorted(mounts)})"
+    )
+    assert any(v.get("configMap", {}).get("name") == cm["metadata"]["name"] for v in pod_spec(docs)["volumes"]), (
+        "no volume references the data ConfigMap; the mount would fail"
+    )
+    assert env["NETWORK_BASE_URL"] == "https://vendor.invalid" and env["NETWORK_VENDOR_ID"] == "V-1", env
+    print("PASS: live nodes.json is valid JSON with the right values, mounted where NETWORK_NODES_FILE points")
+
+
+def check_nodes_are_live_only_and_optional() -> None:
+    """Stub reads none of the live variables; live without a node list has no file to mount."""
+    stub = render("networkNodes:\n  nodes:\n    - siteCode: site-1\n")  # ignored in stub, even if incomplete
+    env = env_map(stub)
+    leaked = [k for k in LIVE_ONLY_ENV if k in env]
+    assert not leaked, f"stub mode rendered live-only variables: {leaked}"
+    assert data_configmap(stub) is None and not pod_spec(stub).get("volumes"), (
+        "stub mode mounted a data ConfigMap for node definitions it never reads"
+    )
+
+    live = render("config:\n  networkMode: live\n  networkBaseUrl: https://vendor.invalid\n  networkVendorId: V-1\n")
+    env = env_map(live)
+    assert "NETWORK_NODES_FILE" not in env, "live without networkNodes.nodes set NETWORK_NODES_FILE with no file behind it"
+    assert env["NETWORK_BASE_URL"] and env["NETWORK_VENDOR_ID"], env
+    assert data_configmap(live) is None and not pod_spec(live).get("volumes"), (
+        "live without any data file still mounted a data ConfigMap"
+    )
+    print("PASS: live-only variables are absent in stub; live without node definitions mounts nothing")
+
+
+def check_bad_nodes_are_refused_at_render() -> None:
+    """The binary's file schema is strict; the chart says so before the pod crash-loops."""
+    live = "config:\n  networkMode: live\n  networkBaseUrl: https://vendor.invalid\n  networkVendorId: V-1\n"
+    cases = {
+        "an unknown key": ("networkNodes:\n  nodes:\n    - siteCode: s\n      nodeTyp: X\n", "unknown key"),
+        "a missing required key": (
+            "networkNodes:\n  nodes:\n    - siteCode: s\n      nodeType: X\n      regionId: R\n"
+            "      timezone: T\n      postalCode: P\n", "countryCode"),
+    }
+    for why, (nodes, needle) in cases.items():
+        values_path = CHART_DIR / "tests" / ".rendered-values.yaml"
+        values_path.write_text(live + nodes)
+        try:
+            proc = subprocess.run(
+                ["helm", "template", "network-fulfillment", str(CHART_DIR),
+                 "--set", "database.existingSecret=base-db", "--set", "kafka.brokers=kafka.invalid:9092",
+                 "-f", str(values_path)],
+                capture_output=True, text=True,
+            )
+        finally:
+            values_path.unlink(missing_ok=True)
+        assert proc.returncode != 0 and needle in proc.stderr, (
+            f"{why} in networkNodes.nodes must fail the render naming {needle!r}; rc={proc.returncode} stderr={proc.stderr}"
+        )
+    print("PASS: a typo'd or missing node key fails the render")
+
+
 def main() -> int:
+    check_nodes_file_is_valid_json_and_wired()
+    check_nodes_are_live_only_and_optional()
+    check_bad_nodes_are_refused_at_render()
     check_startup_probe_gates_boot_work()
     check_outbox_max_attempts_reaches_the_container()
     check_orphan_hold_sweep_knobs_reach_the_container()
