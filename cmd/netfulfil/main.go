@@ -42,14 +42,14 @@ func main() {
 // network gateway, the product dictionary, the order repository and its
 // pool, and the CapabilityOffer pipeline.
 type infra struct {
-	gateway     ports.NetworkGateway
-	mode        retailnetwork.Mode
-	translation ports.ProductTranslation
-	orders      ports.NetworkOrderRepo
-	pool        *pgxpool.Pool
-	offers      ports.CapabilityOfferRepo
-	recompute   *usecases.RecomputeCapabilityOffers
-	capDone     []chan struct{}
+	gateway      ports.NetworkGateway
+	mode         retailnetwork.Mode
+	translation  ports.ProductTranslation
+	orders       ports.NetworkOrderRepo
+	pool         *pgxpool.Pool
+	offers       ports.CapabilityOfferRepo
+	recompute    *usecases.RecomputeCapabilityOffers
+	capConsumers []cacheConsumer
 }
 
 // run wires every adapter and use case in startup order, serves until a
@@ -147,7 +147,7 @@ func run(ctx context.Context) int {
 		serviceName: serviceName,
 	})
 
-	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
+	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capConsumers)
 }
 
 // bootInfra builds the pieces that must exist before any use case, in
@@ -211,12 +211,12 @@ func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig, breaker
 	// own doc comment for what it wires. A failure here exits without any
 	// closer registered (the process is terminating regardless of any open
 	// pool/reader).
-	offers, recompute, capDone, closeCapabilityOffer, err := wireCapabilityOffer(ctx, pool, cfg.kafkaBrokers, in.translation, logger)
+	offers, recompute, capConsumers, closeCapabilityOffer, err := wireCapabilityOffer(ctx, pool, cfg.kafkaBrokers, in.translation, logger)
 	if err != nil {
 		logger.Error("cannot wire capability offer pipeline", "err", err)
 		return infra{}, nil, false
 	}
-	in.offers, in.recompute, in.capDone = offers, recompute, capDone
+	in.offers, in.recompute, in.capConsumers = offers, recompute, capConsumers
 
 	return in, func() {
 		closeCapabilityOffer()

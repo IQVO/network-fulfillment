@@ -43,8 +43,8 @@ func wireCapabilityOffer(
 	brokers []string,
 	translation ports.ProductTranslation,
 	logger *slog.Logger,
-) (ports.CapabilityOfferRepo, *usecases.RecomputeCapabilityOffers, []chan struct{}, func(), error) {
-	pathCap, capacity, runDone, err := startCapabilityOfferCaches(ctx, brokers, logger)
+) (ports.CapabilityOfferRepo, *usecases.RecomputeCapabilityOffers, []cacheConsumer, func(), error) {
+	pathCap, capacity, consumers, err := startCapabilityOfferCaches(ctx, brokers, logger)
 	if err != nil {
 		return nil, nil, nil, func() {}, err
 	}
@@ -63,14 +63,14 @@ func wireCapabilityOffer(
 	}
 
 	closeFn := func() { closeCaches(pathCap, capacity) }
-	return offers, recompute, runDone, closeFn, nil
+	return offers, recompute, consumers, closeFn, nil
 }
 
 // startCapabilityOfferCaches dials both Kafka-fed caches, starts their
 // Run goroutines, and blocks until both have replayed their topic's full
 // history. See wireCapabilityOffer's own doc comment for why boot blocks
 // here rather than serving traffic against an incomplete read model.
-func startCapabilityOfferCaches(ctx context.Context, brokers []string, logger *slog.Logger) (*processpathcache.Consumer, *pathcapacitycache.Consumer, []chan struct{}, error) {
+func startCapabilityOfferCaches(ctx context.Context, brokers []string, logger *slog.Logger) (*processpathcache.Consumer, *pathcapacitycache.Consumer, []cacheConsumer, error) {
 	pathCap, capacity, err := dialCapabilityOfferCaches(ctx, brokers, logger)
 	if err != nil {
 		return nil, nil, nil, err
@@ -83,7 +83,7 @@ func startCapabilityOfferCaches(ctx context.Context, brokers []string, logger *s
 		return nil, nil, nil, err
 	}
 
-	return pathCap, capacity, []chan struct{}{pathCapDone, capacityDone}, nil
+	return pathCap, capacity, []cacheConsumer{pathCapDone, capacityDone}, nil
 }
 
 // dialCapabilityOfferCaches constructs both consumers.
@@ -121,9 +121,18 @@ func dialCapabilityOfferCaches(ctx context.Context, brokers []string, logger *sl
 	return pathCap, capacity, nil
 }
 
-// runCacheConsumer runs one cache consumer in a goroutine and returns a
-// channel closed once it has returned.
-func runCacheConsumer(ctx context.Context, logger *slog.Logger, stoppedMsg string, run func(context.Context) error) chan struct{} {
+// cacheConsumer is one running cache consumer: done closes once its Run has
+// returned, and ctx is the context that Run runs on. serve() judges a stop
+// against THAT context: whether the consumer was asked to stop or died on its
+// own is only known by the context the consumer itself obeys.
+type cacheConsumer struct {
+	done chan struct{}
+	ctx  context.Context
+}
+
+// runCacheConsumer runs one cache consumer in a goroutine and returns the
+// handle serve() supervises.
+func runCacheConsumer(ctx context.Context, logger *slog.Logger, stoppedMsg string, run func(context.Context) error) cacheConsumer {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -131,7 +140,7 @@ func runCacheConsumer(ctx context.Context, logger *slog.Logger, stoppedMsg strin
 			logger.Error(stoppedMsg, "err", err)
 		}
 	}()
-	return done
+	return cacheConsumer{done: done, ctx: ctx}
 }
 
 // waitCachesReady blocks until both caches report ready (bounded by their

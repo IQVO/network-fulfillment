@@ -45,7 +45,7 @@ func serve(
 	relay *postgres.OutboxRelay,
 	readiness *inboundhttp.Readiness,
 	recompute *usecases.RecomputeCapabilityOffers,
-	capabilityCacheDone []chan struct{},
+	capabilityCaches []cacheConsumer,
 ) int {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -66,9 +66,9 @@ func serve(
 
 	startHTTP(logger, srv)
 
-	watched := []namedDone{{"outbox relay", relayDone}}
-	for i, done := range capabilityCacheDone {
-		watched = append(watched, namedDone{fmt.Sprintf("capability-offer cache consumer %d", i+1), done})
+	watched := []namedDone{{"outbox relay", relayDone, relayCtx}}
+	for i, c := range capabilityCaches {
+		watched = append(watched, namedDone{fmt.Sprintf("capability-offer cache consumer %d", i+1), c.done, c.ctx})
 	}
 	died := watchDeaths(ctx, watched)
 
@@ -85,15 +85,16 @@ func serve(
 	}
 	stop() // cancels the poller and tickers when the cause was not a signal
 
-	shutdownGracefully(logger, srv, readiness, stopRelay, relayDone, pollerDone, capabilityCacheDone)
+	shutdownGracefully(logger, srv, readiness, stopRelay, relayDone, pollerDone, capabilityCaches)
 	return exitCode
 }
 
 // namedDone pairs a long-lived goroutine's completion channel with a name
-// for the log line.
+// for the log line, and with the context the goroutine itself runs on.
 type namedDone struct {
 	name string
 	done <-chan struct{}
+	ctx  context.Context
 }
 
 // watchDeaths reports, on the returned channel, the name of every watched
@@ -184,7 +185,7 @@ func shutdownGracefully(
 	readiness *inboundhttp.Readiness,
 	stopRelay context.CancelFunc,
 	relayDone, pollerDone <-chan struct{},
-	capabilityCacheDone []chan struct{},
+	capabilityCaches []cacheConsumer,
 ) {
 	readiness.SetNotReady()
 
@@ -204,9 +205,9 @@ func shutdownGracefully(
 	// for the in-flight pass (if any) to finish before main returns.
 	waitStopped(shutdownCtx, logger, pollerDone, "poller did not stop before the shutdown deadline")
 
-	// capabilityCacheDone holds the two Kafka cache consumers' Run channels.
-	for _, done := range capabilityCacheDone {
-		waitStopped(shutdownCtx, logger, done, "a capability-offer cache consumer did not stop before the shutdown deadline")
+	// capabilityCaches holds the two Kafka cache consumers.
+	for _, c := range capabilityCaches {
+		waitStopped(shutdownCtx, logger, c.done, "a capability-offer cache consumer did not stop before the shutdown deadline")
 	}
 
 	logger.Info("stopped")

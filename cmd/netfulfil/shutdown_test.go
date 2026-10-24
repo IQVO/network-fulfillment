@@ -25,7 +25,7 @@ func TestWatchDeaths_ReportsAGoroutineThatStopsOnItsOwn(t *testing.T) {
 
 	alive := make(chan struct{})
 	dying := make(chan struct{})
-	died := watchDeaths(ctx, []namedDone{{"alive", alive}, {"dying", dying}})
+	died := watchDeaths(ctx, []namedDone{{"alive", alive, ctx}, {"dying", dying, ctx}})
 
 	if name, ok := recvName(t, died); ok {
 		t.Fatalf("nothing has stopped yet, got a death report for %q", name)
@@ -42,11 +42,33 @@ func TestWatchDeaths_ReportsAGoroutineThatStopsOnItsOwn(t *testing.T) {
 func TestWatchDeaths_IgnoresStopsCausedByShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	died := watchDeaths(ctx, []namedDone{{"relay", done}})
+	died := watchDeaths(ctx, []namedDone{{"relay", done, ctx}})
 
 	cancel()
 	close(done)
 	if name, ok := recvName(t, died); ok {
 		t.Fatalf("a stop after shutdown began must not be reported, got %q", name)
+	}
+}
+
+// TestWatchDeaths_JudgesAGoroutineByTheContextItRunsOn: whether a goroutine
+// was asked to stop is a fact about the context IT obeys, not about the
+// watcher's. The two are different contexts (the cache consumers run on the
+// process context, serve() watches a context derived from it), and a
+// cancellation reaches them one after the other, so a goroutine can finish on
+// its own context's cancellation while the watcher's context still reads live.
+// That window made a clean shutdown report a death and exit 1.
+func TestWatchDeaths_JudgesAGoroutineByTheContextItRunsOn(t *testing.T) {
+	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
+	defer cancelWatcher() // never cancelled during the test: the cancellation "has not arrived yet"
+	ownCtx, cancelOwn := context.WithCancel(context.Background())
+	cancelOwn()
+
+	done := make(chan struct{})
+	died := watchDeaths(watcherCtx, []namedDone{{"consumer", done, ownCtx}})
+	close(done)
+
+	if name, ok := recvName(t, died); ok {
+		t.Fatalf("%q finished because its own context was cancelled: that is a stop, not a death", name)
 	}
 }
