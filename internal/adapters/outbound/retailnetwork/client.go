@@ -105,21 +105,27 @@ func newAPIClient(cfg clientConfig) (*apiClient, error) {
 	if c.sleep == nil {
 		c.sleep = sleepContext
 	}
-	cooldown := cfg.cooldown
-	if cooldown <= 0 {
-		cooldown = resilience.DefaultTimeout
-	}
 	c.breaker = gobreaker.NewCircuitBreaker[*apiResponse](gobreaker.Settings{
 		Name:        DependencyName,
 		MaxRequests: resilience.DefaultMaxRequests,
 		Interval:    resilience.DefaultInterval,
-		Timeout:     cooldown,
+		Timeout:     breakerCooldown(cfg.cooldown),
 		ReadyToTrip: resilience.ReadyToTrip,
 		// The caller giving up is not the dependency's fault.
 		IsExcluded:    func(err error) bool { return errors.Is(err, context.Canceled) },
 		OnStateChange: resilience.RecordStateChange(DependencyName, cfg.recorder),
 	})
 	return c, nil
+}
+
+// breakerCooldown is how long the breaker stays open before it lets a probe
+// through: the configured value, or the fleet's default when none (or a
+// non-positive one) was given.
+func breakerCooldown(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return resilience.DefaultTimeout
+	}
+	return configured
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
@@ -216,22 +222,17 @@ func (c *apiClient) do(ctx context.Context, rq request) (*apiResponse, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		wait := bo.NextBackOff()
-		switch {
-		case err == nil && resp.status == http.StatusTooManyRequests:
-			ra, ok := retryAfter(resp.header, c.now())
-			if !ok {
-				ra = wait
-			}
-			if ra > maxRetryAfter || exceedsDeadline(ctx, ra, c.now()) {
-				return nil, &RateLimitedError{Op: rq.op, RetryAfter: ra}
-			}
-			lastErr = &RateLimitedError{Op: rq.op, RetryAfter: ra}
-			wait = ra
-		case err == nil:
+		if err == nil && resp.status != http.StatusTooManyRequests {
 			return resp, nil
-		default:
-			lastErr = err
+		}
+		wait := bo.NextBackOff()
+		lastErr = err
+		if err == nil {
+			rl := c.rateLimited(rq, resp, wait)
+			if rl.RetryAfter > maxRetryAfter || exceedsDeadline(ctx, rl.RetryAfter, c.now()) {
+				return nil, rl
+			}
+			lastErr, wait = rl, rl.RetryAfter
 		}
 		if attempt == c.maxAttempts {
 			break
@@ -242,6 +243,16 @@ func (c *apiClient) do(ctx context.Context, rq request) (*apiResponse, error) {
 		}
 	}
 	return nil, fmt.Errorf("retail-network: %s: gave up after %d attempts: %w", rq.op, c.maxAttempts, lastErr)
+}
+
+// rateLimited describes a 429: the network's Retry-After when it sent a usable
+// one, else the client's own backoff step.
+func (c *apiClient) rateLimited(rq request, resp *apiResponse, backoffStep time.Duration) *RateLimitedError {
+	wait, ok := retryAfter(resp.header, c.now())
+	if !ok {
+		wait = backoffStep
+	}
+	return &RateLimitedError{Op: rq.op, RetryAfter: wait}
 }
 
 func exceedsDeadline(ctx context.Context, wait time.Duration, now time.Time) bool {

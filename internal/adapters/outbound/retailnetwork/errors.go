@@ -89,10 +89,8 @@ func retryAfter(h http.Header, now time.Time) (time.Duration, bool) {
 		return time.Duration(secs) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		if d := t.Sub(now); d > 0 {
-			return d, true
-		}
-		return 0, true
+		// A date in the past is "retry now", not a negative wait.
+		return max(t.Sub(now), 0), true
 	}
 	return 0, false
 }
