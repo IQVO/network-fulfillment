@@ -38,6 +38,24 @@ func writeFile(t *testing.T, name, body string) string {
 const wiringNodeJSON = `{"nodes":[{"siteCode":"site-1","nodeType":"FULFILLMENT_CENTER","regionId":"SP",` +
 	`"timezone":"America/Sao_Paulo","postalCode":"01000-000","countryCode":"BR"}]}`
 
+// bootVars returns the mandatory configuration plus the given variables.
+func bootVars(extra map[string]string) map[string]string {
+	vars := map[string]string{"DATABASE_URL": testDSN, "KAFKA_BROKERS": testBrokers}
+	for k, v := range extra {
+		vars[k] = v
+	}
+	return vars
+}
+
+// liveVars returns a complete, valid live-mode environment plus the given variables.
+func liveVars(extra map[string]string) map[string]string {
+	vars := bootVars(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1"})
+	for k, v := range extra {
+		vars[k] = v
+	}
+	return vars
+}
+
 // bootNetwork runs the same three steps bootInfra does for the network, on the
 // real process environment, and returns what they decided. The pool is nil:
 // wiring only hands it to the store, which touches it on the first call.
@@ -55,132 +73,126 @@ func bootNetwork(t *testing.T) (cfg bootConfig, nodes []retailnetwork.NodeDefini
 	return cfg, nodes, gateway, err
 }
 
-func TestNetworkWiring_Decisions(t *testing.T) {
-	base := map[string]string{"DATABASE_URL": testDSN, "KAFKA_BROKERS": testBrokers}
-	with := func(extra map[string]string) map[string]string {
-		out := map[string]string{}
-		for k, v := range base {
-			out[k] = v
-		}
-		for k, v := range extra {
-			out[k] = v
-		}
-		return out
+// TestNetworkWiring_StubIsTheDefault: anything but "live" is the stub, and the
+// stub never reads the live-only variables.
+func TestNetworkWiring_StubIsTheDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		vars map[string]string
+	}{
+		{"unset mode", bootVars(nil)},
+		{"stub spelled out", bootVars(map[string]string{"NETWORK_MODE": "stub"})},
+		{"a retired or mistyped mode fails closed", bootVars(map[string]string{"NETWORK_MODE": "sandbox"})},
+		{"live-only variables are ignored", bootVars(map[string]string{
+			"NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1", "NETWORK_NODES_FILE": "/does/not/exist.json",
+		})},
 	}
-	nodesFile := writeFile(t, "nodes.json", wiringNodeJSON)
-	badNodesFile := writeFile(t, "bad-nodes.json", `{"nodes":[{"siteCode":"site-1"}]}`)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setNetworkEnv(t, tc.vars)
+			cfg, nodes, gateway, err := bootNetwork(t)
+			if err != nil {
+				t.Fatalf("unexpected boot error: %v", err)
+			}
+			if _, ok := gateway.(*retailnetwork.StubGateway); !ok || cfg.network.mode != retailnetwork.ModeStub || len(nodes) != 0 {
+				t.Fatalf("mode %q, gateway %T, %d node definitions; want the stub with none", cfg.network.mode, gateway, len(nodes))
+			}
+		})
+	}
+}
 
+// TestNetworkWiring_LiveWires: a complete live configuration builds the live
+// gateway, with or without node definitions.
+func TestNetworkWiring_LiveWires(t *testing.T) {
 	cases := []struct {
 		name      string
 		vars      map[string]string
-		wantErr   []string // every substring the boot error must contain
-		notNamed  []string // variables the boot error must NOT mention (they are set)
-		wantMode  retailnetwork.Mode
-		wantLive  bool
 		wantNodes int
 	}{
-		{name: "unset mode is the stub", vars: with(nil), wantMode: retailnetwork.ModeStub},
-		{name: "stub spelled out", vars: with(map[string]string{"NETWORK_MODE": "stub"}), wantMode: retailnetwork.ModeStub},
-		{name: "a retired or mistyped mode fails closed to the stub", vars: with(map[string]string{"NETWORK_MODE": "sandbox"}), wantMode: retailnetwork.ModeStub},
+		{"adopting its nodes needs no node file", liveVars(nil), 0},
+		{"registering nodes from the node file", liveVars(map[string]string{"NETWORK_NODES_FILE": writeFile(t, "nodes.json", wiringNodeJSON)}), 1},
+		{"the mode is case-insensitive", liveVars(map[string]string{"NETWORK_MODE": "LIVE"}), 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setNetworkEnv(t, tc.vars)
+			cfg, nodes, gateway, err := bootNetwork(t)
+			if err != nil {
+				t.Fatalf("unexpected boot error: %v", err)
+			}
+			if _, ok := gateway.(*retailnetwork.LiveGateway); !ok || cfg.network.mode != retailnetwork.ModeLive || len(nodes) != tc.wantNodes {
+				t.Fatalf("mode %q, gateway %T, %d node definitions; want the live gateway with %d", cfg.network.mode, gateway, len(nodes), tc.wantNodes)
+			}
+		})
+	}
+}
+
+// TestNetworkWiring_LiveRefusals: every way a live configuration is wrong stops
+// the boot with an error that names the cause.
+func TestNetworkWiring_LiveRefusals(t *testing.T) {
+	cases := []struct {
+		name     string
+		vars     map[string]string
+		wantErr  []string // every substring the boot error must contain
+		notNamed []string // variables the error must NOT mention: they are set
+	}{
 		{
-			name:     "the stub ignores live-only variables",
-			vars:     with(map[string]string{"NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1", "NETWORK_NODES_FILE": "/does/not/exist.json"}),
-			wantMode: retailnetwork.ModeStub,
-		},
-		{
-			name:     "live without a base URL names NETWORK_BASE_URL only",
-			vars:     with(map[string]string{"NETWORK_MODE": "live", "NETWORK_VENDOR_ID": "V-1"}),
+			name:     "no base URL names NETWORK_BASE_URL only",
+			vars:     bootVars(map[string]string{"NETWORK_MODE": "live", "NETWORK_VENDOR_ID": "V-1"}),
 			wantErr:  []string{"NETWORK_MODE=live", "NETWORK_BASE_URL"},
 			notNamed: []string{"NETWORK_VENDOR_ID"},
 		},
 		{
-			name:     "live without a vendor id names NETWORK_VENDOR_ID only",
-			vars:     with(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test"}),
+			name:     "no vendor id names NETWORK_VENDOR_ID only",
+			vars:     bootVars(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test"}),
 			wantErr:  []string{"NETWORK_MODE=live", "NETWORK_VENDOR_ID"},
 			notNamed: []string{"NETWORK_BASE_URL"},
 		},
-		{
-			name:    "live with neither names both",
-			vars:    with(map[string]string{"NETWORK_MODE": "LIVE"}),
-			wantErr: []string{"NETWORK_BASE_URL", "NETWORK_VENDOR_ID"},
-		},
+		{name: "neither names both", vars: bootVars(map[string]string{"NETWORK_MODE": "live"}), wantErr: []string{"NETWORK_BASE_URL", "NETWORK_VENDOR_ID"}},
 		{
 			name:    "blank values count as missing",
-			vars:    with(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "  ", "NETWORK_VENDOR_ID": "\t"}),
+			vars:    bootVars(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "  ", "NETWORK_VENDOR_ID": "\t"}),
 			wantErr: []string{"NETWORK_BASE_URL", "NETWORK_VENDOR_ID"},
 		},
 		{
-			name: "live never boots without DATABASE_URL (ADR 0025)",
+			name: "never boots without DATABASE_URL (ADR 0025)",
 			vars: map[string]string{
 				"KAFKA_BROKERS": testBrokers, "NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1",
 			},
 			wantErr: []string{"DATABASE_URL"},
 		},
 		{
-			name:     "live adopting its nodes needs no node file",
-			vars:     with(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1"}),
-			wantMode: retailnetwork.ModeLive, wantLive: true,
-		},
-		{
-			name: "live registering nodes from the node file",
-			vars: with(map[string]string{
-				"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1", "NETWORK_NODES_FILE": nodesFile,
-			}),
-			wantMode: retailnetwork.ModeLive, wantLive: true, wantNodes: 1,
-		},
-		{
-			name: "a node file that is not there stops the live boot",
-			vars: with(map[string]string{
-				"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1", "NETWORK_NODES_FILE": filepath.Join(t.TempDir(), "absent.json"),
-			}),
+			name:    "a node file that is not there",
+			vars:    liveVars(map[string]string{"NETWORK_NODES_FILE": filepath.Join(t.TempDir(), "absent.json")}),
 			wantErr: []string{"read nodes file"},
 		},
 		{
-			name: "a node file with a missing field stops the live boot",
-			vars: with(map[string]string{
-				"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1", "NETWORK_NODES_FILE": badNodesFile,
-			}),
+			name:    "a node file with a missing field",
+			vars:    liveVars(map[string]string{"NETWORK_NODES_FILE": writeFile(t, "bad-nodes.json", `{"nodes":[{"siteCode":"site-1"}]}`)}),
 			wantErr: []string{"nodeType is required"},
 		},
 		{
-			name:    "a base URL that is not absolute stops the live boot",
-			vars:    with(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "network.test", "NETWORK_VENDOR_ID": "V-1"}),
+			name:    "a base URL that is not absolute",
+			vars:    liveVars(map[string]string{"NETWORK_BASE_URL": "network.test"}),
 			wantErr: []string{"NETWORK_BASE_URL"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			setNetworkEnv(t, tc.vars)
-			cfg, nodes, gateway, err := bootNetwork(t)
-			if len(tc.wantErr) > 0 {
-				if err == nil {
-					t.Fatalf("boot succeeded, want an error containing %q", tc.wantErr)
+			_, _, _, err := bootNetwork(t)
+			if err == nil {
+				t.Fatalf("boot succeeded, want an error containing %q", tc.wantErr)
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q does not contain %q", err, want)
 				}
-				for _, want := range tc.wantErr {
-					if !strings.Contains(err.Error(), want) {
-						t.Fatalf("error %q does not contain %q", err, want)
-					}
+			}
+			for _, other := range tc.notNamed {
+				if strings.Contains(err.Error(), other) {
+					t.Fatalf("error %q names %s, which is set", err, other)
 				}
-				for _, other := range tc.notNamed {
-					if strings.Contains(err.Error(), other) {
-						t.Fatalf("error %q names %s, which is set", err, other)
-					}
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected boot error: %v", err)
-			}
-			if cfg.network.mode != tc.wantMode {
-				t.Fatalf("mode = %q, want %q", cfg.network.mode, tc.wantMode)
-			}
-			if len(nodes) != tc.wantNodes {
-				t.Fatalf("node definitions = %d, want %d", len(nodes), tc.wantNodes)
-			}
-			_, isLive := gateway.(*retailnetwork.LiveGateway)
-			_, isStub := gateway.(*retailnetwork.StubGateway)
-			if isLive != tc.wantLive || isStub == tc.wantLive {
-				t.Fatalf("gateway = %T, want live=%v", gateway, tc.wantLive)
 			}
 		})
 	}
@@ -190,12 +202,8 @@ func TestNetworkWiring_Decisions(t *testing.T) {
 // against the live gateway, where the seeded demand would never be delivered.
 func TestNetworkWiring_SeedFile(t *testing.T) {
 	seed := writeFile(t, "seed.json", `{"demands":[]}`)
-	live := map[string]string{
-		"DATABASE_URL": testDSN, "KAFKA_BROKERS": testBrokers, "NETWORK_MODE": "live",
-		"NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1", "NETWORK_SEED_FILE": seed,
-	}
 	t.Run("live refuses a seed file", func(t *testing.T) {
-		setNetworkEnv(t, live)
+		setNetworkEnv(t, liveVars(map[string]string{"NETWORK_SEED_FILE": seed}))
 		_, _, gateway, err := bootNetwork(t)
 		if err != nil {
 			t.Fatalf("wiring: %v", err)
@@ -206,8 +214,7 @@ func TestNetworkWiring_SeedFile(t *testing.T) {
 		}
 	})
 	t.Run("the stub takes it", func(t *testing.T) {
-		vars := map[string]string{"DATABASE_URL": testDSN, "KAFKA_BROKERS": testBrokers, "NETWORK_SEED_FILE": seed}
-		setNetworkEnv(t, vars)
+		setNetworkEnv(t, bootVars(map[string]string{"NETWORK_SEED_FILE": seed}))
 		_, _, gateway, err := bootNetwork(t)
 		if err != nil {
 			t.Fatalf("wiring: %v", err)

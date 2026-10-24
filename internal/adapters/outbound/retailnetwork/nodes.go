@@ -68,10 +68,7 @@ func LoadNodesFile(path string) ([]NodeDefinition, error) {
 			return nil, fmt.Errorf("nodes file %s: node %d: site %q is defined twice", path, i, e.SiteCode)
 		}
 		seen[e.SiteCode] = true
-		out = append(out, NodeDefinition{
-			SiteCode: e.SiteCode, NodeType: e.NodeType, Subtype: e.Subtype, RegionID: e.RegionID,
-			Timezone: e.Timezone, PostalCode: e.PostalCode, CountryCode: e.CountryCode, Lat: e.Lat, Lon: e.Lon,
-		})
+		out = append(out, NodeDefinition(e))
 	}
 	return out, nil
 }

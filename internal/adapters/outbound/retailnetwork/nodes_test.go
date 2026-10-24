@@ -3,6 +3,7 @@ package retailnetwork
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -25,19 +26,17 @@ func TestLoadNodesFile_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadNodesFile: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("nodes = %d, want 2", len(got))
+	lat, lon := -23.55, -46.63
+	want := []NodeDefinition{
+		{
+			SiteCode: "site-1", NodeType: "FULFILLMENT_CENTER", Subtype: "SORTABLE", RegionID: "SP",
+			Timezone: "America/Sao_Paulo", PostalCode: "01000-000", CountryCode: "BR", Lat: &lat, Lon: &lon,
+		},
+		// The optional subtype, lat and lon stay at their zero values.
+		{SiteCode: "site-2", NodeType: "RETURNS_CENTER", RegionID: "RJ", Timezone: "America/Sao_Paulo", PostalCode: "20000-000", CountryCode: "BR"},
 	}
-	first := got[0]
-	if first.SiteCode != "site-1" || first.NodeType != "FULFILLMENT_CENTER" || first.Subtype != "SORTABLE" || first.RegionID != "SP" ||
-		first.Timezone != "America/Sao_Paulo" || first.PostalCode != "01000-000" || first.CountryCode != "BR" {
-		t.Fatalf("first node = %+v", first)
-	}
-	if first.Lat == nil || *first.Lat != -23.55 || first.Lon == nil || *first.Lon != -46.63 {
-		t.Fatalf("first node coordinates = %v, %v", first.Lat, first.Lon)
-	}
-	if got[1].Subtype != "" || got[1].Lat != nil || got[1].Lon != nil {
-		t.Fatalf("optional fields of the second node = %+v, want zero values", got[1])
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("nodes = %+v, want %+v", got, want)
 	}
 }
 
