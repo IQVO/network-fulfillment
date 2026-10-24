@@ -131,7 +131,47 @@ func startE2EContainers(t *testing.T, ctx context.Context) e2eEnv {
 	for _, topic := range consumedTopics {
 		e2eCreateTopic(t, ctx, brokers[0], topic)
 	}
+	e2eWarmConsumerGroups(t, ctx, brokers)
 	return e2eEnv{dsn: dsn, brokers: brokers, suffix: suffix, kafkaCont: kc}
+}
+
+// e2eWarmConsumerGroups makes a freshly started broker answer consumer-group
+// requests before the service starts its capability-offer caches. The topics
+// exist and have leaders by now, but the broker creates its internal group
+// metadata (__consumer_offsets) and elects the coordinators lazily, on the first
+// group request: until then it answers "[15] Group Coordinator Not Available",
+// and the service treats a cache consumer that stops on its own as fatal (exit 1,
+// by design). So throwaway groups join first, on the topics the service
+// consumes, until one gets its generation: the coordinator, the join and the sync
+// all work. Each attempt is a new group; a failed one is only a cold broker.
+func e2eWarmConsumerGroups(t *testing.T, ctx context.Context, brokers []string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if lastErr = e2eJoinThrowawayGroup(ctx, brokers); lastErr == nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("the new broker never let a throwaway consumer group join: %v", lastErr)
+}
+
+func e2eJoinThrowawayGroup(ctx context.Context, brokers []string) error {
+	group, err := kafkago.NewConsumerGroup(kafkago.ConsumerGroupConfig{
+		ID:               fmt.Sprintf("nf-e2e-warmup-%d", time.Now().UnixNano()),
+		Brokers:          brokers,
+		Topics:           consumedTopics,
+		JoinGroupBackoff: 500 * time.Millisecond, // the default, 5s, outlasts a short test
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = group.Close() }()
+	joinCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	_, err = group.Next(joinCtx)
+	return err
 }
 
 func e2eFreeAddr(t *testing.T) string {
