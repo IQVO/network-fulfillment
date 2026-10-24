@@ -29,6 +29,7 @@ type StubGateway struct {
 	acknowledged map[shared.NetworkRef]bool
 	reasons      map[shared.NetworkRef]shared.RejectionReason
 	confirmed    map[shared.NetworkRef]bool
+	profiles     map[shared.SiteId]contract.NodeProfile
 
 	logger *slog.Logger
 }
@@ -41,6 +42,7 @@ func NewStubGateway(logger *slog.Logger) *StubGateway {
 		acknowledged: make(map[shared.NetworkRef]bool),
 		reasons:      make(map[shared.NetworkRef]shared.RejectionReason),
 		confirmed:    make(map[shared.NetworkRef]bool),
+		profiles:     make(map[shared.SiteId]contract.NodeProfile),
 		logger:       logger,
 	}
 }
@@ -118,12 +120,25 @@ func (g *StubGateway) SubmitAvailability(_ context.Context, update contract.Avai
 	return nil
 }
 
-// DeclareCapability is a documented no-op everywhere in this codebase
-// today — see contract.CapabilityDeclaration's doc comment for why the
-// network's real API has no such operation.
-func (g *StubGateway) DeclareCapability(_ context.Context, offer contract.CapabilityDeclaration) error {
-	g.logger.Info("stub network capability declaration (no-op)", "siteId", offer.SiteId, "sku", offer.SKU, "advertisedQuantity", offer.AdvertisedQuantity)
-	return nil
+// DeclareNodeProfile records the profile (for tests and local runs to assert on)
+// and sends nothing: the stub makes no external call, so a declaration never
+// leaves the process and has no revision (ADR 0027).
+func (g *StubGateway) DeclareNodeProfile(_ context.Context, profile contract.NodeProfile) (contract.ProfileResult, error) {
+	g.mu.Lock()
+	g.profiles[profile.SiteId] = profile
+	g.mu.Unlock()
+	g.logger.Info("stub network node profile declaration (nothing sent)", "siteId", profile.SiteId,
+		"cutoffs", len(profile.Cutoffs), "handlingTime", profile.HandlingTime, "throughputPerDay", profile.ThroughputPerDay)
+	return contract.ProfileResult{Outcome: contract.ProfileUnchanged}, nil
+}
+
+// DeclaredProfile reports the profile last passed to DeclareNodeProfile for a
+// site, and whether there was one.
+func (g *StubGateway) DeclaredProfile(site shared.SiteId) (contract.NodeProfile, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	p, ok := g.profiles[site]
+	return p, ok
 }
 
 // RequestLabel returns deterministic fake labels, one per package — never a

@@ -53,7 +53,7 @@ type LiveGateway struct {
 	sites  []string
 	defs   map[string]NodeDefinition
 
-	capabilityNoted, availabilityNoted atomic.Bool // the supply-loop no-ops log at Info once each
+	availabilityNoted atomic.Bool // the inventory no-op logs at Info once
 }
 
 var _ ports.NetworkGateway = (*LiveGateway)(nil)
@@ -589,24 +589,24 @@ func (g *LiveGateway) recordConfirmationOutcome(ctx context.Context, ref shared.
 		"networkRef", ref, "errors", failed.Errors)
 }
 
-// ---- the supply loop's seams (Decision 1, ADR 0027) ----
+// ---- the supply loop's seams (ADR 0027) ----
 
-// DeclareCapability is a documented, non-failing no-op: the node profile belongs
-// to the supply loop, ADR 0027. It logs once at Info, then at Debug.
-func (g *LiveGateway) DeclareCapability(_ context.Context, _ contract.CapabilityDeclaration) error {
-	g.noteSupplyNoOp(&g.capabilityNoted, "DeclareCapability")
-	return nil
+// DeclareNodeProfile is declared here so the gateway satisfies the port; the
+// implementation follows in profile.go. (placeholder until then)
+func (g *LiveGateway) DeclareNodeProfile(_ context.Context, _ contract.NodeProfile) (contract.ProfileResult, error) {
+	return contract.ProfileResult{Outcome: contract.ProfileUnchanged}, nil
 }
 
 // SubmitAvailability is a documented, non-failing no-op: the inventory feed
-// belongs to the supply loop, ADR 0027. It logs once at Info, then at Debug.
+// belongs to part 2 of the supply loop, ADR 0027. It logs once at Info, then at
+// Debug.
 func (g *LiveGateway) SubmitAvailability(_ context.Context, _ contract.AvailabilityUpdate) error {
 	g.noteSupplyNoOp(&g.availabilityNoted, "SubmitAvailability")
 	return nil
 }
 
 func (g *LiveGateway) noteSupplyNoOp(noted *atomic.Bool, method string) {
-	msg := "retail-network: " + method + " is a no-op in the live gateway until the supply loop (ADR 0027) is built"
+	msg := "retail-network: " + method + " is a no-op in the live gateway until the inventory feed (ADR 0027, part 2) is built"
 	if noted.CompareAndSwap(false, true) {
 		g.logger.Info(msg, "method", method)
 		return

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
@@ -29,13 +30,25 @@ func TestStubGateway_SubmitAvailabilityIsANoop(t *testing.T) {
 	}
 }
 
-func TestStubGateway_DeclareCapabilityIsANoop(t *testing.T) {
+func TestStubGateway_DeclareNodeProfileRecordsItAndSendsNothing(t *testing.T) {
 	g := newTestStubGateway()
-	err := g.DeclareCapability(context.Background(), contract.CapabilityDeclaration{
-		SiteId: "site-1", SKU: "sku-1", AdvertisedQuantity: 5,
-	})
+	profile := contract.NodeProfile{
+		SiteId: "site-1", Timezone: "UTC", HandlingTime: time.Hour, ThroughputPerDay: 10, Fingerprint: "f1",
+		Cutoffs: []contract.ProfileCutoff{{LocalTime: "18:00", Days: []time.Weekday{time.Monday}, MaxOrders: 4}},
+	}
+	res, err := g.DeclareNodeProfile(context.Background(), profile)
 	if err != nil {
-		t.Fatalf("DeclareCapability = %v, want nil (documented no-op: the network API has no such operation)", err)
+		t.Fatalf("DeclareNodeProfile = %v, want nil (the stub makes no external call)", err)
+	}
+	if res.Outcome != contract.ProfileUnchanged || res.Revision != 0 {
+		t.Errorf("result = %+v, want %q with no revision: nothing was sent", res, contract.ProfileUnchanged)
+	}
+	got, ok := g.DeclaredProfile("site-1")
+	if !ok || got.Fingerprint != "f1" || len(got.Cutoffs) != 1 {
+		t.Errorf("DeclaredProfile = %+v ok=%v, want the profile that was declared", got, ok)
+	}
+	if _, ok := g.DeclaredProfile("site-2"); ok {
+		t.Error("DeclaredProfile found a profile for a site that never declared one")
 	}
 }
 

@@ -68,14 +68,15 @@ type NetworkGateway interface {
 	// SubmitAvailability tells the network what we claim we can ship for
 	// one SKU at one site (ADR 0001's submitInventoryUpdate signal). The
 	// live adapter treats it as a documented, non-failing no-op until the
-	// supply loop (ADR 0027) exists.
+	// inventory feed (ADR 0027, part 2) replaces it.
 	SubmitAvailability(ctx context.Context, update contract.AvailabilityUpdate) error
 
-	// DeclareCapability tells the network our cutoffs and cycle times.
-	// Every adapter in this codebase treats it as a documented no-op today
-	// (the stub always; the live adapter until ADR 0027 builds the node
-	// profile), kept for port-shape completeness.
-	DeclareCapability(ctx context.Context, offer contract.CapabilityDeclaration) error
+	// DeclareNodeProfile tells the network how a site operates: its cutoffs,
+	// handling time and throughput (ADR 0027). It is idempotent per content: the
+	// same profile again sends nothing, a changed one becomes the next
+	// revision, which the adapter owns and persists and which never goes down.
+	// A site with no node on the network yet is contract.ErrSiteNotRegistered.
+	DeclareNodeProfile(ctx context.Context, profile contract.NodeProfile) (contract.ProfileResult, error)
 
 	// RequestLabel asks the network for the shipping labels of an order that
 	// leaves in packageCount packages (at least one), returning only
@@ -161,6 +162,27 @@ type ProcessPathCapability interface {
 	// the site has no schedule in the cache yet (not: the site has no
 	// SKUs).
 	NextCutoff(siteId shared.SiteId, after time.Time) (contract.NextCutoff, bool)
+
+	// Schedule returns the site's whole weekly cutoff schedule, each slot with
+	// its next occurrence on or after `after` and the paths eligible for it
+	// (ADR 0027): NextCutoff answers only the next cutoff, which cannot describe
+	// a week. found=false means the site has no schedule in the cache yet.
+	Schedule(siteId shared.SiteId, after time.Time) (contract.CutoffSchedule, bool)
+}
+
+// ProfileHistory answers what the gateway last declared for a site, in our
+// vocabulary (ADR 0027 §3). DeclareNodeProfiles reads it so that a declared
+// ceiling is never lowered by an observation. The live gateway implements it from
+// its own persisted state; found=false means nothing was declared yet.
+type ProfileHistory interface {
+	LastDeclared(ctx context.Context, siteId shared.SiteId) (profile contract.NodeProfile, found bool, err error)
+}
+
+// ProfileMetrics counts what DeclareNodeProfiles did for each site (ADR 0027 §8),
+// one call per site and attempt, and keeps the per-site revision gauge. A nil
+// implementation is valid: the use case then counts nothing.
+type ProfileMetrics interface {
+	Declared(ctx context.Context, site shared.SiteId, result contract.ProfileResult)
 }
 
 // PathCapacity answers wes-work-planning's own remaining-admission-

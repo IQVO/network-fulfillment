@@ -215,8 +215,8 @@ func (errSubmitGateway) SubmitAvailability(context.Context, contract.Availabilit
 	return nil
 }
 
-func (errSubmitGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
-	return nil
+func (errSubmitGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
+	return contract.ProfileResult{}, nil
 }
 
 func (errSubmitGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {
