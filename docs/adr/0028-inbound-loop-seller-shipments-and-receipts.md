@@ -159,9 +159,33 @@ attempts every due `PENDING` shipment, oldest first, at most 100 per pass.
   (`network_submissions`, kind `INBOUND_RECEIPT`, subject = the shipment reference), next to its
   status.
 
-### 5. Catalogue packaging to product-master (step 4)
+### 5. Catalogue packaging to product-master: not built, and why
 
-Decided in the commit that builds it, only if the contracts allow it without guessing.
+Both contracts allow it: vendor-connectivity puts `packaging[{level, gtin, childGtin?,
+unitsPerPack}]` on every purchase-order line (the active levels of the listing's catalogue
+item), and product-master has `PUT /products/{sku}/pack-levels/{level}` (idempotent for an
+identical declaration; `201` first time, `200` after) and `GET /products/{sku}/pack-levels`.
+It is **not built here**, because the semantics are not settled and a guess would write to the
+fleet's master data from an external party's message:
+
+1. **Who is the master of a GTIN.** product-master lets a new GTIN at an active level
+   *supersede* the old one (end-dating it, `reason: superseded`). A purchase order line from the
+   network could therefore overturn the fleet's own EACH or CASE GTIN. The safe rule, "declare only
+   levels the product does not have yet, never supersede", leaves a divergence nobody sees. Which
+   side wins on a conflict is a product decision, not an adapter one.
+2. **Which SKU.** A line names a listing, and only the file dictionary (`PRODUCT_TRANSLATION_FILE`)
+   turns it into a SKU. A listing the dictionary does not know has no SKU to declare on.
+3. **Where it runs.** It must never sit on the acknowledgement path (a failing product-master call
+   would spend a 24-hour clock), so it needs its own queue of declarations, retry and parking, with
+   the order EACH, INNER, CASE, PALLET (a level needs an ACTIVE child) and `qtyOfChild` derived from
+   the network's `unitsPerPack` ratio. That is a loop of the size of the two above and wants the
+   answer to 1 first.
+4. Also open: `409 gtin-already-assigned` (the GTIN belongs to another SKU) and `409
+   pack-quantity-immutable` need a recorded, non-retried outcome and an operator-visible reason.
+
+What exists for it: the vendored contract already carries `packaging` on the line schema, the
+`fleetrest` client and the product-master adapter are the place a `PackLevelDeclarer` would live,
+and `GET /gtins/{gtin}` is already used for the opposite direction.
 
 ## Consequences
 
