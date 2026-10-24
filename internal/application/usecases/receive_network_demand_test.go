@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
@@ -63,7 +63,7 @@ func (p *fakePlanner) CancelHeldOrder(_ context.Context, _ shared.LocalOrderId) 
 
 type fixture struct {
 	orders      *memory.NetworkOrderRepo
-	gateway     *network.StubGateway
+	gateway     *retailnetwork.StubGateway
 	planner     *fakePlanner
 	translation *producttranslation.Dictionary
 }
@@ -74,7 +74,7 @@ func newFixture(feasible bool) *fixture {
 	tr.Add("ASIN-2", "SKU-2")
 	return &fixture{
 		orders:      memory.NewNetworkOrderRepo(),
-		gateway:     network.NewStubGateway(nil),
+		gateway:     retailnetwork.NewStubGateway(nil),
 		planner:     &fakePlanner{feasible: feasible},
 		translation: tr,
 	}

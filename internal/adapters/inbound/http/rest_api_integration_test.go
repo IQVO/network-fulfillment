@@ -45,10 +45,10 @@ import (
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
@@ -212,7 +212,7 @@ func newPlannerStub(t *testing.T, feasible bool) *plannerStub {
 type restAPI struct {
 	server    *httptest.Server
 	pool      *pgxpool.Pool
-	gateway   *network.StubGateway
+	gateway   *retailnetwork.StubGateway
 	receive   *usecases.ReceiveNetworkDemand
 	reconcile *usecases.ReconcileSubmittedOrders
 	poller    *poller.Poller
@@ -234,7 +234,7 @@ func newRESTAPI(t *testing.T, feasible bool) *restAPI {
 		outboundkafka.NewAnalyticsPublisher(nil, mint),
 	)
 	uow := postgres.NewUnitOfWork(pool)
-	gateway := network.NewStubGateway(nil)
+	gateway := retailnetwork.NewStubGateway(nil)
 	planner := ordermanagement.NewPlanner(newPlannerStub(t, feasible).url, nil)
 
 	translation := producttranslation.New()
@@ -275,7 +275,7 @@ func newRESTAPI(t *testing.T, feasible bool) *restAPI {
 		Orders:          postgres.NewNetworkOrderRepo(pool),
 		Poller:          inbound,
 		Clock:           clock,
-		NetworkMode:     string(network.ModeStub),
+		NetworkMode:     string(retailnetwork.ModeStub),
 		ConfirmShipment: confirm,
 	}
 	hs := httptest.NewServer(api.Routes())

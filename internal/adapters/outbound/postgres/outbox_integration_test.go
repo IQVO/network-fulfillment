@@ -295,7 +295,7 @@ type stubGateway struct{}
 func (stubGateway) PollDemand(context.Context, time.Time) ([]contract.InboundDemand, error) {
 	return nil, nil
 }
-func (stubGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, bool) error {
+func (stubGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, contract.Acknowledgement) error {
 	return nil
 }
 func (stubGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
@@ -304,13 +304,13 @@ func (stubGateway) SubmitAvailability(context.Context, contract.AvailabilityUpda
 func (stubGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
 	return nil
 }
-func (stubGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
-	return contract.LabelResult{}, nil
+func (stubGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {
+	return nil, nil
 }
 func (stubGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {
 	return contract.SubmissionSuccess, nil
 }
-func (stubGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error {
+func (stubGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef, time.Time) error {
 	return nil
 }
 

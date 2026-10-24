@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
@@ -82,7 +82,7 @@ func TestReconcile_SuccessConfirmsAndReleases(t *testing.T) {
 // answer, so the failure path can be driven without depending on the
 // stub's own always-succeeds reconciliation.
 type fakeReconcileGateway struct {
-	*network.StubGateway
+	*retailnetwork.StubGateway
 	status contract.SubmissionStatusValue
 }
 

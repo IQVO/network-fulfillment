@@ -10,10 +10,10 @@ import (
 
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/system"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
@@ -26,19 +26,19 @@ import (
 // running value must be verifiable, not assumed. NETWORK_BASE_URL is the
 // live-mode target (ADR 0009 §4); read here so it reaches the gateway
 // even though no live adapter exists yet to dial it with.
-func wireGateway(logger *slog.Logger) (ports.NetworkGateway, network.Mode, error) {
-	mode := network.ParseMode(os.Getenv("NETWORK_MODE"))
+func wireGateway(logger *slog.Logger) (ports.NetworkGateway, retailnetwork.Mode, error) {
+	mode := retailnetwork.ParseMode(os.Getenv("NETWORK_MODE"))
 	baseURL := os.Getenv("NETWORK_BASE_URL")
-	if mode == network.ModeLive && baseURL == "" {
+	if mode == retailnetwork.ModeLive && baseURL == "" {
 		return nil, mode, fmt.Errorf("NETWORK_MODE=live requires NETWORK_BASE_URL to be set")
 	}
-	gateway, err := network.NewGateway(mode, baseURL, logger)
-	if err != nil {
+	if mode == retailnetwork.ModeLive {
 		// Refusing to boot is deliberate. A deployment that asked for a
 		// real network and silently got a stub would look healthy while
 		// answering nobody.
-		return nil, mode, err
+		return nil, mode, fmt.Errorf("NETWORK_MODE=live is not wired yet (ADR 0026 step in progress)")
 	}
+	gateway := retailnetwork.NewStubGateway(logger)
 	logger.Info("network gateway wired", "mode", mode, "baseURL", baseURL)
 	return gateway, mode, nil
 }
@@ -55,11 +55,11 @@ func seedStubDemand(gateway ports.NetworkGateway, logger *slog.Logger) error {
 	if path == "" {
 		return nil
 	}
-	stub, ok := gateway.(*network.StubGateway)
+	stub, ok := gateway.(*retailnetwork.StubGateway)
 	if !ok {
 		return fmt.Errorf("NETWORK_SEED_FILE is set but the gateway is not the stub: seeded demand would never be delivered")
 	}
-	n, err := network.LoadSeedFile(stub, path, time.Now().UTC())
+	n, err := retailnetwork.LoadSeedFile(stub, path, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -205,7 +205,7 @@ func wireReconcile(
 type apiDeps struct {
 	orders      ports.NetworkOrderRepo
 	gateway     ports.NetworkGateway
-	mode        network.Mode
+	mode        retailnetwork.Mode
 	poller      *poller.Poller
 	readiness   *inboundhttp.Readiness
 	metrics     *telemetry.CircuitBreakerMetrics

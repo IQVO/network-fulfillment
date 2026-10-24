@@ -1,4 +1,4 @@
-package network_test
+package retailnetwork_test
 
 import (
 	"os"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 )
 
 func writeSeed(t *testing.T, body string) string {
@@ -36,8 +36,8 @@ func TestLoadSeedFile_SeedsDemandThePollerCanFetch(t *testing.T) {
 	  ]
 	}`)
 
-	g := network.NewStubGateway(nil)
-	n, err := network.LoadSeedFile(g, path, seedNow())
+	g := retailnetwork.NewStubGateway(nil)
+	n, err := retailnetwork.LoadSeedFile(g, path, seedNow())
 	if err != nil {
 		t.Fatalf("LoadSeedFile: %v", err)
 	}
@@ -84,8 +84,8 @@ func TestLoadSeedFile_AcceptsARelativeDeadline(t *testing.T) {
 	  ]
 	}`)
 
-	g := network.NewStubGateway(nil)
-	if _, err := network.LoadSeedFile(g, path, seedNow()); err != nil {
+	g := retailnetwork.NewStubGateway(nil)
+	if _, err := retailnetwork.LoadSeedFile(g, path, seedNow()); err != nil {
 		t.Fatalf("LoadSeedFile: %v", err)
 	}
 
@@ -132,8 +132,8 @@ func TestLoadSeedFile_FailuresAreReturnedNotSwallowed(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := network.NewStubGateway(nil)
-			_, err := network.LoadSeedFile(g, writeSeed(t, tc.body), seedNow())
+			g := retailnetwork.NewStubGateway(nil)
+			_, err := retailnetwork.LoadSeedFile(g, writeSeed(t, tc.body), seedNow())
 			if err == nil {
 				t.Fatalf("expected an error naming the problem, got nil")
 			}
@@ -152,8 +152,8 @@ func TestLoadSeedFile_FailuresAreReturnedNotSwallowed(t *testing.T) {
 }
 
 func TestLoadSeedFile_MissingFileIsAnError(t *testing.T) {
-	g := network.NewStubGateway(nil)
-	_, err := network.LoadSeedFile(g, filepath.Join(t.TempDir(), "absent.json"), seedNow())
+	g := retailnetwork.NewStubGateway(nil)
+	_, err := retailnetwork.LoadSeedFile(g, filepath.Join(t.TempDir(), "absent.json"), seedNow())
 	if err == nil {
 		t.Fatal("a missing seed file must be an error, not a silent empty load")
 	}
@@ -173,8 +173,8 @@ func TestLoadSeedFile_DoesNotPreValidateDomainRules(t *testing.T) {
 	  ]
 	}`)
 
-	g := network.NewStubGateway(nil)
-	n, err := network.LoadSeedFile(g, path, seedNow())
+	g := retailnetwork.NewStubGateway(nil)
+	n, err := retailnetwork.LoadSeedFile(g, path, seedNow())
 	if err != nil {
 		t.Fatalf("the loader must not enforce domain rules, got %v", err)
 	}

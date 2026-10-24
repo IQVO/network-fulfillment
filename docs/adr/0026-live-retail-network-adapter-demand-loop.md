@@ -80,7 +80,7 @@ network partner-manager operation, not part of the vendor-facing protocol: the
 vendor account `NETWORK_VENDOR_ID` must already exist (the platform seeds it) and
 the adapter never calls `/vendors`.
 
-### 2. The port stays in our vocabulary; five changes
+### 2. The port stays in our vocabulary; six changes
 
 No `poNumber`, `listingId`, `nodeId`, `packageNo`, transaction id or network
 reason code appears in `ports`, `contract`, `usecases` or the domain. The changes:
@@ -92,7 +92,8 @@ reason code appears in `ports`, `contract`, `usecases` or the domain. The change
    `SweepOrphanedHolds` all use the network's real deadline.
 2. `SubmitAcknowledgement(ctx, ref, contract.Acknowledgement{Accepted, Reason})`.
    `Reason` is the existing `shared.RejectionReason`.
-3. `RequestLabel(ctx, ref, packageCount int)`. The Vendor API needs only package
+3. `RequestLabel(ctx, ref, packageCount int) ([]contract.LabelResult, error)`, one
+   result per package. The Vendor API needs only package
    numbers, and this context holds no package data, so the count is the caller's:
    `ConfirmNetworkOrderShipment` passes exactly one package (a ship-complete order
    leaves as one package until a fleet fact says otherwise, fleet-changes row 8).
@@ -104,9 +105,12 @@ reason code appears in `ports`, `contract`, `usecases` or the domain. The change
 5. `ConfirmNetworkOrderShipment` requests the label before it records
    `CONFIRMED`, so a label failure leaves the order `ACKNOWLEDGED` and retryable.
 
-`ReceiveNetworkDemand` also re-submits the acknowledgement when a re-delivered
-order is already `SUBMITTED`: the adapter makes that call idempotent (Decision 4),
-and without it an acknowledgement whose first HTTP call failed would wait forever.
+6. A new `contract.SubmissionNotSent` status: the gateway holds no record that the
+   answer was ever sent (a crash after the order was saved `SUBMITTED` and before the
+   call that tells the network). `ReconcileSubmittedOrders` then sends the accept
+   again (`ReconcileResult.Resent`); the gateway keeps that call idempotent
+   (Decision 4). A re-delivered purchase order is still answered once:
+   `ReceiveNetworkDemand` sends nothing for an order that is already `SUBMITTED`.
 
 ### 3. Reasons are mapped inside the adapter
 
@@ -164,9 +168,10 @@ retries, nothing is skipped.
 
 ### 6. Reconciliation
 
-`SubmissionStatus(ref)` reads the acknowledgement ledger row: no `transaction_id`
-yet means the call is (re)sent from the stored body first (the network replays the
-original transaction); then `GET /vendor/transactions/{id}` maps `PROCESSING` to
+`SubmissionStatus(ref)` reads the acknowledgement ledger row. No row at all is
+`NOT_SENT` (Decision 2.6). A row with no `transaction_id` yet (the call failed or
+the process died mid-call) is (re)sent from the stored body and key first, and the
+network replays the original transaction; then `GET /vendor/transactions/{id}` maps `PROCESSING` to
 `PENDING`, `SUCCESS` to `SUCCESS`, `FAILURE` to `FAILURE`, and the terminal status
 is stored. `409 already-acknowledged` on a re-send (the key expired after 24 hours)
 adopts the transaction id from `GET /vendor/purchase-orders/{po}` when the order

@@ -1,4 +1,4 @@
-package network
+package retailnetwork
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
+	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
 func TestParseMode_FailsClosedToStub(t *testing.T) {
@@ -33,23 +34,6 @@ func TestParseMode_FailsClosedToStub(t *testing.T) {
 	}
 }
 
-func TestNewGateway_RefusesUnimplementedModesRatherThanDegrading(t *testing.T) {
-	// A deployment that ASKED for a real network and silently got a
-	// stub would look healthy while answering nobody — the worst
-	// possible failure for this context.
-	if _, err := NewGateway(ModeLive, "https://retail-network.example", nil); err == nil {
-		t.Fatalf("NewGateway(live) must fail until a credentialed adapter exists")
-	}
-
-	g, err := NewGateway(ModeStub, "", nil)
-	if err != nil {
-		t.Fatalf("NewGateway(stub): %v", err)
-	}
-	if g == nil {
-		t.Fatal("stub gateway must be usable")
-	}
-}
-
 func TestStubGateway_PollDemandRePresentsUnacknowledgedUnits(t *testing.T) {
 	g := NewStubGateway(nil)
 	g.Seed(contract.InboundDemand{NetworkRef: "po-1"})
@@ -74,7 +58,7 @@ func TestStubGateway_PollDemandRePresentsUnacknowledgedUnits(t *testing.T) {
 		t.Fatalf("second poll (before ack) = %d demands, want 1", len(second))
 	}
 
-	if err := g.SubmitAcknowledgement(context.Background(), "po-1", true); err != nil {
+	if err := g.SubmitAcknowledgement(context.Background(), "po-1", contract.Acknowledgement{Accepted: true}); err != nil {
 		t.Fatalf("SubmitAcknowledgement: %v", err)
 	}
 
@@ -95,7 +79,7 @@ func TestStubGateway_RecordsAcknowledgements(t *testing.T) {
 	if _, submitted := g.Acknowledgement("po-1"); submitted {
 		t.Fatal("nothing submitted yet")
 	}
-	if err := g.SubmitAcknowledgement(context.Background(), "po-1", true); err != nil {
+	if err := g.SubmitAcknowledgement(context.Background(), "po-1", contract.Acknowledgement{Accepted: true}); err != nil {
 		t.Fatalf("SubmitAcknowledgement: %v", err)
 	}
 	accepted, submitted := g.Acknowledgement("po-1")
@@ -103,7 +87,7 @@ func TestStubGateway_RecordsAcknowledgements(t *testing.T) {
 		t.Fatalf("submitted=%v accepted=%v, want true/true", submitted, accepted)
 	}
 
-	if err := g.SubmitAcknowledgement(context.Background(), "po-2", false); err != nil {
+	if err := g.SubmitAcknowledgement(context.Background(), "po-2", contract.Acknowledgement{Reason: shared.RejectionReasonInfeasibleDeadline}); err != nil {
 		t.Fatalf("SubmitAcknowledgement: %v", err)
 	}
 	accepted, submitted = g.Acknowledgement("po-2")
