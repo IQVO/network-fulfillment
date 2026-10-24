@@ -170,6 +170,13 @@ type ProcessPathCapability interface {
 	Schedule(siteId shared.SiteId, after time.Time) (contract.CutoffSchedule, bool)
 }
 
+// ProfileDeclarer is the part of NetworkGateway that declares a node profile
+// (ADR 0027). DeclareNodeProfiles depends on this alone; every NetworkGateway
+// satisfies it.
+type ProfileDeclarer interface {
+	DeclareNodeProfile(ctx context.Context, profile contract.NodeProfile) (contract.ProfileResult, error)
+}
+
 // ProfileHistory answers what the gateway last declared for a site, in our
 // vocabulary (ADR 0027 §3). DeclareNodeProfiles reads it so that a declared
 // ceiling is never lowered by an observation. The live gateway implements it from
