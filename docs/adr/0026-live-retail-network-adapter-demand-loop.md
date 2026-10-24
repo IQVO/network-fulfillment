@@ -11,7 +11,7 @@ description: "ADR 0026 (Accepted) builds the demand half of the live NetworkGate
 
 ## Status
 
-**Accepted** (2026-10-24). Implements the part of [ADR 0009](./0009-retail-network-not-amazon-counterpart.md)
+**Accepted** (2026-10-24). Implements the part of [ADR 0009](./0009-retail-network-not-a-real-network-counterpart.md)
 (§2 package rename, §4 `NETWORK_MODE=live`) that answers the network's
 purchase orders. Fulfils the "revisit in the SAME PR that adds its first real
 client" clause of [ADR 0004](./0004-resilience-circuit-breakers-retry-dlq-shutdown.md)
@@ -26,7 +26,7 @@ builds it; the seams it needs are named under Decision 11.
 
 `NETWORK_MODE=live` refused to boot ("not implemented yet") and only the stub
 gateway existed. The counterpart is our own `retail-network`
-([ADR 0009](./0009-retail-network-not-amazon-counterpart.md)); its Vendor API is
+([ADR 0009](./0009-retail-network-not-a-real-network-counterpart.md)); its Vendor API is
 the `vendor-connectivity` service (Open Host Service, Published Language). This
 ADR is written against that contract as frozen in
 `internal/adapters/outbound/retailnetwork/testdata/vendor-connectivity-openapi.yaml`
@@ -265,7 +265,7 @@ listing of every SKU the dictionary knows, which the demand loop cannot provide.
   v3.0.1 from indirect to direct in `go.mod`; neither version changed and both
   were already in `go.sum`).
 - The package is renamed `outbound/network/` to `outbound/retailnetwork/`
-  ([ADR 0009](./0009-retail-network-not-amazon-counterpart.md) §2) in the same
+  ([ADR 0009](./0009-retail-network-not-a-real-network-counterpart.md) §2) in the same
   change; the stub, its seed loader and `NETWORK_SEED_FILE` move with it unchanged.
 
 ## Alternatives considered
