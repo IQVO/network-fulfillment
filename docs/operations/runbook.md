@@ -95,8 +95,9 @@ from the sibling checkout and loads it into kind.
 7. Wire the circuit-broken order-management client, the outbox event publisher
    and the relay and the use cases. One `circuit_breaker_state` registry serves
    order-management and, in live mode, `retail-network`.
-8. Start the tickers, the poller (which polls once immediately), the outbox
-   relay, then the HTTP listener.
+8. Start the tickers, the poller (which polls once immediately), live only the
+   node profile worker (one pass immediately, ADR 0027), the outbox relay, then
+   the HTTP listener.
 
 The HTTP server only starts listening after steps 1-7. Until then
 `/healthz` does not answer, which is why the chart has a `startupProbe`
@@ -135,8 +136,10 @@ On `SIGTERM`/`SIGINT`, `shutdownGracefully` (`cmd/netfulfil/shutdown.go`):
 3. cancels the outbox relay and waits for its current pass;
 4. waits for the poller's in-flight pass (an interrupted pass does not advance
    the watermark, so that demand is re-fetched on the next boot);
-5. waits for the two cache consumers, if enabled;
-6. closes the publishers and the pool.
+5. waits for the node profile worker, live only (a declaration cut off mid-call is
+   a stored ledger row, resumed under the same key by the next boot);
+6. waits for the two cache consumers, if enabled;
+7. closes the publishers and the pool.
 
 All waits share one 10 s budget; a step that overruns logs a warning such as
 `outbox relay did not stop before the shutdown deadline`. The other three
@@ -147,7 +150,7 @@ consumer first.
 
 | Database | Owner | Tables (migration) | Applied by |
 | --- | --- | --- | --- |
-| OLTP (`DATABASE_URL`) | `netfulfil` | `network_orders`, `network_order_lines` (0001), `outbox_events` (0002), state `SUBMITTED` added (0003), `capability_offers` (0004), columns `hold_outcome` and `hold_settled_at` on `network_orders` (0005, ADR 0024), `network_nodes`, `network_purchase_orders`, `network_purchase_order_lines`, `network_submissions`, `network_labels` (0006, ADR 0026; empty in stub mode) | `netfulfil` at startup, and `cmd/mcp` at startup |
+| OLTP (`DATABASE_URL`) | `netfulfil` | `network_orders`, `network_order_lines` (0001), `outbox_events` (0002), state `SUBMITTED` added (0003), `capability_offers` (0004), columns `hold_outcome` and `hold_settled_at` on `network_orders` (0005, ADR 0024), `network_nodes`, `network_purchase_orders`, `network_purchase_order_lines`, `network_submissions`, `network_labels` (0006, ADR 0026; empty in stub mode), `inbound_shipments`, `inbound_poll_cursors`, `gtin_sku_cache` and the `NODE_PROFILE` and `INBOUND_RECEIPT` kinds of the ledger (0008, ADR 0028), `inbound_receipt_events`, `inbound_receipt_cartons`, `inbound_receipt_findings`, `inbound_receipts` (0009, ADR 0028), `network_node_profiles` (0010, ADR 0027; the three live-mode groups are empty in stub mode) | `netfulfil` at startup, and `cmd/mcp` at startup |
 | Analytical (`ANALYTICS_DATABASE_URL`) | `netfulfil-projector` | `analytics_processed_events`, `analytics_consumed_events`, `acknowledgement_rollup` (0001), column `orders_rejected_submission_failed` (0002) | `netfulfil-projector` at startup |
 
 - Migrations ship in the image (`/app/migrations`, `/app/migrations/analytics`)
@@ -292,6 +295,7 @@ for the same `networkRef` may already have been delivered.
 | `RejectOverdueOrders` | every `SWEEP_INTERVAL`, own ticker | cancels the order-management hold (if one is recorded and still open) and rejects each overdue `NEW` order with `ACKNOWLEDGEMENT_DEADLINE_MISSED`. |
 | `SweepOrphanedHolds` | every `SWEEP_INTERVAL`, own ticker, unless `ORPHAN_HOLD_SWEEP_ENABLED=false` | the backstop for `RejectOverdueOrders` (ADR 0024): cancels the order-management hold of a `NEW` or `REJECTED` order that nobody decided, once `now > acknowledgeBy + ORPHAN_HOLD_GRACE`, records the outcome and publishes `OrphanedHoldCancelled`. Never changes the order's state. See [A held order is stuck in order-management](#a-held-order-is-stuck-in-order-management). |
 | `RecomputeCapabilityOffers` | every `RECOMPUTE_INTERVAL`, only when enabled | upserts one `capability_offers` row per known SKU. |
+| `DeclareNodeProfiles` | live mode only: immediately at start, then every `NETWORK_PROFILE_INTERVAL` (default `5m`; `0` disables) | derives each site's operational profile from the schedule, cycle-time and capacity caches and declares it to the network when its content changed (ADR 0027). See [the node profile](#the-node-profile). |
 | Outbox relay | continuous | see above. |
 
 Use-case details: [ddd/use-cases.md](../ddd/use-cases.md).
@@ -571,7 +575,7 @@ stub mode:
 | `network_nodes` | site | `site_code` to the network's `node_id` |
 | `network_purchase_orders` | purchase order | the minted `network_ref` (`NR-...`) to `po_number`, the vendor and node, `required_ship_by`, the network's `ack_by` |
 | `network_purchase_order_lines` | purchase order line | line number, `network_line_ref` (`line-<n>`), listing id, `network_product_id`, ordered quantity |
-| `network_submissions` | `(kind, subject)` | the ledger: `kind` is `ACKNOWLEDGEMENT`, `SHIPMENT_CONFIRMATION` or `NODE_REGISTRATION`, `subject` the network ref (or site code), the idempotency key, the exact request body, the network's `transaction_id`, `status`, `errors` |
+| `network_submissions` | `(kind, subject)` | the ledger: `kind` is `ACKNOWLEDGEMENT`, `SHIPMENT_CONFIRMATION`, `NODE_REGISTRATION`, `NODE_PROFILE` or `INBOUND_RECEIPT` (migration 0008 admits the last two), `subject` the network ref (or site code, or `<site>#<revision>#<attempt>` for a profile), the idempotency key, the exact request body, the network's `transaction_id`, `status`, `errors` |
 | `network_labels` | package | `label_ref`, `tracking_number`, `carrier` from the label request |
 
 **Ledger statuses.** The row, with its key and exact body, is written before the
@@ -651,8 +655,9 @@ definition to register one from` on every poll.
 
 **Signals.** `retail-network:` log lines (`WARN` for skips, node convergence and
 node listing failures, `ERROR` for a failed shipment confirmation, `Info` once per
-process for each supply-loop no-op: `DeclareCapability` and `SubmitAvailability`
-do nothing in live mode until ADR 0027); the poller's `poll demand failed`;
+process for the one remaining supply-loop no-op: `SubmitAvailability` does
+nothing in live mode until ADR 0027 part 2; the node profile has its own signals
+below); the poller's `poll demand failed`;
 `circuit_breaker_state{dependency="retail-network"}` on `GET /metrics` next to
 `dependency="order-management"`; `GET /inbound-status` for the mode and the
 poller counters. `/readyz` does not depend on the network (ADR 0026 Decision 10):
@@ -663,6 +668,66 @@ call, so a process death between the steps is designed to end with one order her
 and one write on the network. The integration test stops the service gracefully
 (a context cancel) between the acknowledgement being sent and reconciled; there is
 no test that kills the process (ADR 0026, As built 8).
+
+### The node profile
+
+In live mode a worker declares each site's operational profile
+([ADR 0027](../adr/0027-supply-loop-node-profile-and-inventory-feed.md), part 1):
+once at boot and then every `NETWORK_PROFILE_INTERVAL` (default `5m`; `0`
+disables it, with a `WARN`). The network judges our acknowledgement deadlines by
+the declared handling time (`ackBy = min(issuedAt + ackWindow, requiredShipBy -
+handlingTime)`), so a profile that is wrong is worse than none, and one the local
+caches cannot support is **not declared**: the site is skipped and the reason is
+logged.
+
+**State (migration 0010).** `network_node_profiles` holds, per site, the revision
+in force, the current attempt at it, the fingerprint of its content and that
+content. The revision only goes up, is persisted before the call that carries it
+and is bumped only when the content changes:
+
+```sql
+SELECT site_code, revision, attempt, fingerprint, updated_at FROM network_node_profiles;
+
+SELECT subject, status, transaction_id, errors, updated_at
+FROM network_submissions
+WHERE kind = 'NODE_PROFILE'
+ORDER BY updated_at DESC;
+```
+
+**Signals.** The counter `network_fulfillment.node_profile.declarations` by
+`outcome` and the gauge `network_fulfillment.node_profile.revision` by `site`
+(OTLP, like the other business metrics; they are not on `/metrics`). Logs:
+
+| Outcome / log | Meaning | What to do |
+| --- | --- | --- |
+| `skipped_no_node`, `INFO` `node profile: the site has no node on the network yet` | the demand loop has not registered or adopted the site's node | nothing; it converges at a poll (see `NODE_REGISTRATION`) |
+| `skipped_no_schedule`, `WARN` `no cutoff schedule in the cache` | process-path-management has published no usable CPT schedule for the site (`SITE_ID` and the node file's sites are looked up by id) | check the site id and that the schedule event exists; nothing is declared meanwhile |
+| `skipped_incomplete`, `WARN` `no eligible path has a cycle time that fits the schedule` or `no capacity figure is known for any cutoff` | a cycle-time p95 or a remaining-capacity figure has not been observed yet | wait for the Kafka caches; nothing is guessed |
+| `failed`, `ERROR` `the network failed a node profile declaration` (`errors`) | the transaction failed; the list is the network's own | see the row below |
+| `WARN` `the network already holds a profile revision at or above ours (stale)` | a wiped table or another declarer; the gateway reads the node's `profileRevision` and declares the same content above it, once per tick | none unless it repeats every tick |
+| `WARN` `the node profile declaration stays failed until the profile changes` | a final failure (below) is still standing | fix the cause; a changed profile is sent by itself |
+
+**What to do with a `NODE_PROFILE` row.**
+
+- `SENDING` or `PROCESSING`: converges by itself. The next pass resends the stored
+  body under the same key, or reads the transaction by its persisted id; nothing
+  is sent twice.
+- `FAILURE` with `ErrIncompleteOperationalProfile`, `ErrCutoffOutsideOperatingHours`
+  or a `422 validation-failed` on the `PUT`: the same content can never succeed, so
+  it is **not** sent again until the content changes (the next change of schedule,
+  cycle time or capacity). A real fault in how the body is built is a code bug:
+  read `errors`, which is the network's own message.
+- `FAILURE` with anything else: retried on a later pass at the same revision under
+  a new key (`nf-profile-<site>-<revision>-<attempt>`, because the network replays
+  a failed transaction for the same key).
+- Nothing to re-arm by hand and no row to delete: unlike a node registration, the
+  revision is advanced by the code, never by editing the table. Do not lower
+  `revision` in `network_node_profiles`: the network refuses a revision that is not
+  above the one it holds (`ErrStaleProfileRevision`), and the gateway would only
+  climb back.
+
+**Stub mode** never starts the worker and the tables stay empty. The stub gateway
+records the last profile it was handed and sends nothing.
 
 ## Reports API (`netfulfil-reports`)
 

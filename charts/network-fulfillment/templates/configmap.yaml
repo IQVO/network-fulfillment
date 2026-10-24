@@ -24,6 +24,10 @@ data:
   NETWORK_BASE_URL: {{ .Values.config.networkBaseUrl | quote }}
   NETWORK_VENDOR_ID: {{ .Values.config.networkVendorId | quote }}
 
+  # How often the node profile is declared (ADR 0027); "0" disables it. Quoted so
+  # that "0" reaches the process instead of being dropped as empty.
+  NETWORK_PROFILE_INTERVAL: {{ .Values.config.networkProfileInterval | quote }}
+
   # The inbound loop (ADR 0028), live only: seller shipments polled from the
   # Vendor API become ASNs in inbound-receiving, GTINs are resolved through
   # product-master. Both URLs are mandatory, like the two above.

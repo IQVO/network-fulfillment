@@ -127,6 +127,7 @@ func run(ctx context.Context) int {
 	receive, sweep, rejectOverdue := wireUseCases(in.orders, in.gateway, planner, in.translation, eventPublisher, in.pool)
 	reconcile := wireReconcile(in.orders, in.gateway, planner, eventPublisher, in.pool)
 	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
+	profiles := wireNodeProfiles(logger, in.mode, in.gateway, in.recompute.PathCap, in.recompute.Capacity)
 
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
@@ -157,7 +158,9 @@ func run(ctx context.Context) int {
 	}
 	defer loop.stop(stopLoop, inboundLoopStopBudget)
 
-	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
+	// The node profile worker (ADR 0027), also live mode only, runs inside serve
+	// with the poller and the sweeps.
+	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inbound, relay, readiness, in.recompute, in.capDone)
 	if loop.failed() && code == 0 {
 		code = 1 // a dead receipt consumer is a failure, whatever the signal said
 	}

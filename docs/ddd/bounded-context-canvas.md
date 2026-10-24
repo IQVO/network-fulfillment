@@ -175,7 +175,8 @@ ship-to PII enters this context at all.
 | External network | Acknowledge / reject in full | Command | `ports.NetworkGateway.SubmitAcknowledgement(ref, accepted)` (stub) | Conformist |
 | External network | Transaction status | Query | `ports.NetworkGateway.SubmissionStatus(ref)` (stub) | Conformist |
 | External network | Shipment confirmation | Command | `ports.NetworkGateway.SubmitShipmentConfirmation(ref)` (stub) | Conformist |
-| External network | Availability, capability declaration, label | Command / Query | `SubmitAvailability`, `DeclareCapability`, `RequestLabel`: **on the port and in the stub, called by no use case** | Conformist (wired, unused) |
+| External network | Node operational profile | Command | `ports.NetworkGateway.DeclareNodeProfile(profile)` from `DeclareNodeProfiles` (live mode; ADR 0027 part 1; the stub records it and sends nothing) | Conformist |
+| External network | Availability, label | Command / Query | `SubmitAvailability`, `RequestLabel`: **`SubmitAvailability` is on the port and in the stub, called by no use case until the inventory feed (ADR 0027 part 2)**; `RequestLabel` is called by `ConfirmNetworkOrderShipment` | Conformist |
 | Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`, `OrphanedHoldCancelled` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (published through the outbox relay, always on) | Open Host / Published Language |
 | Analytics projector | The same 7 events (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
 
@@ -256,6 +257,10 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 - `circuit_breaker_state` gauge for the `order-management` dependency.
 - `network_fulfillment.orphaned_holds.swept` by `outcome`, and any
   `OrphanedHoldCancelled` event: a hold that leaked and had to be swept.
+- `network_fulfillment.node_profile.declarations` by `outcome` and
+  `network_fulfillment.node_profile.revision` by `site` (live mode, ADR 0027): a
+  site stuck in a `skipped_*` or `failed` outcome has no current profile on the
+  network.
 - Engineering gates: arch-go hexagonal tests, 90% coverage, gremlins on
   `./internal/domain/networkorder`.
 

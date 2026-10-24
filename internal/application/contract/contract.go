@@ -82,22 +82,103 @@ type AvailabilityUpdate struct {
 	Quantity int
 }
 
-// CapabilityDeclaration is DeclareCapability's argument. ADR 0001's own
-// research found NO operation in the network's real API surface that
-// accepts a capability declaration directly — cutoffs and cycle times are
-// Vendor Central configuration, not an API surface (see
-// references/network-fulfillment-sp-api-boundary.md). This port method
-// exists so the shape ADR 0001 §"Decision" originally sketched
-// (PollDemand, SubmitAnswer, SubmitAvailability, DeclareCapability,
-// RequestLabel, SubmitShipmentConfirmation, SubmissionStatus) is complete
-// and a future program that DOES accept a declaration (ADR 0009 §"A real
-// SP-API adapter is deferred, not dropped") is an adapter swap, not a
-// port redesign. Every adapter in this codebase today treats it as a
-// documented no-op.
-type CapabilityDeclaration struct {
-	SiteId             shared.SiteId
-	SKU                shared.SKU
-	AdvertisedQuantity int
+// NodeProfile is DeclareNodeProfile's argument (ADR 0027): what we declare about
+// how a site operates, in OUR terms. The network keeps it as the node's
+// operational profile, and its handling time becomes part of the deadline we are
+// then judged by, so a profile is only ever built from what the local caches
+// actually know, never from a guess.
+//
+// It replaces the per-SKU CapabilityDeclaration that ADR 0001 sketched and that no
+// adapter ever acted on: a capability belongs to a node, the quantity of a SKU to
+// the inventory feed.
+type NodeProfile struct {
+	SiteId shared.SiteId
+	// Timezone is the IANA zone the cutoffs' local times are read in.
+	Timezone string
+	// Cutoffs are the recurring handover times, one per distinct local time.
+	Cutoffs []ProfileCutoff
+	// HandlingTime is how long a release takes before it can be handed over: the
+	// longest known cycle-time-p95 among the eligible paths (ADR 0027 §3).
+	HandlingTime time.Duration
+	// ThroughputPerDay is the most orders the site declares it can take on its
+	// busiest weekday.
+	ThroughputPerDay int
+	// Fingerprint identifies the content above. The gateway treats it as opaque:
+	// equal fingerprints are the same declaration, a different one is a new
+	// revision.
+	Fingerprint string
+}
+
+// ProfileCutoff is one recurring handover time of a NodeProfile.
+type ProfileCutoff struct {
+	// LocalTime is HH:mm in the profile's Timezone.
+	LocalTime string
+	// Days are the weekdays it applies to, Sunday first, no duplicates.
+	Days []time.Weekday
+	// MaxOrders is the declared ceiling of orders for this cutoff; 0 means not
+	// known (the declaration then says nothing about it).
+	MaxOrders int
+}
+
+// ProfileOutcome is what one DeclareNodeProfiles attempt came to for a site, and
+// the label of its counter (ADR 0027 §8).
+type ProfileOutcome string
+
+const (
+	// ProfileDeclared: a revision was written to the network in this call and has
+	// not been settled yet.
+	ProfileDeclared ProfileOutcome = "declared"
+	// ProfilePending: a revision written earlier is still being processed.
+	ProfilePending ProfileOutcome = "pending"
+	// ProfileConfirmed: the network settled the revision as accepted in this call.
+	ProfileConfirmed ProfileOutcome = "confirmed"
+	// ProfileUnchanged: the content is the one the network already holds; nothing
+	// was sent.
+	ProfileUnchanged ProfileOutcome = "unchanged"
+	// ProfileFailed: the network refused the revision, or the call failed.
+	ProfileFailed ProfileOutcome = "failed"
+	// ProfileSkippedNoNode: the site has no node on the network yet.
+	ProfileSkippedNoNode ProfileOutcome = "skipped_no_node"
+	// ProfileSkippedNoSchedule: the cache has no cutoff schedule for the site yet.
+	ProfileSkippedNoSchedule ProfileOutcome = "skipped_no_schedule"
+	// ProfileSkippedIncomplete: the caches know the schedule but not enough to
+	// declare (no cycle time, or no capacity figure) and a guess is never declared.
+	ProfileSkippedIncomplete ProfileOutcome = "skipped_incomplete"
+)
+
+// ProfileResult is DeclareNodeProfile's answer.
+type ProfileResult struct {
+	Outcome ProfileOutcome
+	// Revision is the profile revision this call concerned (0 when none).
+	Revision int
+	// Errors carries the network's error list for a ProfileFailed outcome.
+	Errors string
+}
+
+// ErrSiteNotRegistered: the gateway has no node for the site, so nothing can be
+// declared for it yet. It is a state, not a failure: the node is registered by
+// the demand loop (ADR 0026 Decision 7) and the next attempt finds it.
+var ErrSiteNotRegistered = errors.New("network gateway: the site has no node on the network yet")
+
+// CutoffSchedule is ProcessPathCapability.Schedule's answer: a site's whole
+// weekly cutoff schedule, where NextCutoff names only the next cutoff.
+type CutoffSchedule struct {
+	// Timezone is the IANA zone the slots' local times are read in.
+	Timezone string
+	Slots    []ScheduleSlot
+}
+
+// ScheduleSlot is one recurring cutoff with the paths eligible for it.
+type ScheduleSlot struct {
+	// LocalTime is HH:mm.
+	LocalTime string
+	// Days are the weekdays the cutoff applies to.
+	Days []time.Weekday
+	// NextAt is the instant of its next occurrence on or after the time the
+	// schedule was asked for, resolved the way NextCutoff resolves it (so it
+	// matches the keys of PathCapacity); zero when none falls in the lookahead.
+	NextAt time.Time
+	Paths  []EligiblePath
 }
 
 // Acknowledgement is our one answer to a piece of demand (ADR 0026): accept it

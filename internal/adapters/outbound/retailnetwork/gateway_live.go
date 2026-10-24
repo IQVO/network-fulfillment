@@ -53,7 +53,7 @@ type LiveGateway struct {
 	sites  []string
 	defs   map[string]NodeDefinition
 
-	capabilityNoted, availabilityNoted atomic.Bool // the supply-loop no-ops log at Info once each
+	availabilityNoted atomic.Bool // the inventory no-op logs at Info once
 }
 
 var _ ports.NetworkGateway = (*LiveGateway)(nil)
@@ -92,6 +92,10 @@ func newLiveGateway(c *apiClient, st Store, cfg LiveConfig) *LiveGateway {
 	sort.Strings(g.sites)
 	return g
 }
+
+// Sites are the sites this gateway converges onto network nodes, in order: the
+// ones DeclareNodeProfiles declares a profile for (ADR 0027).
+func (g *LiveGateway) Sites() []string { return append([]string(nil), g.sites...) }
 
 // ---- nodes (Decision 7) ----
 
@@ -197,13 +201,19 @@ func joinErrors(errs []submissionErrorDTO) string {
 // A definitive refusal (definitiveRefusals) is recorded as FAILURE once and
 // returned as ErrWriteRefused every time after.
 func (g *LiveGateway) send(ctx context.Context, row Submission, op string, path []string) (Submission, error) {
+	return g.sendWith(ctx, row, http.MethodPost, op, path)
+}
+
+// sendWith is send for a write the Vendor API takes with another method (the
+// node profile is a PUT).
+func (g *LiveGateway) sendWith(ctx context.Context, row Submission, method, op string, path []string) (Submission, error) {
 	if row.Status == StatusFailure && row.TransactionID == "" {
 		return row, fmt.Errorf("%w earlier: %s", ErrWriteRefused, row.Errors)
 	}
 	if row.TransactionID != "" || row.Status.Terminal() {
 		return row, nil
 	}
-	txID, err := g.client.postAsync(ctx, op, path, row.IdempotencyKey, row.Body)
+	txID, err := g.client.writeAsync(ctx, method, op, path, row.IdempotencyKey, row.Body)
 	if err != nil {
 		return row, g.refuse(ctx, row, err)
 	}
@@ -589,24 +599,18 @@ func (g *LiveGateway) recordConfirmationOutcome(ctx context.Context, ref shared.
 		"networkRef", ref, "errors", failed.Errors)
 }
 
-// ---- the supply loop's seams (Decision 1, ADR 0027) ----
-
-// DeclareCapability is a documented, non-failing no-op: the node profile belongs
-// to the supply loop, ADR 0027. It logs once at Info, then at Debug.
-func (g *LiveGateway) DeclareCapability(_ context.Context, _ contract.CapabilityDeclaration) error {
-	g.noteSupplyNoOp(&g.capabilityNoted, "DeclareCapability")
-	return nil
-}
+// ---- the supply loop's seam still open (ADR 0027, part 2) ----
 
 // SubmitAvailability is a documented, non-failing no-op: the inventory feed
-// belongs to the supply loop, ADR 0027. It logs once at Info, then at Debug.
+// belongs to part 2 of the supply loop, ADR 0027. It logs once at Info, then at
+// Debug.
 func (g *LiveGateway) SubmitAvailability(_ context.Context, _ contract.AvailabilityUpdate) error {
 	g.noteSupplyNoOp(&g.availabilityNoted, "SubmitAvailability")
 	return nil
 }
 
 func (g *LiveGateway) noteSupplyNoOp(noted *atomic.Bool, method string) {
-	msg := "retail-network: " + method + " is a no-op in the live gateway until the supply loop (ADR 0027) is built"
+	msg := "retail-network: " + method + " is a no-op in the live gateway until the inventory feed (ADR 0027, part 2) is built"
 	if noted.CompareAndSwap(false, true) {
 		g.logger.Info(msg, "method", method)
 		return

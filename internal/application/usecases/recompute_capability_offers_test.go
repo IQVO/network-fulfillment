@@ -36,10 +36,17 @@ func (f *fakeInventory) UsableQuantity(_ context.Context, sku shared.SKU) (int, 
 type fakePathCap struct {
 	next  contract.NextCutoff
 	found bool
+
+	schedule      contract.CutoffSchedule
+	scheduleFound bool
 }
 
 func (f *fakePathCap) NextCutoff(shared.SiteId, time.Time) (contract.NextCutoff, bool) {
 	return f.next, f.found
+}
+
+func (f *fakePathCap) Schedule(shared.SiteId, time.Time) (contract.CutoffSchedule, bool) {
+	return f.schedule, f.scheduleFound
 }
 
 type fakeCapacity struct {

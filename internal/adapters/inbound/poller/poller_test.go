@@ -69,8 +69,8 @@ func (g *fakeGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, 
 func (g *fakeGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
 	return nil
 }
-func (g *fakeGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
-	return nil
+func (g *fakeGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
+	return contract.ProfileResult{}, nil
 }
 func (g *fakeGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {
 	return nil, nil

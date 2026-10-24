@@ -17,8 +17,9 @@ import (
 
 // vendorFake is a stateful stand-in for the retail network's Vendor API, just
 // enough of it for the live demand loop (ADR 0026) to run through the REAL
-// entry point: nodes (list, register), purchase orders (poll, get),
-// acknowledgements, transactions, labels and shipment confirmations.
+// entry point: nodes (list, get, register), the node profile (ADR 0027),
+// purchase orders (poll, get), acknowledgements, transactions, labels and
+// shipment confirmations.
 //
 // It keeps the network's rules that the adapter's crash safety rests on:
 //   - every write needs an Idempotency-Key; the same key and body replays the
@@ -30,7 +31,10 @@ import (
 //     (the order stays ISSUED, and so is delivered again by a poll, until then);
 //   - a label needs an acknowledged order, and a shipment confirmation needs
 //     exactly the labelled tracking numbers;
-//   - vendorId must be the one the fake serves.
+//   - vendorId must be the one the fake serves;
+//   - a node profile revision that is not above the one the node holds fails
+//     its transaction with ErrStaleProfileRevision (not an HTTP error), as
+//     node-topology does.
 //
 // It is a copy of the minimum of the adapter package's own test fake, which is
 // test-only there and written against its unexported DTOs.
@@ -46,12 +50,18 @@ type vendorFake struct {
 	requests []fakeRequest
 	seq      int
 
+	// profileKeys are the write slots of the node profile PUTs, in arrival order.
+	profileKeys []string
+
 	// holdAcks keeps acknowledgement transactions PROCESSING until
 	// releaseAcks; otherwise one read answers PROCESSING and the next SUCCESS.
 	holdAcks bool
 }
 
-type fakeNode struct{ id, code string }
+type fakeNode struct {
+	id, code        string
+	profileRevision int
+}
 
 type fakeOrder struct {
 	poNumber, nodeCode, state string
@@ -72,11 +82,14 @@ type fakeLabel struct {
 type fakeTx struct {
 	id, kind, status, poNumber, nodeCode, nodeID string
 	reads                                        int
+	revision                                     int                 // a NODE_PROFILE's profileRevision
+	errors                                       []map[string]string // why a FAILURE failed
 }
 
 type fakeWrite struct {
 	body   string
 	txID   string
+	key    string
 	labels []fakeLabel
 }
 
@@ -185,6 +198,35 @@ func (v *vendorFake) nodeCodes() []string {
 	return out
 }
 
+// fakeProfileWrite is one distinct node profile write (one per idempotency key).
+type fakeProfileWrite struct {
+	Key      string
+	Revision int
+	Body     string
+}
+
+// profileWrites are the distinct profile writes the network took, in order.
+func (v *vendorFake) profileWrites() []fakeProfileWrite {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var out []fakeProfileWrite
+	for _, key := range v.profileKeys {
+		w := v.writes[key]
+		out = append(out, fakeProfileWrite{Key: w.key, Revision: v.txs[w.txID].revision, Body: w.body})
+	}
+	return out
+}
+
+// profileRevisionOf is the profile revision the network holds for the node.
+func (v *vendorFake) profileRevisionOf(nodeID string) int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if n := v.nodeByID(nodeID); n != nil {
+		return n.profileRevision
+	}
+	return 0
+}
+
 // bodyOf returns the first body written on path under any key.
 func (v *vendorFake) bodyOf(path string) string {
 	v.mu.Lock()
@@ -205,21 +247,35 @@ func (v *vendorFake) serve(w http.ResponseWriter, r *http.Request) {
 	defer v.mu.Unlock()
 	v.requests = append(v.requests, fakeRequest{Method: r.Method, Path: r.URL.Path, Key: r.Header.Get("Idempotency-Key"), Body: string(raw)})
 
-	if r.Method == http.MethodGet && r.URL.Query().Get("vendorId") != v.vendorID {
+	switch {
+	case r.Method == http.MethodGet:
+		v.read(w, r)
+	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/vendor/nodes/") && strings.HasSuffix(r.URL.Path, "/profile"):
+		v.writeProfile(w, r, raw)
+	case r.Method == http.MethodPost:
+		v.write(w, r, raw)
+	default:
+		fakeProblem(w, http.StatusNotFound, "not-found")
+	}
+}
+
+// read routes the GETs; every one needs the vendorId of the account.
+func (v *vendorFake) read(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("vendorId") != v.vendorID {
 		fakeProblem(w, http.StatusNotFound, "vendor-not-found")
 		return
 	}
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/vendor/nodes":
+	switch path := r.URL.Path; {
+	case path == "/vendor/nodes":
 		v.listNodes(w)
-	case r.Method == http.MethodGet && r.URL.Path == "/vendor/purchase-orders":
+	case strings.HasPrefix(path, "/vendor/nodes/"):
+		v.getNode(w, strings.TrimPrefix(path, "/vendor/nodes/"))
+	case path == "/vendor/purchase-orders":
 		v.pollOrders(w)
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/vendor/purchase-orders/"):
-		v.getOrder(w, strings.TrimPrefix(r.URL.Path, "/vendor/purchase-orders/"))
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/vendor/transactions/"):
-		v.getTx(w, strings.TrimPrefix(r.URL.Path, "/vendor/transactions/"))
-	case r.Method == http.MethodPost:
-		v.write(w, r, raw)
+	case strings.HasPrefix(path, "/vendor/purchase-orders/"):
+		v.getOrder(w, strings.TrimPrefix(path, "/vendor/purchase-orders/"))
+	case strings.HasPrefix(path, "/vendor/transactions/"):
+		v.getTx(w, strings.TrimPrefix(path, "/vendor/transactions/"))
 	default:
 		fakeProblem(w, http.StatusNotFound, "not-found")
 	}
@@ -255,12 +311,38 @@ func (v *vendorFake) order(poNumber string) *fakeOrder {
 	return nil
 }
 
+func (v *vendorFake) nodeByID(id string) *fakeNode {
+	for i := range v.nodes {
+		if v.nodes[i].id == id {
+			return &v.nodes[i]
+		}
+	}
+	return nil
+}
+
+func (v *vendorFake) nodeJSON(n fakeNode) map[string]any {
+	out := map[string]any{"nodeId": n.id, "vendorId": v.vendorID, "vendorNodeCode": n.code, "nodeType": "FULFILLMENT_CENTER", "status": "ACTIVE"}
+	if n.profileRevision > 0 {
+		out["profileRevision"] = n.profileRevision
+	}
+	return out
+}
+
 func (v *vendorFake) listNodes(w http.ResponseWriter) {
 	nodes := make([]map[string]any, 0, len(v.nodes))
 	for _, n := range v.nodes {
-		nodes = append(nodes, map[string]any{"nodeId": n.id, "vendorId": v.vendorID, "vendorNodeCode": n.code, "nodeType": "FULFILLMENT_CENTER", "status": "ACTIVE"})
+		nodes = append(nodes, v.nodeJSON(n))
 	}
 	fakeOK(w, http.StatusOK, map[string]any{"nodes": nodes})
+}
+
+func (v *vendorFake) getNode(w http.ResponseWriter, id string) {
+	n := v.nodeByID(id)
+	if n == nil {
+		fakeProblem(w, http.StatusNotFound, "not-found")
+		return
+	}
+	fakeOK(w, http.StatusOK, v.nodeJSON(*n))
 }
 
 func (v *vendorFake) orderJSON(o *fakeOrder) map[string]any {
@@ -317,12 +399,27 @@ func (v *vendorFake) getTx(w http.ResponseWriter, id string) {
 	if tx.poNumber != "" {
 		out["poNumber"] = tx.poNumber
 	}
+	if len(tx.errors) > 0 {
+		out["errors"] = tx.errors
+	}
 	fakeOK(w, http.StatusOK, out)
 }
 
 func (v *vendorFake) settle(tx *fakeTx) {
 	tx.status = "SUCCESS"
 	switch tx.kind {
+	case "NODE_PROFILE":
+		n := v.nodeByID(tx.nodeID)
+		if n == nil || tx.revision <= n.profileRevision {
+			held := 0
+			if n != nil {
+				held = n.profileRevision
+			}
+			tx.status = "FAILURE"
+			tx.errors = []map[string]string{{"code": "ErrStaleProfileRevision", "message": fmt.Sprintf("revision %d is not above the %d the node holds", tx.revision, held), "path": "$.profileRevision"}}
+			return
+		}
+		n.profileRevision = tx.revision
 	case "NODE_REGISTRATION":
 		tx.nodeID = v.addNodeLocked(tx.nodeCode)
 	case "ACKNOWLEDGEMENT":
@@ -382,6 +479,54 @@ func (v *vendorFake) write(w http.ResponseWriter, r *http.Request, raw []byte) {
 	default:
 		fakeProblem(w, http.StatusNotFound, "not-found")
 	}
+}
+
+// writeProfile is PUT /vendor/nodes/{nodeId}/profile: asynchronous, idempotent
+// per key, and refused up front (422) when the body is not a profile the
+// network could take. Whether the revision is above the node's is judged when
+// the transaction settles.
+func (v *vendorFake) writeProfile(w http.ResponseWriter, r *http.Request, raw []byte) {
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		fakeProblem(w, http.StatusBadRequest, "idempotency-key-required")
+		return
+	}
+	nodeID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/vendor/nodes/"), "/profile")
+	var req struct {
+		VendorID            string `json:"vendorId"`
+		ProfileRevision     int    `json:"profileRevision"`
+		Timezone            string `json:"timezone"`
+		HandlingTimeMinutes int    `json:"handlingTimeMinutes"`
+		Cutoffs             []struct {
+			LocalTime string `json:"localTime"`
+		} `json:"cutoffs"`
+		ThroughputCap struct {
+			Value int `json:"value"`
+		} `json:"throughputCap"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil || req.VendorID != v.vendorID || v.nodeByID(nodeID) == nil {
+		fakeProblem(w, http.StatusUnprocessableEntity, "validation-failed")
+		return
+	}
+	if req.ProfileRevision < 1 || req.Timezone == "" || req.HandlingTimeMinutes < 1 || len(req.Cutoffs) == 0 || req.ThroughputCap.Value < 1 {
+		fakeProblem(w, http.StatusUnprocessableEntity, "validation-failed")
+		return
+	}
+	slot := r.Method + " " + r.URL.Path + " " + key
+	if prev, seen := v.writes[slot]; seen {
+		if prev.body != string(raw) {
+			fakeProblem(w, http.StatusUnprocessableEntity, "idempotency-key-reused")
+			return
+		}
+		fakeOK(w, http.StatusAccepted, map[string]any{"transactionId": prev.txID})
+		return
+	}
+	v.seq++
+	tx := &fakeTx{id: fmt.Sprintf("tx-%d", v.seq), kind: "NODE_PROFILE", status: "PROCESSING", nodeID: nodeID, revision: req.ProfileRevision}
+	v.txs[tx.id] = tx
+	v.writes[slot] = fakeWrite{body: string(raw), txID: tx.id, key: key}
+	v.profileKeys = append(v.profileKeys, slot)
+	fakeOK(w, http.StatusAccepted, map[string]any{"transactionId": tx.id})
 }
 
 func (v *vendorFake) accept(w http.ResponseWriter, slot string, raw []byte, tx *fakeTx) {

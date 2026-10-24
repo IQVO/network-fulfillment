@@ -53,6 +53,22 @@ runtime mode), the stub gateway and fake ports. Notable suites:
   malformed uses `1h`).
 - `internal/adapters/outbound/telemetry/orphan_hold_metrics_test.go`: the
   `network_fulfillment.orphaned_holds.swept` counter and its `outcome` attribute.
+- The node profile (ADR 0027 part 1):
+  `internal/application/usecases/declare_node_profiles_test.go` (what the caches
+  support, the skips and their logged reasons, ceilings never lowered, a fingerprint
+  that follows content and not order, one site's failure never stops the others);
+  `internal/adapters/outbound/retailnetwork/profile_request_test.go` and
+  `contract_test.go` (the body against the vendored OpenAPI, which is byte-identical
+  to vendor-connectivity's `apis/openapi.yaml`);
+  `gateway_live_profile_test.go` (the revision, restart, retry, stale-revision
+  recovery and race paths against a stateful fake Vendor API that judges a revision
+  as node-topology does); `pgstore_profile_integration_test.go` (`integration` tag:
+  the guarded monotonic write, 16 racing writers, migration 0010 up/down/up with
+  data, and a fresh database migrated through every migration, down one step and up
+  again);
+  `processpathcache/schedule_test.go`; `telemetry/node_profile_metrics_test.go`;
+  `cmd/netfulfil/profile_test.go` (`NETWORK_PROFILE_INTERVAL`, the wiring and the
+  worker's start and stop); and the chart's `render_test.sh` and `test_env_parity.py`.
 - `internal/adapters/outbound/kafka/wire_golden_test.go`: the CloudEvents wire
   shape of every event against `testdata/wire/{events,analytics}/*.json`.
 - `internal/adapters/outbound/events/testdata/log_publisher.golden`: the log

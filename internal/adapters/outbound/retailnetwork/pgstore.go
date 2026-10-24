@@ -14,7 +14,8 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-// PGStore is the Postgres implementation of Store (migration 0006).
+// PGStore is the Postgres implementation of Store (migrations 0006 and 0010; the
+// tables of the inbound loop, 0008 and 0009, are the postgres package's).
 type PGStore struct {
 	pool   *pgxpool.Pool
 	newRef func() shared.NetworkRef
@@ -204,6 +205,61 @@ func (s *PGStore) SaveLabels(ctx context.Context, ref shared.NetworkRef, labels 
 		}
 		return nil
 	})
+}
+
+// ---- the node profile (migration 0010, ADR 0027) ----
+
+func (s *PGStore) NodeProfileState(ctx context.Context, siteCode string) (NodeProfileState, bool, error) {
+	st := NodeProfileState{SiteCode: siteCode}
+	err := s.pool.QueryRow(ctx, `
+		SELECT revision, attempt, fingerprint, content
+		FROM network_node_profiles WHERE site_code = $1`, siteCode).
+		Scan(&st.Revision, &st.Attempt, &st.Fingerprint, &st.Content)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return NodeProfileState{}, false, nil
+	}
+	if err != nil {
+		return NodeProfileState{}, false, err
+	}
+	return st, true, nil
+}
+
+// AdvanceNodeProfile is one guarded upsert: the row changes only when the new
+// (revision, attempt) pair is greater than the stored one, so two writers racing
+// (two replicas, or a restart overlapping a slow call) can never lower it. The
+// state in force is read back afterwards, which is the caller's answer to "did I
+// win".
+func (s *PGStore) AdvanceNodeProfile(ctx context.Context, st NodeProfileState) (NodeProfileState, error) {
+	if st.Revision < 1 || st.Attempt < 1 || st.Fingerprint == "" || len(st.Content) == 0 {
+		return NodeProfileState{}, fmt.Errorf("retailnetwork: a profile state needs a revision and attempt of at least 1, a fingerprint and its content (got %d/%d)", st.Revision, st.Attempt)
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO network_node_profiles (site_code, revision, attempt, fingerprint, content)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (site_code) DO UPDATE
+		SET revision = EXCLUDED.revision, attempt = EXCLUDED.attempt,
+		    fingerprint = EXCLUDED.fingerprint, content = EXCLUDED.content, updated_at = now()
+		WHERE (network_node_profiles.revision, network_node_profiles.attempt) < (EXCLUDED.revision, EXCLUDED.attempt)`,
+		st.SiteCode, st.Revision, st.Attempt, st.Fingerprint, st.Content); err != nil {
+		return NodeProfileState{}, mapForeignKeyViolation(err)
+	}
+	got, ok, err := s.NodeProfileState(ctx, st.SiteCode)
+	if err != nil {
+		return NodeProfileState{}, err
+	}
+	if !ok {
+		return NodeProfileState{}, fmt.Errorf("retailnetwork: profile state of site %q vanished after the write", st.SiteCode)
+	}
+	return got, nil
+}
+
+// mapForeignKeyViolation turns "this site has no node" into ErrMappingConflict.
+func mapForeignKeyViolation(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+		return fmt.Errorf("%w: %s", ErrMappingConflict, pgErr.ConstraintName)
+	}
+	return err
 }
 
 // mapUniqueViolation turns a tracking-number clash into ErrMappingConflict.

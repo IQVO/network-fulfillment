@@ -88,8 +88,13 @@ route to the external network, and `NETWORK_MODE` picks its implementation
   shipments. Every write carries a deterministic `Idempotency-Key`; calls are
   retried with backoff behind one circuit breaker. The network's identifiers
   (purchase order number, listing, node, transaction) live only in the
-  adapter's tables (migration 0006). `DeclareCapability` and `SubmitAvailability`
-  are logged no-ops until the supply loop (ADR 0027). Without `NETWORK_BASE_URL`
+  adapter's tables (migration 0006). A background use case, `DeclareNodeProfiles`
+  ([ADR 0027](../adr/0027-supply-loop-node-profile-and-inventory-feed.md) part 1),
+  derives each site's operational profile (cutoffs, handling time, throughput)
+  from the local CPT schedule, cycle-time and capacity caches and declares it with
+  `PUT /vendor/nodes/{nodeId}/profile` under a revision this service persists
+  (migration 0010) and never lowers. `SubmitAvailability` is a logged no-op until
+  the inventory feed (ADR 0027 part 2). Without `NETWORK_BASE_URL`
   or `NETWORK_VENDOR_ID` the boot fails, naming each missing one.
 
 What the stub does for each port method (the live behaviour is in ADR 0026):
@@ -101,7 +106,7 @@ What the stub does for each port method (the live behaviour is in ADR 0026):
 | `SubmissionStatus(ref)` | `ReconcileSubmittedOrders` | `SUCCESS` for a ref this process submitted, `PENDING` otherwise (so after a restart every earlier submission is `PENDING`) |
 | `SubmitShipmentConfirmation(ref, shippedAt)` | `ConfirmNetworkOrderShipment` | records it |
 | `SubmitAvailability(update)` | nobody yet | records it |
-| `DeclareCapability(offer)` | nobody | documented no-op: the real API has no such operation |
+| `DeclareNodeProfile(profile)` | `DeclareNodeProfiles`, live mode only (the stub never starts the worker) | records the last profile per site and sends nothing; replaces the old `DeclareCapability`, which the real API never had |
 | `RequestLabel(ref, packageCount)` | `ConfirmNetworkOrderShipment` (one package), before it records `CONFIRMED` | deterministic fake `{labelRef, trackingNumber, carrier}` per package |
 
 Demand gets into the stub only from `NETWORK_SEED_FILE` (ADR 0012); the

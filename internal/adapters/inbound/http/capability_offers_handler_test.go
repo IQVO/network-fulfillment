@@ -29,8 +29,8 @@ func (nopGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, cont
 func (nopGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef, time.Time) error {
 	return nil
 }
-func (nopGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
-	return nil
+func (nopGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
+	return contract.ProfileResult{}, nil
 }
 func (nopGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
 	return nil
