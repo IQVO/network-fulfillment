@@ -54,7 +54,8 @@ EXTRA_ENV_ONLY = {
     "SITE_ID",
 }
 
-LIVE_ONLY = {"NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE"}
+LIVE_ONLY = {"NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE",
+             "INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL", "INBOUND_INTAKE_INTERVAL"}
 STUB_ONLY = {"NETWORK_SEED_FILE"}
 
 # The calls that read the environment. `get(` is the accessor loadBootConfig and
@@ -86,6 +87,8 @@ config:
   networkMode: live
   networkBaseUrl: https://vendor.invalid
   networkVendorId: V-1
+  inboundReceivingUrl: http://inbound-receiving.invalid
+  productMasterUrl: http://product-master.invalid
 productTranslation:
   mappings:
     - networkProductId: LST-1

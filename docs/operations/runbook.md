@@ -687,3 +687,27 @@ As read from the GitHub API on 2026-10-09: `develop` requires `lint`, `test`,
 `api-lint`, with `strict: true`. `bdd`, `complexity` and `guide-lint` run on
 every PR and are blocking jobs, but are not in that required list. CI job
 details: [development/testing.md](../development/testing.md#ci).
+
+## The inbound loop (ADR 0028)
+
+Live mode only. Seller shipments polled from the Vendor API become ASNs in
+inbound-receiving. State is in Postgres (`inbound_shipments`, `inbound_poll_cursors`,
+`gtin_sku_cache`, migration 0008); nothing is lost by a restart.
+
+**Where a shipment stands.** `SELECT shipment_ref, asn_number, status, attempts,
+last_error, next_attempt_at FROM inbound_shipments ORDER BY shipped_at;`
+
+- `REGISTERED`: the ASN exists in inbound-receiving. Nothing to do.
+- `PENDING` with `last_error`: not registered yet and retrying with a backoff of one
+  minute doubling to one hour. `GTIN not found` means product-master does not know the
+  GTIN: declare the product (the next due attempt registers the shipment). To retry
+  at once, `UPDATE inbound_shipments SET next_attempt_at = now() WHERE shipment_ref = ...`.
+  `unknown-sku` means inbound-receiving's product projection has not caught up.
+- `REJECTED`: inbound-receiving refused the data (a duplicate SSCC, a carton set that
+  does not add up). Logged at `ERROR` (`inbound shipment rejected, it will not be
+  retried`). Fix the cause upstream, then `UPDATE inbound_shipments SET status = 'PENDING',
+  next_attempt_at = now() WHERE shipment_ref = ...`.
+
+**Signals.** `inbound shipments processed` (Info) and `inbound shipment not registered
+yet, retrying` (Warn) log lines; `circuit_breaker_state{dependency="inbound-receiving"}` and
+`{dependency="product-master"}` on `GET /metrics`.

@@ -62,6 +62,8 @@ config:
   networkMode: live
   networkBaseUrl: https://vendor.invalid
   networkVendorId: V-1
+  inboundReceivingUrl: http://inbound-receiving.invalid
+  productMasterUrl: http://product-master.invalid
 networkNodes:
   nodes:
     - siteCode: site-1
@@ -81,7 +83,7 @@ networkNodes:
       countryCode: BR
 """
 
-LIVE_ONLY_ENV = ("NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE")
+LIVE_ONLY_ENV = ("NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE", "INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL", "INBOUND_INTAKE_INTERVAL")
 
 
 def render(values: str | None) -> list[dict]:
@@ -370,7 +372,7 @@ def check_nodes_are_live_only_and_optional() -> None:
         "stub mode mounted a data ConfigMap for node definitions it never reads"
     )
 
-    live = render("config:\n  networkMode: live\n  networkBaseUrl: https://vendor.invalid\n  networkVendorId: V-1\n")
+    live = render("config:\n  networkMode: live\n  networkBaseUrl: https://vendor.invalid\n  networkVendorId: V-1\n  inboundReceivingUrl: http://inbound-receiving.invalid\n  productMasterUrl: http://product-master.invalid\n")
     env = env_map(live)
     assert "NETWORK_NODES_FILE" not in env, "live without networkNodes.nodes set NETWORK_NODES_FILE with no file behind it"
     assert env["NETWORK_BASE_URL"] and env["NETWORK_VENDOR_ID"], env
@@ -382,7 +384,7 @@ def check_nodes_are_live_only_and_optional() -> None:
 
 def check_bad_nodes_are_refused_at_render() -> None:
     """The binary's file schema is strict; the chart says so before the pod crash-loops."""
-    live = "config:\n  networkMode: live\n  networkBaseUrl: https://vendor.invalid\n  networkVendorId: V-1\n"
+    live = "config:\n  networkMode: live\n  networkBaseUrl: https://vendor.invalid\n  networkVendorId: V-1\n  inboundReceivingUrl: http://inbound-receiving.invalid\n  productMasterUrl: http://product-master.invalid\n"
     cases = {
         "an unknown key": ("networkNodes:\n  nodes:\n    - siteCode: s\n      nodeTyp: X\n", "unknown key"),
         "a missing required key": (

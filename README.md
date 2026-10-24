@@ -182,6 +182,19 @@ What exists today:
   Every consumer here accepts only CloudEvents. Catalogue:
   `apis/asyncapi.yaml`.
 
+- **Inbound loop: seller shipments in, receipts out** (ADR 0028). In live mode a
+  ticker (`INBOUND_INTAKE_INTERVAL`) polls the Vendor API's inbound shipments of
+  every owned site from a persisted cursor and registers each one as an ASN in
+  `inbound-receiving` (`POST /asns`): the SSCC/pallet/carton tree becomes
+  `Asn.cartons`, the lines are the per-SKU roll-up in eaches, `ownerRef` is the
+  seller, the ASN number is derived from the shipment reference (a replay is a
+  no-op), and GTINs become SKUs through `product-master` `GET /gtins/{gtin}`
+  (cached in Postgres; an unknown GTIN leaves the shipment `PENDING` with a
+  recorded error and a backoff, never a guess). State: migration 0008,
+  `inbound_shipments`, `inbound_poll_cursors`, `gtin_sku_cache`. Environment:
+  `INBOUND_RECEIVING_URL` and `PRODUCT_MASTER_URL` (required in live mode),
+  `INBOUND_INTAKE_INTERVAL` (default `30s`). Stub mode runs no inbound loop.
+
 Not built yet:
 
 - **Submitting `CapabilityOffer` outward (the supply loop, ADR 0027).**
@@ -329,6 +342,9 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `NETWORK_BASE_URL` | unset | Vendor API base URL; required when `NETWORK_MODE=live`, ignored otherwise |
 | `NETWORK_VENDOR_ID` | unset | vendor account the service acts as; required when `NETWORK_MODE=live`, ignored otherwise |
 | `NETWORK_NODES_FILE` | unset | optional, live only: node definitions to register on the network (strict JSON) |
+| `INBOUND_RECEIVING_URL` | unset | inbound-receiving base URL (`POST /asns`); required when `NETWORK_MODE=live` (ADR 0028), ignored otherwise |
+| `PRODUCT_MASTER_URL` | unset | product-master base URL (`GET /gtins/{gtin}`); required when `NETWORK_MODE=live`, ignored otherwise |
+| `INBOUND_INTAKE_INTERVAL` | `30s` | Go duration; cadence of the inbound intake loop (live only) |
 | `ORDER_MANAGEMENT_URL` | `http://localhost:8080` | base URL for the held-order calls |
 | `DATABASE_URL` | none | **required**: Postgres DSN; a missing or unreachable database fails the boot (ADR 0025) |
 | `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | direct (non-pooled) connection for migrations only (ADR 0007) |

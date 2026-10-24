@@ -23,6 +23,13 @@ data:
   # Read only when NETWORK_MODE=live (ADR 0026 Decision 10), so rendered only then.
   NETWORK_BASE_URL: {{ .Values.config.networkBaseUrl | quote }}
   NETWORK_VENDOR_ID: {{ .Values.config.networkVendorId | quote }}
+
+  # The inbound loop (ADR 0028), live only: seller shipments polled from the
+  # Vendor API become ASNs in inbound-receiving, GTINs are resolved through
+  # product-master. Both URLs are mandatory, like the two above.
+  INBOUND_RECEIVING_URL: {{ .Values.config.inboundReceivingUrl | quote }}
+  PRODUCT_MASTER_URL: {{ .Values.config.productMasterUrl | quote }}
+  INBOUND_INTAKE_INTERVAL: {{ .Values.config.inboundIntakeInterval | quote }}
 {{- if .Values.networkNodes.nodes }}
 
   # What the network needs to register each site that is not yet one of its

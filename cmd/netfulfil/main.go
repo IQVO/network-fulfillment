@@ -32,6 +32,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
 func main() {
@@ -50,6 +51,7 @@ type infra struct {
 	offers      ports.CapabilityOfferRepo
 	recompute   *usecases.RecomputeCapabilityOffers
 	capDone     []chan struct{}
+	sites       []shared.SiteId
 }
 
 // run wires every adapter and use case in startup order, serves until a
@@ -147,6 +149,16 @@ func run(ctx context.Context) int {
 		serviceName: serviceName,
 	})
 
+	// The inbound loop (ADR 0028): live mode only, stopped before the pool closes.
+	loop, err := wireInboundLoop(cfg.inbound, in.gateway, in.sites, in.pool, circuitBreakerMetrics, logger)
+	if err != nil {
+		logger.Error("cannot wire the inbound loop", "err", err)
+		return 1
+	}
+	loopCtx, stopLoop := context.WithCancel(ctx)
+	loop.start(loopCtx)
+	defer loop.stop(stopLoop, inboundLoopStopBudget)
+
 	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
 }
 
@@ -193,6 +205,7 @@ func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig, breaker
 		return infra{}, nil, false
 	}
 	in.gateway = gateway
+	in.sites = networkSites(nodes)
 
 	// Declarative stub seeding, the same shape as the fleet's
 	// PATH_CATALOGUE_FILE. This is how a stub deployment is given
