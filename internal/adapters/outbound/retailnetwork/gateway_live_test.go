@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/claudioed/network-fulfillment/internal/application/contract"
 )
 
 // failFirst answers the first n requests for method+path with status (and the
@@ -216,25 +218,38 @@ func TestLive_ARegistrationRetriedAfter5xxResendsTheSameKeyAndBody(t *testing.T)
 
 // ---- PollDemand ----
 
-func TestLive_PollDemandFollowsNextTokenAndMapsNodesAndListings(t *testing.T) {
+// pagedFixture has three ISSUED orders on N-1 spread over two pages (PO-1 has two lines).
+func pagedFixture(t *testing.T) (*liveFixture, []contract.InboundDemand) {
+	t.Helper()
 	f := readyFixture(t, nil)
 	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2, 1), issuedPO("PO-2", "N-1", 5)}, NextToken: "t1"})
 	f.sim.setPage("t1", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-3", "N-1", 1)}})
-
 	got, err := f.g.PollDemand(context.Background(), t0)
 	if err != nil || len(got) != 3 {
 		t.Fatalf("PollDemand = %d demands, %v; want 3 across two pages", len(got), err)
 	}
+	return f, got
+}
+
+func TestLive_PollDemandMapsTheNodeToASiteAndTheListingsToOpaqueProductIds(t *testing.T) {
+	_, got := pagedFixture(t)
 	d := got[0]
+
 	if d.SiteId != "FC-1" || !d.RequiredShipBy.Equal(shipBy) || !d.AcknowledgeBy.Equal(ackByTime) {
 		t.Errorf("demand = %+v, want site FC-1, the required ship-by and the network's ackBy as AcknowledgeBy", d)
 	}
 	if len(d.Lines) != 2 || d.Lines[0].NetworkProductId != "L-PO-1-1" || d.Lines[0].Quantity != 2 || d.Lines[1].NetworkProductId != "L-PO-1-2" || d.Lines[1].Quantity != 1 {
-		t.Errorf("lines = %+v, want the listing ids as the opaque product ids with their quantities", d.Lines)
+		t.Fatalf("lines = %+v, want the listing ids as the opaque product ids with their quantities", d.Lines)
 	}
 	if d.Lines[0].NetworkLineRef == "" || d.Lines[0].NetworkLineRef == d.Lines[1].NetworkLineRef {
 		t.Errorf("line refs %q / %q must be set and distinct", d.Lines[0].NetworkLineRef, d.Lines[1].NetworkLineRef)
 	}
+}
+
+func TestLive_PollDemandMintsTheRefAndPersistsTheMapBackToThePurchaseOrder(t *testing.T) {
+	f, got := pagedFixture(t)
+	d := got[0]
+
 	if strings.Contains(string(d.NetworkRef), "PO-1") {
 		t.Errorf("NetworkRef %q is derived from the purchase order number; it must be minted", d.NetworkRef)
 	}
@@ -242,6 +257,10 @@ func TestLive_PollDemandFollowsNextTokenAndMapsNodesAndListings(t *testing.T) {
 	if !ok || po.PoNumber != "PO-1" || po.NodeID != "N-1" || len(po.Lines) != 2 || po.Lines[1].ListingID != "L-PO-1-2" || po.Lines[1].Quantity != 1 {
 		t.Errorf("persisted order = %+v (%v), want the map back to PO-1 / N-1 and its lines", po, ok)
 	}
+}
+
+func TestLive_PollDemandFollowsNextTokenWithTheOverlapOnlyOnTheFirstPage(t *testing.T) {
+	f, _ := pagedFixture(t)
 
 	pages := f.requestsTo(http.MethodGet, "/vendor/purchase-orders")
 	if len(pages) != 2 {
