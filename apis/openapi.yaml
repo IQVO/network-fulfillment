@@ -4,8 +4,7 @@ info:
   version: "1.0.0"
   description: >
     The Anti-Corruption Layer between this platform and an external retail
-    fulfillment network (Amazon's Selling Partner API, Vendor Direct
-    Fulfillment). It owns **NetworkOrder**: demand that arrived from
+    fulfillment network (a vendor direct-fulfillment program). It owns **NetworkOrder**: demand that arrived from
     outside carrying a deadline we did not choose, and the answer we owe
     the network by a deadline the network set.
 

@@ -114,7 +114,7 @@ tables) and anything the tables mark as deprecated or platform-only
 
 To be the one place where the fleet meets an external retail fulfillment
 network. Since ADR 0009 the counterpart is the fleet's own `retail-network`
-service; the original learning target was a large retailer's Selling Partner
+service; the original learning target was a large retailer's vendor platform
 API. The context:
 
 - receives the network's demand by polling;

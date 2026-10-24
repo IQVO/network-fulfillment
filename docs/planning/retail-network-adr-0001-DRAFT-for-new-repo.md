@@ -4,7 +4,7 @@ slug: /adr/0001-retail-network-bounded-context
 title: "1. retail-network as its own organization: Open Host Service upstream of network-fulfillment"
 sidebar_label: "1. retail-network bounded context"
 sidebar_position: 1
-description: "ADR 0001 (Accepted) — why the ecosystem's own stand-in for an external retail network (not a real e-commerce retailer's SP-API) is a new, separate bounded context: one context (not a marketplace/sourcing split), Direct-Fulfillment-like protocol fidelity in the network's own vocabulary, a declared-plus-measured capability model, proportional-to-stock capacity sharing, release-on-reconciled-acceptance, and no auth."
+description: "ADR 0001 (Accepted) — why the ecosystem's own stand-in for an external retail network (not a real e-commerce retailer's vendor platform API) is a new, separate bounded context: one context (not a marketplace/sourcing split), Direct-Fulfillment-like protocol fidelity in the network's own vocabulary, a declared-plus-measured capability model, proportional-to-stock capacity sharing, release-on-reconciled-acceptance, and no auth."
 ---
 
 > **STAGING NOTE — read this before touching anything below.**
@@ -24,7 +24,7 @@ description: "ADR 0001 (Accepted) — why the ecosystem's own stand-in for an ex
 ## Status
 
 **Accepted** (2026-09-26). Companion to `network-fulfillment` ADR 0009 (drafted at
-`network-fulfillment/docs/adr/0009-retail-network-not-amazon-counterpart.md`
+`network-fulfillment/docs/adr/0009-retail-network-not-a-real-network-counterpart.md`
 in that repo's real ADR sequence; originally drafted as ADR 0002 there,
 renumbered to 0009 in 2026-10 because that repo had a duplicate 0002).
 Neither is meaningful without the
@@ -37,15 +37,15 @@ accepted or rejected as one decision.
 
 ## Context
 
-### This supersedes the real-SP-API plan, not just adds to it
+### This supersedes the real-vendor platform API plan, not just adds to it
 
 The prior plan (`2026-09-25_224823-amazon-network-fulfillment-readiness.md`)
 assumed `network-fulfillment` would eventually integrate against a real
-e-commerce retailer's Selling Partner API. The user's correction was
+e-commerce retailer's vendor platform API. The user's correction was
 explicit: **not the real one, our own ecosystem.** The counterpart that
 issues purchase orders, measures our on-time performance, and promises a
 delivery date to a (synthetic) shopper is a new service in this fleet,
-playing that same structural role — not the real retailer, no real SP-API,
+playing that same structural role — not the real retailer, no real vendor platform API,
 no real vendor credentials, no real customer PII anywhere.
 
 Two independent facts made this worth building rather than left as a
@@ -58,7 +58,7 @@ permanent stub:
    counterpart that can actually delay, fail, rate-limit and redeliver on
    purpose. `StubGateway` never does any of that.
 2. **Owning both sides closes gaps a real integration could never
-   close.** A real e-commerce retailer's SP-API accepts no declaration of
+   close.** A real e-commerce retailer's vendor platform API accepts no declaration of
    capability (no operation takes "my cutoffs are 11:00 and 18:00 and my
    handling time is 95 min"); our own network can. A real network's
    promise floor is a departure time; our own network can own the missing
@@ -131,7 +131,7 @@ Chosen: `FulfillmentNode` carries both a **declared** profile
 `PUT /vendor/nodes/{nodeId}/profile`) and a **measured** scorecard
 (`onTimeShipRate`, `lateAckRate`, `cancelRate`, computed by
 `retail-network` itself from what actually happened). Alternative
-considered: infer-only, which is what a real retailer's SP-API does
+considered: infer-only, which is what a real retailer's vendor platform API does
 today (no operation accepts a capability declaration) — rejected because
 it would lose the entire point of owning both sides: the ability to
 expose our real planning time (PPM's `cycleTimeP95` and `CPTSchedule`) to
@@ -192,7 +192,7 @@ We will create `retail-network` as a new, separate bounded context: a
 Published Language. `network-fulfillment` stays **Conformist + Anti-
 Corruption Layer**, exactly as its own ADR 0001 already established for
 "an external retail fulfillment network" — this record specifies that the
-network is `retail-network`, not a real e-commerce retailer's SP-API.
+network is `retail-network`, not a real e-commerce retailer's vendor platform API.
 
 ### Aggregates
 
@@ -330,7 +330,7 @@ to build.
   `deliverBy = shipBy + transit(zone)`, closing a gap a real integration
   could never close from our side.
 - Capability can be genuinely declared and then measured against, which
-  a real e-commerce retailer's SP-API structurally cannot support.
+  a real e-commerce retailer's vendor platform API structurally cannot support.
 - Customer PII (synthetic) is contained to exactly one context in the
   whole fleet, and it is a *new* context built for this purpose, not an
   existing one being retrofitted to hold it.
@@ -358,7 +358,7 @@ to build.
   `order-management`'s existing single-site simplification
   (`network-fulfillment` ADR 0001, "Deliberately out of scope").
 - A second network (a distinct organization playing a second retailer).
-- A real e-commerce retailer's SP-API adapter. Explicitly **deferred, not
+- A real e-commerce retailer's vendor platform API adapter. Explicitly **deferred, not
   dropped** — see the companion `network-fulfillment` ADR 0009 — as an
   adapter swap behind the same `NetworkGateway` port, should this project
   ever want to integrate against the genuine article.
