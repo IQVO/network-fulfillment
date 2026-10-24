@@ -39,7 +39,7 @@ accepted or rejected as one decision.
 
 ### This supersedes the real-vendor platform API plan, not just adds to it
 
-The prior plan (`2026-09-25_224823-amazon-network-fulfillment-readiness.md`)
+The prior plan (the prior readiness review)
 assumed `network-fulfillment` would eventually integrate against a real
 e-commerce retailer's vendor platform API. The user's correction was
 explicit: **not the real one, our own ecosystem.** The counterpart that

@@ -103,7 +103,7 @@ Partner API later. The port this repo already sketched, `NetworkGateway`
 written in this fleet's own vocabulary specifically so a real vendor platform API
 adapter could be added later as a second implementation behind the same
 port — an adapter swap, not a redesign.
-`references/network-fulfillment-sp-api-boundary.md` (this fleet's own
+the vendor boundary reference note (this fleet's own
 operating skill) already carries the real finding that would matter if
 that work is ever picked up: no vendor platform API operation accepts a capability
 declaration, so a real integration would need to fall back to

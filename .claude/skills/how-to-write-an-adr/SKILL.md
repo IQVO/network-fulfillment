@@ -12,7 +12,7 @@ description: Write an Architecture Decision Record in this repo's numbering and 
 > (`id`, `slug`, `title`, `sidebar_label`, `description`, plus
 > `sidebar_position` as in ADR 0002 and 0008) so they can be aggregated
 > later. Two records are numbered 0002 (`0002-mcp-and-analytics-data-product.md`
-> and `0002-retail-network-not-amazon-counterpart.md`); do not reuse a
+> that pointed at ADR 0009); do not reuse a
 > number, take the next free one (0009).
 
 Use when a change is architecturally significant — a new bounded-context
