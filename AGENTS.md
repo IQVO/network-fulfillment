@@ -8,12 +8,12 @@ downstream. Owns **NetworkOrder** and **CapabilityOffer** (both built).
 Study project, not production (see README.md banner).
 
 Read `docs/adr/0001-network-fulfillment-bounded-context.md` (companion of
-`order-management` ADR 0020) AND `docs/adr/0009-retail-network-not-amazon-counterpart.md`
+`order-management` ADR 0020) AND `docs/adr/0009-retail-network-not-a-real-network-counterpart.md`
 (Accepted, amends 0001: the counterpart is the fleet's own `retail-network`,
 not a real retailer's SP-API) before writing network-facing code. That ADR
 was renumbered from 0002 to 0009 on 2026-10-05 to resolve a duplicate
 ADR-0002 (`0002-mcp-and-analytics-data-product.md` keeps 0002); a stub at
-the old `0002-retail-network-not-amazon-counterpart.md` path redirects here.
+the old 0002 stub was deleted; ADR 0009 is the only home of that decision.
 ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/ddd/`.
 
 ## Current state
