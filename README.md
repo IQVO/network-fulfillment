@@ -114,10 +114,10 @@ What exists today:
   Postgres (`migrations/analytics/`), and `cmd/netfulfil-reports` serves
   `GET /reports/acknowledgement` and `GET /reports/acknowledgement/freshness`
   over a read-only pool.
-- **Persistence** — Postgres (`migrations/0001`–`0006`: `network_orders`,
+- **Persistence** — Postgres (`migrations/0001`–`0009`: `network_orders`,
   `network_order_lines`, `outbox_events`, `capability_offers`, the hold
-  outcome columns of `network_orders`, and the live adapter's five tables,
-  below). `DATABASE_URL` is mandatory: there
+  outcome columns of `network_orders`, the live adapter's five tables,
+  below, and the inbound loop's tables, ADR 0028). `DATABASE_URL` is mandatory: there
   is no in-memory mode (ADR 0025), and a Postgres that cannot be reached
   fails the boot. Migrations run at startup
   (`MIGRATIONS_DATABASE_URL` for a direct, non-PgBouncer connection, ADR
@@ -151,7 +151,7 @@ What exists today:
   throughput) only from the local caches (the CPT schedule and cycle-time p95 of
   process-path-management, the remaining capacity of wes-work-planning) and
   declares it with `PUT /vendor/nodes/{nodeId}/profile` under a `profileRevision`
-  this service owns: persisted before the call (migration 0007,
+  this service owns: persisted before the call (migration 0010,
   `network_node_profiles`), bumped only when the content changes and never
   lowered. A profile the caches cannot support is skipped with a logged reason,
   never guessed. `NETWORK_PROFILE_INTERVAL` (default `5m`, `0` disables) sets the
@@ -193,6 +193,26 @@ What exists today:
   `subject=<networkRef>`, `dataschema=urn:warehouse:network-fulfillment:<events|analytics>:<EventName>:v1`).
   Every consumer here accepts only CloudEvents. Catalogue:
   `apis/asyncapi.yaml`.
+
+- **Inbound loop: seller shipments in, receipts out** (ADR 0028). In live mode a
+  ticker (`INBOUND_INTAKE_INTERVAL`) polls the Vendor API's inbound shipments of
+  every owned site from a persisted cursor and registers each one as an ASN in
+  `inbound-receiving` (`POST /asns`): the SSCC/pallet/carton tree becomes
+  `Asn.cartons`, the lines are the per-SKU roll-up in eaches, `ownerRef` is the
+  seller, the ASN number is derived from the shipment reference (a replay is a
+  no-op), and GTINs become SKUs through `product-master` `GET /gtins/{gtin}`
+  (cached in Postgres; an unknown GTIN leaves the shipment `PENDING` with a
+  recorded error and a backoff, never a guess). State: migration 0008,
+  `inbound_shipments`, `inbound_poll_cursors`, `gtin_sku_cache`. Environment:
+  `INBOUND_RECEIVING_URL` and `PRODUCT_MASTER_URL` (required in live mode),
+  `INBOUND_INTAKE_INTERVAL` (default `30s`). Stub mode runs no inbound loop.
+  **The receipt return** (migration 0009): a consumer group of its own
+  (`INBOUND_RECEIPT_CONSUMER_GROUP`, required in live mode) reads inbound-receiving's
+  `ReceiptCartonReceived`, `CartonDiscrepancyRaised` and `ReceiptClosed` into a local
+  projection (only the ASNs this service registered); on close it reports the receipt through
+  `POST /vendor/inbound-receipts` exactly once per shipment: per carton `RECEIVED`, `MISSING`,
+  `UNEXPECTED` or `DAMAGED`, the counted eaches per GTIN and compliance codes from the carton
+  discrepancies, retried with backoff and the transaction id kept in the ledger.
 
 Not built yet:
 
@@ -344,6 +364,10 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `NETWORK_VENDOR_ID` | unset | vendor account the service acts as; required when `NETWORK_MODE=live`, ignored otherwise |
 | `NETWORK_NODES_FILE` | unset | optional, live only: node definitions to register on the network (strict JSON) |
 | `NETWORK_PROFILE_INTERVAL` | `5m` | live only: how often the node profile is derived and, if its content changed, declared (ADR 0027); `0` disables it |
+| `INBOUND_RECEIVING_URL` | unset | inbound-receiving base URL (`POST /asns`); required when `NETWORK_MODE=live` (ADR 0028), ignored otherwise |
+| `PRODUCT_MASTER_URL` | unset | product-master base URL (`GET /gtins/{gtin}`); required when `NETWORK_MODE=live`, ignored otherwise |
+| `INBOUND_INTAKE_INTERVAL` | `30s` | Go duration; cadence of the inbound intake and receipt-return loops (live only) |
+| `INBOUND_RECEIPT_CONSUMER_GROUP` | unset | this service's durable consumer group on inbound-receiving's events topic; required when `NETWORK_MODE=live` (ADR 0028), ignored otherwise |
 | `ORDER_MANAGEMENT_URL` | `http://localhost:8080` | base URL for the held-order calls |
 | `DATABASE_URL` | none | **required**: Postgres DSN; a missing or unreachable database fails the boot (ADR 0025) |
 | `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | direct (non-pooled) connection for migrations only (ADR 0007) |

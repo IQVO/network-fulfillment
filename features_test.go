@@ -92,6 +92,7 @@ type world struct {
 	rejectOverdue *usecases.RejectOverdueOrders
 	recompute     *usecases.RecomputeCapabilityOffers
 	poller        *poller.Poller
+	inboundW      *inboundWorld
 
 	// offersEnabled mirrors CAPABILITY_OFFER_ENABLED: when false the route is
 	// not registered at all.
@@ -118,6 +119,7 @@ func (w *world) reset() {
 	w.offers = memory.NewCapabilityOfferRepo()
 	w.dict = producttranslation.New()
 	w.gateway = newRecordingGateway(retailnetwork.NewStubGateway(logger))
+	w.inboundW = nil
 	w.planner = newFakePlanner()
 	w.readiness = &inboundhttp.Readiness{}
 	w.metrics = telemetry.NewCircuitBreakerMetrics()
@@ -336,4 +338,5 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w.registerOfferSteps(sc)
 	w.registerReportSteps(sc)
 	w.registerHardeningSteps(sc)
+	w.registerInboundSteps(sc)
 }

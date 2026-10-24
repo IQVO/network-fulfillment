@@ -16,7 +16,7 @@ import (
 var networkEnvKeys = []string{
 	"DATABASE_URL", "KAFKA_BROKERS", "EVENT_PUBLISHER", "CAPABILITY_OFFER_ENABLED",
 	"NETWORK_MODE", "NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE", "NETWORK_SEED_FILE",
-	"SITE_ID",
+	"SITE_ID", "INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL", "INBOUND_RECEIPT_CONSUMER_GROUP",
 }
 
 func setNetworkEnv(t *testing.T, vars map[string]string) {
@@ -49,7 +49,8 @@ func bootVars(extra map[string]string) map[string]string {
 
 // liveVars returns a complete, valid live-mode environment plus the given variables.
 func liveVars(extra map[string]string) map[string]string {
-	vars := bootVars(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1"})
+	vars := bootVars(map[string]string{"NETWORK_MODE": "live", "NETWORK_BASE_URL": "http://network.test", "NETWORK_VENDOR_ID": "V-1",
+		"INBOUND_RECEIVING_URL": "http://inbound-receiving.test", "PRODUCT_MASTER_URL": "http://product-master.test", "INBOUND_RECEIPT_CONSUMER_GROUP": "nf-test"})
 	for k, v := range extra {
 		vars[k] = v
 	}

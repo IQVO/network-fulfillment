@@ -27,6 +27,17 @@ data:
   # How often the node profile is declared (ADR 0027); "0" disables it. Quoted so
   # that "0" reaches the process instead of being dropped as empty.
   NETWORK_PROFILE_INTERVAL: {{ .Values.config.networkProfileInterval | quote }}
+
+  # The inbound loop (ADR 0028), live only: seller shipments polled from the
+  # Vendor API become ASNs in inbound-receiving, GTINs are resolved through
+  # product-master. Both URLs are mandatory, like the two above.
+  INBOUND_RECEIVING_URL: {{ .Values.config.inboundReceivingUrl | quote }}
+  PRODUCT_MASTER_URL: {{ .Values.config.productMasterUrl | quote }}
+  INBOUND_INTAKE_INTERVAL: {{ .Values.config.inboundIntakeInterval | quote }}
+  # This service's own consumer group on inbound-receiving's events topic (the
+  # receipt return, ADR 0028). Durable: a receipt closed while the pod was down
+  # is read when it comes back. Mandatory in live mode.
+  INBOUND_RECEIPT_CONSUMER_GROUP: {{ .Values.config.inboundReceiptConsumerGroup | quote }}
 {{- if .Values.networkNodes.nodes }}
 
   # What the network needs to register each site that is not yet one of its

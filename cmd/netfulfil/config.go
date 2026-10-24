@@ -27,6 +27,7 @@ type bootConfig struct {
 	databaseURL  string
 	kafkaBrokers []string
 	network      networkConfig
+	inbound      inboundConfig
 }
 
 // networkConfig is the retail-network side of the boot configuration (ADR 0009
@@ -94,6 +95,11 @@ func loadBootConfig(get func(string) string) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	cfg.network = network
+	inbound, err := loadInboundConfig(get, network.mode)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	cfg.inbound = inbound
 	return cfg, nil
 }
 

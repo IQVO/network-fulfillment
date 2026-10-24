@@ -32,6 +32,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
 func main() {
@@ -50,6 +51,7 @@ type infra struct {
 	offers      ports.CapabilityOfferRepo
 	recompute   *usecases.RecomputeCapabilityOffers
 	capDone     []chan struct{}
+	sites       []shared.SiteId
 }
 
 // run wires every adapter and use case in startup order, serves until a
@@ -148,7 +150,21 @@ func run(ctx context.Context) int {
 		serviceName: serviceName,
 	})
 
-	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inbound, relay, readiness, in.recompute, in.capDone)
+	// The inbound loop (ADR 0028): live mode only, stopped before the pool closes.
+	loop, stopLoop, err := startInboundLoop(ctx, stop, cfg, in, circuitBreakerMetrics, logger)
+	if err != nil {
+		logger.Error("cannot wire the inbound loop", "err", err)
+		return 1
+	}
+	defer loop.stop(stopLoop, inboundLoopStopBudget)
+
+	// The node profile worker (ADR 0027), also live mode only, runs inside serve
+	// with the poller and the sweeps.
+	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inbound, relay, readiness, in.recompute, in.capDone)
+	if loop.failed() && code == 0 {
+		code = 1 // a dead receipt consumer is a failure, whatever the signal said
+	}
+	return code
 }
 
 // bootInfra builds the pieces that must exist before any use case, in
@@ -194,6 +210,7 @@ func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig, breaker
 		return infra{}, nil, false
 	}
 	in.gateway = gateway
+	in.sites = networkSites(nodes)
 
 	// Declarative stub seeding, the same shape as the fleet's
 	// PATH_CATALOGUE_FILE. This is how a stub deployment is given

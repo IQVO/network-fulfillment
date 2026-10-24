@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/golang-migrate/migrate/v4"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
@@ -140,88 +144,216 @@ func TestPGStore_TheLedgerAcceptsNodeProfileRows(t *testing.T) {
 	}
 }
 
-// TestMigration0007_UpDownUp proves the migration both ways on a database that
-// already holds a node, an acknowledgement and a profile: down drops only the
-// profile state and the NODE_PROFILE ledger rows, the rest survives, and a second
-// up works again.
-func TestMigration0007_UpDownUp(t *testing.T) {
+// ledgerProbe is a migrated-or-not database as the migration tests see it.
+type ledgerProbe struct {
+	t    *testing.T
+	ctx  context.Context
+	pool *pgxpool.Pool
+	m    *migrate.Migrate
+}
+
+func newLedgerProbe(t *testing.T) *ledgerProbe {
+	t.Helper()
 	url := bootDB(t)
 	m, err := migrate.New("file://"+migrationsDir(t), url)
 	if err != nil {
 		t.Fatalf("migrate.New: %v", err)
 	}
 	t.Cleanup(func() { _, _ = m.Close() })
-	if err := m.Migrate(6); err != nil {
-		t.Fatalf("Migrate(6): %v", err)
-	}
 	ctx := context.Background()
 	pool, err := postgres.NewPool(ctx, url)
 	if err != nil {
 		t.Fatalf("open pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	return &ledgerProbe{t: t, ctx: ctx, pool: pool, m: m}
+}
 
-	profileTable := func() int {
-		var n int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_name = 'network_node_profiles'`).Scan(&n); err != nil {
-			t.Fatalf("information_schema: %v", err)
-		}
-		return n
+func (p *ledgerProbe) version() uint {
+	p.t.Helper()
+	v, dirty, err := p.m.Version()
+	if err != nil || dirty {
+		p.t.Fatalf("Version = %d dirty=%v err=%v, want a clean version", v, dirty, err)
 	}
-	insertLedger := func(kind, subject string) error {
-		_, err := pool.Exec(ctx, `
-			INSERT INTO network_submissions (kind, subject, idempotency_key, request_body, status)
-			VALUES ($1, $2, 'k-'||$2, '\x7b7d', 'SENDING')`, kind, subject)
-		return err
-	}
+	return v
+}
 
-	if got := profileTable(); got != 0 {
-		t.Fatalf("profile table before 0007 = %d, want 0", got)
+func (p *ledgerProbe) migrateTo(v uint) {
+	p.t.Helper()
+	if err := p.m.Migrate(v); err != nil {
+		p.t.Fatalf("Migrate(%d): %v", v, err)
 	}
-	if err := insertLedger("NODE_PROFILE", "site-1#1#1"); err == nil {
-		t.Fatal("before 0007 the ledger must refuse a NODE_PROFILE row")
+	if got := p.version(); got != v {
+		p.t.Fatalf("version after Migrate(%d) = %d", v, got)
 	}
-	if err := m.Migrate(7); err != nil {
-		t.Fatalf("Migrate(7): %v", err)
+}
+
+func (p *ledgerProbe) step(n int) {
+	p.t.Helper()
+	if err := p.m.Steps(n); err != nil {
+		p.t.Fatalf("Steps(%d): %v", n, err)
 	}
-	if got := profileTable(); got != 1 {
-		t.Fatalf("profile table after 0007 = %d, want 1", got)
+}
+
+func (p *ledgerProbe) count(query string, args ...any) int {
+	p.t.Helper()
+	var n int
+	if err := p.pool.QueryRow(p.ctx, query, args...).Scan(&n); err != nil {
+		p.t.Fatalf("%s: %v", query, err)
 	}
-	for _, row := range [][2]string{{"NODE_PROFILE", "site-1#1#1"}, {"ACKNOWLEDGEMENT", "NR-keep"}} {
-		if err := insertLedger(row[0], row[1]); err != nil {
-			t.Fatalf("after 0007 the ledger must accept %s: %v", row[0], err)
+	return n
+}
+
+func (p *ledgerProbe) profileTables() int {
+	p.t.Helper()
+	return p.count(`SELECT count(*) FROM information_schema.tables WHERE table_name = 'network_node_profiles'`)
+}
+
+func (p *ledgerProbe) kindRows(kind string) int {
+	p.t.Helper()
+	return p.count(`SELECT count(*) FROM network_submissions WHERE kind = $1`, kind)
+}
+
+func (p *ledgerProbe) insertLedger(kind, subject string) error {
+	_, err := p.pool.Exec(p.ctx, `
+		INSERT INTO network_submissions (kind, subject, idempotency_key, request_body, status)
+		VALUES ($1, $2, 'k-'||$2, '\x7b7d', 'SENDING')`, kind, subject)
+	return err
+}
+
+// expectLedgerKinds checks that the ledger admits each kind in admit and refuses
+// anything else; the probes it inserts are removed again.
+func (p *ledgerProbe) expectLedgerKinds(admit []string) {
+	p.t.Helper()
+	for _, kind := range append(append([]string{}, admit...), "NOT_A_KIND") {
+		err := p.insertLedger(kind, "probe-"+kind)
+		wanted := kind != "NOT_A_KIND"
+		if wanted && err != nil {
+			p.t.Fatalf("version %d: the ledger must admit %s: %v", p.version(), kind, err)
+		}
+		if !wanted && err == nil {
+			p.t.Fatalf("version %d: the ledger must refuse a kind it does not know", p.version())
 		}
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO network_nodes (site_code, node_id) VALUES ('site-1', 'N-1')`); err != nil {
+	if _, err := p.pool.Exec(p.ctx, `DELETE FROM network_submissions WHERE subject LIKE 'probe-%'`); err != nil {
+		p.t.Fatalf("remove probes: %v", err)
+	}
+}
+
+// highestMigration is the number of the newest *.up.sql in migrations/, so the
+// test below keeps meaning "all of them" when the next migration is added.
+func highestMigration(t *testing.T) uint {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(migrationsDir(t), "*.up.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("migration files: %v (%d found)", err, len(files))
+	}
+	var highest uint64
+	for _, f := range files {
+		n, err := strconv.ParseUint(strings.SplitN(filepath.Base(f), "_", 2)[0], 10, 32)
+		if err != nil {
+			t.Fatalf("migration %s has no numeric prefix: %v", f, err)
+		}
+		highest = max(highest, n)
+	}
+	return uint(highest)
+}
+
+// TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain migrates an empty database
+// through EVERY migration, takes the newest one down and brings it back. It is the
+// guard against a migration numbered below one that is already on develop: such a
+// file is skipped by golang-migrate on any database past its number.
+func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
+	p := newLedgerProbe(t)
+	if err := p.m.Up(); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	top := highestMigration(t)
+	if got := p.version(); got != top {
+		t.Fatalf("version after Up = %d, want the newest migration %d", got, top)
+	}
+	if p.profileTables() != 1 {
+		t.Fatal("after Up the node profile table must exist (migration 0010)")
+	}
+	all := []string{"ACKNOWLEDGEMENT", "SHIPMENT_CONFIRMATION", "NODE_REGISTRATION", "NODE_PROFILE", "INBOUND_RECEIPT"}
+	p.expectLedgerKinds(all)
+
+	p.step(-1)
+	if got := p.version(); got != top-1 {
+		t.Fatalf("version after one step down = %d, want %d", got, top-1)
+	}
+	p.expectLedgerKinds(all)
+
+	p.step(1)
+	if got := p.version(); got != top {
+		t.Fatalf("version after the second up = %d, want %d", got, top)
+	}
+	p.expectLedgerKinds(all)
+}
+
+// TestMigration0010_UpDownUp proves the node profile migration both ways on a
+// database that already holds everything develop's 0008 and 0009 create: a node, an
+// acknowledgement, an inbound receipt in the ledger and a profile. Down drops only
+// the profile state and the NODE_PROFILE ledger rows, the rest survives (the
+// INBOUND_RECEIPT row above all: a 0010 that rebuilt the ledger's kind check with its
+// old four-kind list would fail here), and a second up works again.
+func TestMigration0010_UpDownUp(t *testing.T) {
+	p := newLedgerProbe(t)
+	p.migrateTo(9)
+
+	if got := p.profileTables(); got != 0 {
+		t.Fatalf("profile table before 0010 = %d, want 0", got)
+	}
+	// 0008 already admits both new kinds, so the order of the two ADRs does not matter.
+	p.expectLedgerKinds([]string{"ACKNOWLEDGEMENT", "NODE_PROFILE", "INBOUND_RECEIPT"})
+	for _, row := range [][2]string{{"ACKNOWLEDGEMENT", "NR-keep"}, {"INBOUND_RECEIPT", "ASN-keep"}} {
+		if err := p.insertLedger(row[0], row[1]); err != nil {
+			t.Fatalf("seed %s: %v", row[0], err)
+		}
+	}
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_nodes (site_code, node_id) VALUES ('site-1', 'N-1')`); err != nil {
 		t.Fatalf("seed node: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO network_node_profiles (site_code, revision, fingerprint, content) VALUES ('site-1', 1, 'a', '{}')`); err != nil {
+
+	p.migrateTo(10)
+	if got := p.profileTables(); got != 1 {
+		t.Fatalf("profile table after 0010 = %d, want 1", got)
+	}
+	if err := p.insertLedger("NODE_PROFILE", "site-1#1#1"); err != nil {
+		t.Fatalf("after 0010 the ledger must accept NODE_PROFILE: %v", err)
+	}
+	if got := p.kindRows("INBOUND_RECEIPT"); got != 1 {
+		t.Fatalf("INBOUND_RECEIPT rows after 0010 = %d, want the seeded one", got)
+	}
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_node_profiles (site_code, revision, fingerprint, content) VALUES ('site-1', 1, 'a', '{}')`); err != nil {
 		t.Fatalf("seed profile: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO network_node_profiles (site_code, revision, fingerprint, content) VALUES ('site-9', 1, 'a', '{}')`); err == nil {
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_node_profiles (site_code, revision, fingerprint, content) VALUES ('site-9', 1, 'a', '{}')`); err == nil {
 		t.Fatal("a profile for a site with no node must violate the foreign key")
 	}
 
-	if err := m.Migrate(6); err != nil {
-		t.Fatalf("down to 6: %v", err)
+	p.step(-1)
+	if got := p.version(); got != 9 {
+		t.Fatalf("version after down = %d, want 9", got)
 	}
-	if got := profileTable(); got != 0 {
+	if got := p.profileTables(); got != 0 {
 		t.Fatalf("profile table after down = %d, want 0", got)
 	}
-	var profileRows, kept, nodes int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM network_submissions WHERE kind = 'NODE_PROFILE'`).Scan(&profileRows); err != nil || profileRows != 0 {
-		t.Fatalf("NODE_PROFILE ledger rows after down = %d err=%v, want 0", profileRows, err)
+	if got := p.kindRows("NODE_PROFILE"); got != 0 {
+		t.Fatalf("NODE_PROFILE ledger rows after down = %d, want 0", got)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM network_submissions WHERE kind = 'ACKNOWLEDGEMENT'`).Scan(&kept); err != nil || kept != 1 {
-		t.Fatalf("acknowledgement rows after down = %d err=%v, want it untouched", kept, err)
+	for kind, want := range map[string]int{"ACKNOWLEDGEMENT": 1, "INBOUND_RECEIPT": 1} {
+		if got := p.kindRows(kind); got != want {
+			t.Fatalf("%s ledger rows after down = %d, want %d untouched", kind, got, want)
+		}
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM network_nodes`).Scan(&nodes); err != nil || nodes != 1 {
-		t.Fatalf("node rows after down = %d err=%v, want it untouched", nodes, err)
+	if got := p.count(`SELECT count(*) FROM network_nodes`); got != 1 {
+		t.Fatalf("node rows after down = %d, want it untouched", got)
 	}
-	if err := insertLedger("NODE_PROFILE", "site-1#2#1"); err == nil {
-		t.Fatal("after down the ledger must refuse a NODE_PROFILE row again")
-	}
-	if err := m.Migrate(7); err != nil {
-		t.Fatalf("second up: %v", err)
+	p.expectLedgerKinds([]string{"NODE_PROFILE", "INBOUND_RECEIPT"})
+
+	p.step(1)
+	if got := p.profileTables(); got != 1 {
+		t.Fatalf("profile table after the second up = %d, want 1", got)
 	}
 }

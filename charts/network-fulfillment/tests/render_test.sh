@@ -91,7 +91,10 @@ expect_refusal "analytics without a DSN source" "analytics.database.url or analy
 # exact variable list, tests/test_credential_wiring.py the Secret wiring).
 live=(--set config.networkMode=live
   --set config.networkBaseUrl=https://vendor.invalid
-  --set config.networkVendorId=V-1)
+  --set config.networkVendorId=V-1
+  --set config.inboundReceivingUrl=http://inbound-receiving.invalid
+  --set config.productMasterUrl=http://product-master.invalid
+  --set config.inboundReceiptConsumerGroup=network-fulfillment-inbound-receipts)
 expect_refusal "live without a base URL and a vendor id" "config.networkBaseUrl" "${base[@]}" --set config.networkMode=live
 expect_refusal "live without a vendor id" "config.networkVendorId" "${base[@]}" \
   --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid
@@ -105,11 +108,23 @@ grep -q 'NETWORK_PROFILE_INTERVAL: "5m"' <<<"$live_cm" || fail "live: NETWORK_PR
 # "0" switches the declaration off, so it must reach the process rather than be dropped as empty.
 zero_cm="$(render "${live[@]}" --set config.networkProfileInterval=0 --show-only templates/configmap.yaml)" || fail "live: networkProfileInterval=0 must render"
 grep -q 'NETWORK_PROFILE_INTERVAL: "0"' <<<"$zero_cm" || fail "live: NETWORK_PROFILE_INTERVAL=0 was not rendered"
+grep -q 'INBOUND_RECEIVING_URL: "http://inbound-receiving.invalid"' <<<"$live_cm" || fail "live: INBOUND_RECEIVING_URL is not rendered"
+grep -q 'PRODUCT_MASTER_URL: "http://product-master.invalid"' <<<"$live_cm" || fail "live: PRODUCT_MASTER_URL is not rendered"
+grep -q 'INBOUND_INTAKE_INTERVAL: "30s"' <<<"$live_cm" || fail "live: INBOUND_INTAKE_INTERVAL is not rendered"
+grep -q 'INBOUND_RECEIPT_CONSUMER_GROUP: "network-fulfillment-inbound-receipts"' <<<"$live_cm" || fail "live: INBOUND_RECEIPT_CONSUMER_GROUP is not rendered"
+expect_refusal "live without the receipt consumer group" "config.inboundReceiptConsumerGroup" "${base[@]}" \
+  --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid --set config.networkVendorId=V-1 \
+  --set config.inboundReceivingUrl=http://inbound-receiving.invalid --set config.productMasterUrl=http://product-master.invalid
+expect_refusal "live without the inbound loop's sibling URLs" "config.inboundReceivingUrl" "${base[@]}" \
+  --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid --set config.networkVendorId=V-1
+expect_refusal "live without product-master" "config.productMasterUrl" "${base[@]}" \
+  --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid --set config.networkVendorId=V-1 \
+  --set config.inboundReceivingUrl=http://inbound-receiving.invalid
 live_api="$(render "${live[@]}" --show-only templates/deployment.yaml)"
 [[ "$(env_value "$live_api" NETWORK_MODE)" == "live" ]] || fail "live: NETWORK_MODE must reach the api Deployment"
 if grep -qE '(^  |- name: )NETWORK_(CLIENT|REFRESH)' <<<"$(render "${live[@]}")"; then fail "live mode renders a credential variable that no code reads"; fi
 stub_cm="$(render --show-only templates/configmap.yaml)"
-if grep -qE '^  NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE|PROFILE_INTERVAL):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
+if grep -qE '^  (NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE|PROFILE_INTERVAL)|INBOUND_RECEIVING_URL|PRODUCT_MASTER_URL|INBOUND_INTAKE_INTERVAL|INBOUND_RECEIPT_CONSUMER_GROUP):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
 
 # Tolerated: a legacy kafka.enabled: true, and the explicit real values.
 render --set kafka.enabled=true >/dev/null || fail "kafka.enabled=true (legacy) must still render"

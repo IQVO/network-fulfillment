@@ -136,7 +136,7 @@ sliding the other way on every admitted order. Inherited and recorded: the cache
 ### 4. The revision is monotonic and persisted
 
 `profileRevision` is assigned by this service, per node, from a row in the adapter's
-own table (migration 0007, Decision 7):
+own table (migration 0010, Decision 7):
 
 - It is bumped **only when the content fingerprint changes**. The fingerprint is a hash
   of the canonical profile (zone, slots with days and ceilings, handling time,
@@ -178,12 +178,17 @@ caches, and one site's failure never stops the others. The worker stops on the
 process context and shutdown waits for it, inside the existing 10 second window
 (ADR 0004), so the termination grace floor is unchanged.
 
-### 7. Persistence (migration 0007)
+### 7. Persistence (migration 0010)
 
 `network_node_profiles (site_code PK, revision, attempt, fingerprint, content, updated_at)`
 holds the revision state and the content last declared in fleet terms (for Decision 3's
-ceiling). `network_submissions.kind` accepts `NODE_PROFILE`. Both are adapter-owned, as
-in 0006. A profile that the network never learned of is therefore not lost across
+ceiling). `network_submissions.kind` accepts `NODE_PROFILE`: that widening was made by
+migration 0008 of [ADR 0028](./0028-inbound-loop-seller-shipments-and-receipts.md), which
+admits it ahead of this migration, so 0010 creates the table and leaves the kind check
+alone (re-creating the check here would drop `INBOUND_RECEIPT` from it). The table is
+adapter-owned, as in 0006. This migration was first numbered 0007; develop had taken
+0008 and 0009 for the inbound loop before it landed, and golang-migrate never runs a
+file numbered below a database's current version, so it was renumbered to 0010. A profile that the network never learned of is therefore not lost across
 restarts, and a stale row cannot lower anything.
 
 ### 8. Observability
@@ -239,7 +244,7 @@ and tested in part 1 and are meant to be reused as they are.
   `ackBy` starts to reflect them. A wrong declaration is worse than none: it shortens
   our own acknowledgement window. That is why an incomplete profile (no schedule, no
   cycle time, no capacity figure) is skipped, never filled with a guess.
-- One more migration (0007), one more env variable (`NETWORK_PROFILE_INTERVAL`), no new
+- One more migration (0010), one more env variable (`NETWORK_PROFILE_INTERVAL`), no new
   dependency, one more worker. `NETWORK_MODE` stays `stub` in the cluster; nothing here
   changes a stub deployment.
 - Known residuals: the declared ceilings only rise until the slot itself changes, so a
@@ -346,8 +351,9 @@ and the node view shows the revision), covering the first declaration, the uncha
 content, a restart, a call that never got an answer, both stale paths, a lagging node
 view, retryable and final failures, a refused `PUT`, and a lost revision race. The
 store runs against a real Postgres (testcontainers, build tag `integration`): the
-guarded write, 16 racing writers, a reopen, and migration 0007 up, down and up with
-data in it.
+guarded write, 16 racing writers, a reopen, and migration 0010 up, down and up with
+data in it, and a fresh database migrated through every migration, down one step and up
+again.
 
 **Not verified.** There is no test against a running node-topology or a real network:
 the fake models their documented rule, not their code. No deployment was changed (the

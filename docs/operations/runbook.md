@@ -150,7 +150,7 @@ consumer first.
 
 | Database | Owner | Tables (migration) | Applied by |
 | --- | --- | --- | --- |
-| OLTP (`DATABASE_URL`) | `netfulfil` | `network_orders`, `network_order_lines` (0001), `outbox_events` (0002), state `SUBMITTED` added (0003), `capability_offers` (0004), columns `hold_outcome` and `hold_settled_at` on `network_orders` (0005, ADR 0024), `network_nodes`, `network_purchase_orders`, `network_purchase_order_lines`, `network_submissions`, `network_labels` (0006, ADR 0026; empty in stub mode), `network_node_profiles` and the `NODE_PROFILE` kind of the ledger (0007, ADR 0027; empty in stub mode) | `netfulfil` at startup, and `cmd/mcp` at startup |
+| OLTP (`DATABASE_URL`) | `netfulfil` | `network_orders`, `network_order_lines` (0001), `outbox_events` (0002), state `SUBMITTED` added (0003), `capability_offers` (0004), columns `hold_outcome` and `hold_settled_at` on `network_orders` (0005, ADR 0024), `network_nodes`, `network_purchase_orders`, `network_purchase_order_lines`, `network_submissions`, `network_labels` (0006, ADR 0026; empty in stub mode), `inbound_shipments`, `inbound_poll_cursors`, `gtin_sku_cache` and the `NODE_PROFILE` and `INBOUND_RECEIPT` kinds of the ledger (0008, ADR 0028), `inbound_receipt_events`, `inbound_receipt_cartons`, `inbound_receipt_findings`, `inbound_receipts` (0009, ADR 0028), `network_node_profiles` (0010, ADR 0027; the three live-mode groups are empty in stub mode) | `netfulfil` at startup, and `cmd/mcp` at startup |
 | Analytical (`ANALYTICS_DATABASE_URL`) | `netfulfil-projector` | `analytics_processed_events`, `analytics_consumed_events`, `acknowledgement_rollup` (0001), column `orders_rejected_submission_failed` (0002) | `netfulfil-projector` at startup |
 
 - Migrations ship in the image (`/app/migrations`, `/app/migrations/analytics`)
@@ -575,7 +575,7 @@ stub mode:
 | `network_nodes` | site | `site_code` to the network's `node_id` |
 | `network_purchase_orders` | purchase order | the minted `network_ref` (`NR-...`) to `po_number`, the vendor and node, `required_ship_by`, the network's `ack_by` |
 | `network_purchase_order_lines` | purchase order line | line number, `network_line_ref` (`line-<n>`), listing id, `network_product_id`, ordered quantity |
-| `network_submissions` | `(kind, subject)` | the ledger: `kind` is `ACKNOWLEDGEMENT`, `SHIPMENT_CONFIRMATION`, `NODE_REGISTRATION` or `NODE_PROFILE` (migration 0007), `subject` the network ref (or site code, or `<site>#<revision>#<attempt>` for a profile), the idempotency key, the exact request body, the network's `transaction_id`, `status`, `errors` |
+| `network_submissions` | `(kind, subject)` | the ledger: `kind` is `ACKNOWLEDGEMENT`, `SHIPMENT_CONFIRMATION`, `NODE_REGISTRATION`, `NODE_PROFILE` or `INBOUND_RECEIPT` (migration 0008 admits the last two), `subject` the network ref (or site code, or `<site>#<revision>#<attempt>` for a profile), the idempotency key, the exact request body, the network's `transaction_id`, `status`, `errors` |
 | `network_labels` | package | `label_ref`, `tracking_number`, `carrier` from the label request |
 
 **Ledger statuses.** The row, with its key and exact body, is written before the
@@ -680,7 +680,7 @@ handlingTime)`), so a profile that is wrong is worse than none, and one the loca
 caches cannot support is **not declared**: the site is skipped and the reason is
 logged.
 
-**State (migration 0007).** `network_node_profiles` holds, per site, the revision
+**State (migration 0010).** `network_node_profiles` holds, per site, the revision
 in force, the current attempt at it, the fingerprint of its content and that
 content. The revision only goes up, is persisted before the call that carries it
 and is bumped only when the content changes:
@@ -752,3 +752,39 @@ As read from the GitHub API on 2026-10-09: `develop` requires `lint`, `test`,
 `api-lint`, with `strict: true`. `bdd`, `complexity` and `guide-lint` run on
 every PR and are blocking jobs, but are not in that required list. CI job
 details: [development/testing.md](../development/testing.md#ci).
+
+## The inbound loop (ADR 0028)
+
+Live mode only. Seller shipments polled from the Vendor API become ASNs in
+inbound-receiving. State is in Postgres (`inbound_shipments`, `inbound_poll_cursors`,
+`gtin_sku_cache`, migration 0008); nothing is lost by a restart.
+
+**Where a shipment stands.** `SELECT shipment_ref, asn_number, status, attempts,
+last_error, next_attempt_at FROM inbound_shipments ORDER BY shipped_at;`
+
+- `REGISTERED`: the ASN exists in inbound-receiving. Nothing to do.
+- `PENDING` with `last_error`: not registered yet and retrying with a backoff of one
+  minute doubling to one hour. `GTIN not found` means product-master does not know the
+  GTIN: declare the product (the next due attempt registers the shipment). To retry
+  at once, `UPDATE inbound_shipments SET next_attempt_at = now() WHERE shipment_ref = ...`.
+  `unknown-sku` means inbound-receiving's product projection has not caught up.
+- `REJECTED`: inbound-receiving refused the data (a duplicate SSCC, a carton set that
+  does not add up). Logged at `ERROR` (`inbound shipment rejected, it will not be
+  retried`). Fix the cause upstream, then `UPDATE inbound_shipments SET status = 'PENDING',
+  next_attempt_at = now() WHERE shipment_ref = ...`.
+
+**Signals.** `inbound shipments processed` (Info) and `inbound shipment not registered
+yet, retrying` (Warn) log lines; `circuit_breaker_state{dependency="inbound-receiving"}` and
+`{dependency="product-master"}` on `GET /metrics`.
+
+**The receipt return.** `SELECT asn_number, status, attempts, last_error, next_attempt_at FROM
+inbound_receipts;` shows each closed receipt: `SENT` (the network has it; the transaction id is
+in `network_submissions` where `kind = 'INBOUND_RECEIPT'`), `PENDING` with `last_error` (retrying
+with the same backoff), `REJECTED` (the network refused it for good; `inbound receipt refused, it
+will not be retried` at `ERROR`, with the network's errors in `last_error`; fix the cause, then
+`UPDATE inbound_receipts SET status = 'PENDING', next_attempt_at = now() WHERE asn_number = ...`;
+the stored request is replayed byte for byte). The consumer's group is
+`INBOUND_RECEIPT_CONSUMER_GROUP`: check its lag on `warehouse.inbound-receiving.events`; messages it
+could not handle are on `warehouse.inbound-receiving.events.dlq`. A receipt that never closes is
+not reported: the dock has to close it in inbound-receiving. If the consumer stops on its own the
+process exits with code 1 (`the receipt consumer stopped on its own; shutting down`).

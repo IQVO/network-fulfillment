@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	inboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/inbound/kafka"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
 )
 
@@ -39,6 +41,9 @@ const (
 type liveRig struct {
 	env       e2eEnv
 	network   *vendorFake
+	inbound   *inboundNetwork // the inbound half of the Vendor API, in front of network
+	receive   *fakeInboundReceiving
+	master    *fakeProductMaster
 	planner   *planFake
 	pool      *pgxpool.Pool
 	nodesFile string
@@ -49,6 +54,10 @@ func startLiveRig(t *testing.T, ctx context.Context) *liveRig {
 	env := startE2EContainers(t, ctx)
 	env.dir = t.TempDir()
 	rig := &liveRig{env: env, network: newVendorFake(t, liveVendorID), planner: newPlanFake(t)}
+	rig.inbound = newInboundNetwork(t, rig.network)
+	rig.receive = newFakeInboundReceiving(t)
+	rig.master = newFakeProductMaster(t)
+	e2eCreateTopic(t, ctx, env.brokers[0], inboundkafka.ReceiptTopic)
 	rig.env.omURL = rig.planner.srv.URL
 
 	products := `{"products":[{"networkProductId":"` + liveListing + `","sku":"` + liveSKU + `"}]}`
@@ -77,12 +86,16 @@ func (r *liveRig) start(t *testing.T, ctx context.Context, overrides map[string]
 	t.Helper()
 	r.env.addr = e2eFreeAddr(t)
 	vars := map[string]string{
-		"NETWORK_MODE":             "live",
-		"NETWORK_BASE_URL":         r.network.srv.URL,
-		"NETWORK_VENDOR_ID":        liveVendorID,
-		"NETWORK_NODES_FILE":       "",
-		"NETWORK_SEED_FILE":        "", // refused in live mode
-		"PRODUCT_TRANSLATION_FILE": filepath.Join(r.env.dir, "products.json"),
+		"NETWORK_MODE":                   "live",
+		"NETWORK_BASE_URL":               r.inbound.srv.URL,
+		"INBOUND_RECEIVING_URL":          r.receive.srv.URL,
+		"PRODUCT_MASTER_URL":             r.master.srv.URL,
+		"INBOUND_INTAKE_INTERVAL":        "300ms",
+		"INBOUND_RECEIPT_CONSUMER_GROUP": fmt.Sprintf("nf-inbound-receipts-%d", r.env.suffix),
+		"NETWORK_VENDOR_ID":              liveVendorID,
+		"NETWORK_NODES_FILE":             "",
+		"NETWORK_SEED_FILE":              "", // refused in live mode
+		"PRODUCT_TRANSLATION_FILE":       filepath.Join(r.env.dir, "products.json"),
 	}
 	for k, v := range overrides {
 		vars[k] = v

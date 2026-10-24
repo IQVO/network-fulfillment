@@ -88,6 +88,7 @@ const (
 	KindShipmentConfirmation SubmissionKind = "SHIPMENT_CONFIRMATION"
 	KindNodeRegistration     SubmissionKind = "NODE_REGISTRATION"
 	KindNodeProfile          SubmissionKind = "NODE_PROFILE"
+	KindInboundReceipt       SubmissionKind = "INBOUND_RECEIPT"
 	maxIdempotencyKeyLength                 = 128
 )
 

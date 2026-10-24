@@ -14,7 +14,8 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-// PGStore is the Postgres implementation of Store (migrations 0006 and 0007).
+// PGStore is the Postgres implementation of Store (migrations 0006 and 0010; the
+// tables of the inbound loop, 0008 and 0009, are the postgres package's).
 type PGStore struct {
 	pool   *pgxpool.Pool
 	newRef func() shared.NetworkRef
@@ -206,7 +207,7 @@ func (s *PGStore) SaveLabels(ctx context.Context, ref shared.NetworkRef, labels 
 	})
 }
 
-// ---- the node profile (migration 0007, ADR 0027) ----
+// ---- the node profile (migration 0010, ADR 0027) ----
 
 func (s *PGStore) NodeProfileState(ctx context.Context, siteCode string) (NodeProfileState, bool, error) {
 	st := NodeProfileState{SiteCode: siteCode}

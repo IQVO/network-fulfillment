@@ -63,7 +63,9 @@ runtime mode), the stub gateway and fake ports. Notable suites:
   `gateway_live_profile_test.go` (the revision, restart, retry, stale-revision
   recovery and race paths against a stateful fake Vendor API that judges a revision
   as node-topology does); `pgstore_profile_integration_test.go` (`integration` tag:
-  the guarded monotonic write, 16 racing writers, migration 0007 up/down/up with data);
+  the guarded monotonic write, 16 racing writers, migration 0010 up/down/up with
+  data, and a fresh database migrated through every migration, down one step and up
+  again);
   `processpathcache/schedule_test.go`; `telemetry/node_profile_metrics_test.go`;
   `cmd/netfulfil/profile_test.go` (`NETWORK_PROFILE_INTERVAL`, the wiring and the
   worker's start and stop); and the chart's `render_test.sh` and `test_env_parity.py`.

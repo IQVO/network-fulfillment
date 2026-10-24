@@ -93,7 +93,7 @@ route to the external network, and `NETWORK_MODE` picks its implementation
   derives each site's operational profile (cutoffs, handling time, throughput)
   from the local CPT schedule, cycle-time and capacity caches and declares it with
   `PUT /vendor/nodes/{nodeId}/profile` under a revision this service persists
-  (migration 0007) and never lowers. `SubmitAvailability` is a logged no-op until
+  (migration 0010) and never lowers. `SubmitAvailability` is a logged no-op until
   the inventory feed (ADR 0027 part 2). Without `NETWORK_BASE_URL`
   or `NETWORK_VENDOR_ID` the boot fails, naming each missing one.
 
