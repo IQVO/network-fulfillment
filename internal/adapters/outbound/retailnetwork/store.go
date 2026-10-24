@@ -50,6 +50,30 @@ type Store interface {
 	SaveLabels(ctx context.Context, ref shared.NetworkRef, labels []Label) error
 	// Labels returns the labels of a purchase order, ordered by package number.
 	Labels(ctx context.Context, ref shared.NetworkRef) ([]Label, error)
+
+	// NodeProfileState returns the persisted profile state of a site (ADR 0027).
+	NodeProfileState(ctx context.Context, siteCode string) (NodeProfileState, bool, error)
+	// AdvanceNodeProfile moves the persisted profile state of st.SiteCode to st
+	// ONLY if (Revision, Attempt) is greater than the stored pair, in one guarded
+	// write, and returns the state in force afterwards: st when it advanced, the
+	// stored one when it did not (a lower or equal pair never changes anything).
+	// That guard is what makes the revision monotonic across restarts and across
+	// two replicas. A site with no node is an error (ErrMappingConflict).
+	AdvanceNodeProfile(ctx context.Context, st NodeProfileState) (NodeProfileState, error)
+}
+
+// NodeProfileState is the persisted state of a site's operational profile.
+type NodeProfileState struct {
+	SiteCode string
+	// Revision is the profileRevision in force: it only ever goes up.
+	Revision int
+	// Attempt is the current attempt at that revision (1 for the first). A retry
+	// of the same content after a failure is a new attempt, not a new revision.
+	Attempt int
+	// Fingerprint identifies the content of Revision.
+	Fingerprint string
+	// Content is that content in the fleet's own terms, as JSON (see profile.go).
+	Content []byte
 }
 
 // ErrMappingConflict is returned when a site or node is already mapped to a
@@ -63,6 +87,7 @@ const (
 	KindAcknowledgement      SubmissionKind = "ACKNOWLEDGEMENT"
 	KindShipmentConfirmation SubmissionKind = "SHIPMENT_CONFIRMATION"
 	KindNodeRegistration     SubmissionKind = "NODE_REGISTRATION"
+	KindNodeProfile          SubmissionKind = "NODE_PROFILE"
 	maxIdempotencyKeyLength                 = 128
 )
 
@@ -85,7 +110,7 @@ func (s SubmissionStatus) Terminal() bool { return s == StatusSuccess || s == St
 // Submission is one row of the ledger.
 type Submission struct {
 	Kind           SubmissionKind
-	Subject        string // the NetworkRef, or the site code for a node registration
+	Subject        string // the NetworkRef, the site code for a node registration, <site>#<revision>#<attempt> for a profile
 	IdempotencyKey string
 	Body           []byte // the exact request body, byte for byte
 	TransactionID  string // empty until the 202 was read

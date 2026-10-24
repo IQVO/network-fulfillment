@@ -20,13 +20,14 @@ import (
 // ---- an in-memory Store with the semantics of PGStore ----
 
 type memStore struct {
-	mu     sync.Mutex
-	nodes  map[string]string
-	orders map[shared.NetworkRef]PurchaseOrder
-	byPo   map[string]shared.NetworkRef
-	subs   map[string]Submission
-	labels map[shared.NetworkRef][]Label
-	minted int
+	mu       sync.Mutex
+	nodes    map[string]string
+	orders   map[shared.NetworkRef]PurchaseOrder
+	byPo     map[string]shared.NetworkRef
+	subs     map[string]Submission
+	labels   map[shared.NetworkRef][]Label
+	profiles map[string]NodeProfileState
+	minted   int
 }
 
 var _ Store = (*memStore)(nil)
@@ -34,7 +35,7 @@ var _ Store = (*memStore)(nil)
 func newMemStore() *memStore {
 	return &memStore{
 		nodes: map[string]string{}, orders: map[shared.NetworkRef]PurchaseOrder{}, byPo: map[string]shared.NetworkRef{},
-		subs: map[string]Submission{}, labels: map[shared.NetworkRef][]Label{},
+		subs: map[string]Submission{}, labels: map[shared.NetworkRef][]Label{}, profiles: map[string]NodeProfileState{},
 	}
 }
 
@@ -160,6 +161,29 @@ func (s *memStore) Labels(_ context.Context, ref shared.NetworkRef) ([]Label, er
 func (s *memStore) row(kind SubmissionKind, subject string) (Submission, bool) {
 	sub, ok, _ := s.Submission(context.Background(), kind, subject)
 	return sub, ok
+}
+
+func (s *memStore) NodeProfileState(_ context.Context, site string) (NodeProfileState, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.profiles[site]
+	return st, ok, nil
+}
+
+// AdvanceNodeProfile has PGStore's guard: the pair only ever grows, a site with
+// no node is refused.
+func (s *memStore) AdvanceNodeProfile(_ context.Context, st NodeProfileState) (NodeProfileState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.nodes[st.SiteCode]; !ok {
+		return NodeProfileState{}, fmt.Errorf("%w: site %q has no node", ErrMappingConflict, st.SiteCode)
+	}
+	cur, ok := s.profiles[st.SiteCode]
+	if !ok || st.Revision > cur.Revision || (st.Revision == cur.Revision && st.Attempt > cur.Attempt) {
+		s.profiles[st.SiteCode] = st
+		return st, nil
+	}
+	return cur, nil
 }
 
 // ---- a stateful fake Vendor API on top of client_test.go's newFake ----
