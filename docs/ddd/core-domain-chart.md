@@ -48,9 +48,9 @@ capacity, promises) is owned elsewhere.
   one genuinely new domain concept": advertise
   `min(physicalAvailable, throughputFeasible)` rather than raw stock.
   That is why it is plotted highest. It is still computed from other
-  contexts' facts and is **not yet submitted outward**
-  (`RecomputeCapabilityOffers` never calls `SubmitAvailability`), so it
-  stays below the Core line.
+  contexts' facts and is submitted outward only by a separate worker in live mode
+  (`FeedInventory`, ADR 0027 part 2; `RecomputeCapabilityOffers` itself calls no
+  gateway), so it stays below the Core line.
 
 **Model complexity is low to moderate (x ≈ 0.30–0.40).**
 

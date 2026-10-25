@@ -36,8 +36,8 @@ decides what can be sold belongs to other contexts:
   network's rule set, and the context conforms to it.
 - The one new idea, `CapabilityOffer` (advertise
   `min(physicalAvailable, throughputFeasible)` instead of raw stock), is
-  always on, single-site and not yet sent to the network
-  (`SubmitAvailability` is never called), so it does not differentiate
+  always on, single-site and sent to the network only in live mode, by a
+  separate worker (`FeedInventory`, ADR 0027 part 2), so it does not differentiate
   anything today.
 
 **Not Generic.** It cannot be bought off the shelf: the Anti-Corruption Layer

@@ -215,9 +215,9 @@ mutated. Omitted: nothing else, because the type has no mutators.
 ### 7. Created Events
 
 None. The offer is persisted for `GET /capability-offers` and
-`list_capability_offers` only. It is not published to Kafka and not yet
-submitted to the network (`NetworkGateway.SubmitAvailability` has no
-caller).
+`list_capability_offers`, and read by the inventory feed (`FeedInventory`, ADR 0027
+part 2), which submits it to the network in live mode as part of a per-site feed. It
+is not published to Kafka.
 
 ### 8. Throughput
 
