@@ -16,6 +16,10 @@ context that is **Conformist** to the network upstream and an
 Since ADR 0009 the counterpart is the fleet's own `retail-network` service
 playing the network's role, not a real retailer's API.
 
+## Disclaimer
+
+This project is a domain-driven design study. It is not associated with, endorsed by or affiliated with any company, and it uses no company's code, data, logos or trademarks. All names, figures and examples are illustrative or synthetic.
+
 ## Status
 
 **Implemented, stub-only.** `develop` is promoted to `main`, and `main`

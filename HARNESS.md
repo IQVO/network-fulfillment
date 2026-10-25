@@ -130,9 +130,116 @@ manual content (the `.claude/rules/*.md` skeletons, `.gremlins.yaml`'s
 measured thresholds). See `scripts/new-service.sh`'s own header comment for
 the full instantiation checklist.
 
+## Agent runtime harness (v3): one logic, three runtimes
+
+v3 makes the guides LOAD and puts sensors INSIDE the agent loop, for Claude Code, OpenCode and Codex.
+
+| Piece | File(s) | Cost | Lifecycle position |
+|---|---|---|---|
+| Skills that actually load | `.claude/skills/<name>/SKILL.md` (frontmatter `name`+`description`); `.agents/skills` symlink for Codex; OpenCode scans `.claude/skills` natively | ~50 tokens each until used | on task match |
+| Review skills (explicit, v4: isolated subagents) | `.claude/agents/{code-review,architecture-review,domain-review}.md`, invoked via `/code-review`, `/architecture-review`, `/domain-review` | LLM | on demand, pre-merge |
+| Path-scoped rules | `.claude/rules/*.md` with `paths:`; CLAUDE.md carries a generated pointer table for runtimes without scoping | tokens only when matching files are touched | on edit |
+| Guard + feedback hooks | `scripts/harness/hook.py` (`pre` / `post` / `stop`) + adapters `.claude/settings.json`, `.codex/hooks.json`, `.opencode/plugins/harness.ts` | ms to seconds | every tool call; end of turn |
+| Fast gate | `make check-fast` (fmt-check, vet, arch-test, tests of changed packages) | seconds | Stop hook, before "done" |
+| Guide freshness | `scripts/harness/guide_lint.py` / `make guide-lint` (CI job `guide-lint`) | CPU, ms | PR |
+| Red-sensor loop | `scripts/harness/red_issue.py` steps in scheduled jobs -> `harness:red` issue | none | weekly |
+| Advisory AI review | `.github/workflows/ai-review.yml` (needs `ANTHROPIC_API_KEY`; no-ops without it) | API spend | PR into develop |
+| Health report | `scripts/harness-health.py` (does it WORK: skills load, hooks wired, scheduled runs green) | gh calls | weekly cron |
+
+Rules live ONLY in `hook.py`; the three adapters translate events and cannot drift. The hooks block
+pushes to develop/main, `--no-verify`, force-push, `rm -rf` on non-scratch paths, destructive git, and
+edits to generated files; they feed gofmt/vet findings back after each edit. Every message states
+WHAT / WHY / FIX. `HARNESS_PROTECT_THRESHOLDS=1` (fix-agent mode) additionally forbids editing gates
+(`.gremlins.yaml`, `.golangci.yml`, `internal/architecture/**`, CI). `HARNESS_OFF=1` disables the lot.
+
+Runtime notes (verified against real runs, 2026-10-03):
+- Claude Code: hooks run in any trusted workspace; project `permissions.allow` is ignored until the user
+  accepts the workspace trust dialog once.
+- Codex: project hooks run only after the user trusts them once (`/hooks`), or per run with
+  `--dangerously-bypass-hook-trust` (+ `--enable hooks`, project trusted). Codex may write files through
+  shell heredocs rather than `apply_patch`, so the PostToolUse gofmt feedback can be skipped; the Stop
+  gate (`make check-fast`) and lefthook are the backstop.
+- OpenCode 2.x: the plugin uses `ctx.permission.hook("evaluate")` (deny) and `ctx.tool.hook`; the 1.x
+  `server()` hooks are exported from the same file. The idle -> re-prompt stop gate is best-effort.
+
+Template tooling that must NOT be copied into an instantiated service: `tools/` (`migrate_v3.py`, `migrate_v4.py`,
+`harness_eval.py`/`harness_eval2.py`/`harness_probe.py`, brings/measures an existing repo against the template),
+`benchmarks/wms-bench/` (evaluates repos FROM the template, not a per-repo artifact), `scripts/harness-audit.py`,
+`scripts/harness-health.py`, `scripts/new-service.sh`.
+Run `python3 tools/migrate_v3.py --repo <path>` then `python3 tools/migrate_v4.py --repo <path>` to (re)apply the
+managed files to an existing service; both are idempotent and together are the engine of the weekly template sync.
+
+## Config sensors (`repo_lint`) and the incident protocol
+
+`scripts/harness/repo_lint.py` (stdlib only, runs in the `guide-lint` CI job) checks the configuration mistakes that
+reached CI in practice: **R1** workflow `working-directory`/`cache-dependency-path` that do not exist (checkout-path
+aware), **R2** `needs:` naming jobs that do not exist, **R3** Dependabot entries that cannot work (missing directory or
+manifest; an npm tree with a `file:` dependency outside the repo), **R4** a stale GitHub owner in registry/docs/chart
+URLs, **R5** unsubstituted `{{PLACEHOLDER}}`s, **R6** missing Dependabot coverage, **R7** repo scripts a workflow runs
+from the wrong directory, **R8** a docs workflow that does not build on `pull_request` (or whose Pages deploy job is not
+gated off PRs), **R9** a chart test (`charts/<c>/tests/*.sh`, `test_*.py`) that no workflow runs (directly, through a
+`make` target CI runs, or from another chart test), **R10** a chart ConfigMap that no Deployment/workload in the chart
+references (`envFrom.configMapRef`, `configMapKeyRef`, `configMap` volume), **R11** a coverage package set defined
+outside the Makefile (a workflow `run:` line passing `-coverpkg` itself) or a Makefile `coverage` gate that no workflow
+runs (directly or through a target that has `coverage` as a prerequisite; in this repository `ci.yml.template` counts
+as a workflow). `# repo-lint: ignore` suppresses one line
+(say why; for R9 put it in the first lines of the test, for R10 on the ConfigMap's `kind:` line). Tests:
+`scripts/harness/test_repo_lint.py`; the cases named `incident` are the real incidents and must keep failing the lint.
+`ci.yml.template` ships the matching `chart-tests` job (every chart test, PyYAML installed hash-pinned from
+`.github/requirements/chart-tests.txt`, a test printing SKIP fails), and its `test` job runs `make coverage`, so the
+coverage scope and threshold live only in the Makefile (`COVERAGE_PKGS`, `COVERAGE_THRESHOLD`).
+
+**Incident protocol.** Every failure that was not caught before CI ends with: the fix, a sensor or guide that would have
+caught it, that sensor rolled out to the whole fleet, and a row in [INCIDENTS.md](INCIDENTS.md). A row with no guard is
+an open gap and says so. A check whose message needed a human to explain it is not done: sensor output is a prompt, so
+it must state WHAT, WHY and FIX.
+
 ## Versioning
 
 This is `harness-template: v1`. Record that string in each instantiated
 repo's `AGENTS.md` so a fleet-wide audit (see the `harness-audit` tool in
 the companion `warehouse-systems-fleet-ops` skill) can tell which repos are
 behind the template and by how much.
+
+## Harness² comparison (v4)
+
+A published research paper's Harness² (arXiv:2610.14224, "Recursive Agent Harnessing for an Open World")
+edits an agent's own harness DURING a task (Propose-Probe-Compose: propose an edit, probe it
+against the same task with no ground truth needed, compose the winner) and keeps a persistent
+"improvement harness" of adopted edits across tasks. This template's v1-v3 harness only ever
+changed on a human's cadence: an incident happens, a human writes the INCIDENTS.md row and the
+fitness test, `migrate_v3.py` rolls it out. v4 closes three concrete gaps that comparison
+surfaced, each scoped to something this fleet had ALREADY identified as a problem (not a
+speculative import of the paper's generality):
+
+- **No task-level recursion.** EVALS.md rounds 2-3 found "a docs convention that is only a
+  sentence in a skill is followed about half the time by everyone" and could not tell whether
+  rewording the guide would change that, or whether to stop spending on prose and build a sensor
+  instead (its own stated conclusion). `tools/harness_probe.py` answers exactly that question with
+  real `claude -p` runs scored by `harness_eval2.py`'s existing gates: baseline wording vs a
+  candidate, same task, interleaved — Compose prints adopt/keep/inconclusive, never a guess.
+- **Harnessing-level recursion was 100% manual.** `red_issue.py --draft` (new) drafts the FIRST
+  PASS of an INCIDENTS.md row and a `t.Skip`-marked fitness-test stub from a failing scheduled
+  job, and opens it as a draft PR — mirroring Harness²'s "experience reflector" for the drafting
+  step only. It never fills in root cause or a real assertion, and never merges; a human (or the
+  existing fix agent) still does the adoption Harness² automates, because hard architecture calls
+  in this fleet stay human decisions.
+- **Two of the paper's 8 harness components were missing.** `.claude/agents/*.md` promotes
+  `code-review`/`architecture-review`/`domain-review` from prompted skills to isolated-context
+  subagents (the "subagents" component); `.claude/memory/MEMORY.md` gives each repo a durable,
+  repo-specific heuristics file (the "memory" component) distinct from INCIDENTS.md (incidents)
+  and EVALS.md (measured harness claims).
+
+What v4 deliberately does NOT import: Harness²'s executor posture. Their README runs with the
+Codex sandbox disabled and network access unrestricted, because the paper needs unconstrained
+agent behaviour to measure. This fleet's `hook.py` defaults closed (blocks destructive git,
+`--no-verify`, edits to generated files/gates) and stays that way — loosening it toward Harness²'s
+benchmark posture would trade a measured research convenience for a production-safety regression
+this fleet does not need.
+
+`benchmarks/wms-bench/` is the evaluation-rigor half of the comparison: Harness² tracks scores
+per harness config across JobBench/LAB/WorkBuddy-Bench; this fleet's EVALS.md never had a fixed,
+repeatable suite to do the equivalent across harness-template versions. `benchmarks/wms-bench/`
+is seeded with 3 tasks (reusing `harness_eval.py`/`harness_eval2.py`'s prompts and gates
+unchanged) and a `run.py` that names results by the target repo's version marker, so v3-vs-v4
+(and v4-vs-v5) becomes a diff of two JSONL files instead of a fresh ad hoc round each time.
