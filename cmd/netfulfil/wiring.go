@@ -56,6 +56,8 @@ func loadNetworkNodes(logger *slog.Logger, cfg networkConfig) ([]retailnetwork.N
 // the pool. The sites it converges onto network nodes are SITE_ID plus every
 // site of the node definitions. The client's timeout, retry and breaker
 // behaviour is the one ADR 0026 Decision 8 fixes: it has no environment knob.
+// The product dictionary is how it finds the listing a SKU is fed under at a
+// site (ADR 0027 §10); without it the gateway could not feed inventory.
 //
 // Refusing to boot on a bad live configuration is deliberate. A deployment that
 // asked for a real network and silently got a stub would look healthy while
@@ -64,6 +66,7 @@ func wireGateway(
 	logger *slog.Logger,
 	cfg networkConfig,
 	nodes []retailnetwork.NodeDefinition,
+	listings retailnetwork.ListingResolver,
 	pool *pgxpool.Pool,
 	breaker resilience.StateRecorder,
 ) (ports.NetworkGateway, error) {
@@ -77,6 +80,7 @@ func wireGateway(
 		Sites:    []string{string(siteId())},
 		Nodes:    nodes,
 		Store:    retailnetwork.NewPGStore(pool),
+		Listings: listings,
 		Logger:   logger,
 		Recorder: breaker,
 	})
@@ -118,7 +122,12 @@ func seedStubDemand(gateway ports.NetworkGateway, logger *slog.Logger) error {
 // — the inbound leg looks alive while answering the network in the
 // negative every time, and the cause is invisible because refusing
 // unknown products is also correct behaviour.
-func loadProductTranslation(logger *slog.Logger) (ports.ProductTranslation, error) {
+//
+// The one dictionary serves three readers, each through its own narrow port:
+// the translation of a network product to a SKU (inbound), the SKUs a site
+// lists (the inventory feed's catalogue) and the listing a SKU is fed under
+// there (the live gateway). It is read-only once loaded.
+func loadProductTranslation(logger *slog.Logger) (*producttranslation.Dictionary, error) {
 	translation := producttranslation.New()
 	path := os.Getenv("PRODUCT_TRANSLATION_FILE")
 	if path == "" {

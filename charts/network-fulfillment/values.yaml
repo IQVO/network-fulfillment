@@ -229,6 +229,15 @@ config:
   # time, so leave it on unless the network is being declared to by something else.
   networkProfileInterval: "5m"
 
+  # NETWORK_INVENTORY_INTERVAL, how often the inventory feed is planned from the
+  # capability offers the last recompute pass persisted and, when its content
+  # changed, sent to the network (ADR 0027 part 2). A Go duration; "0" switches the
+  # feed off. An unchanged feed is still held back by the service (repeated at most
+  # hourly), so this is the cadence of looking, not of sending. Only read when
+  # config.networkMode is "live"; rendered only then. With the feed off the network
+  # keeps selling against whatever stock it was last told.
+  networkInventoryInterval: "5m"
+
   # INBOUND_RECEIVING_URL and PRODUCT_MASTER_URL, the REST base URLs of the two
   # fleet contexts the inbound loop calls (ADR 0028): it registers an ASN for
   # each seller shipment and resolves each GTIN to a SKU. Only read when

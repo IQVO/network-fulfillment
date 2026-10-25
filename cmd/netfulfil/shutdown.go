@@ -42,6 +42,7 @@ func serve(
 	orphanHolds *usecases.SweepOrphanedHolds,
 	reconcile *usecases.ReconcileSubmittedOrders,
 	profiles *profileWorker,
+	inventory *inventoryWorker,
 	inbound *poller.Poller,
 	relay *postgres.OutboxRelay,
 	readiness *inboundhttp.Readiness,
@@ -65,6 +66,7 @@ func serve(
 
 	pollerDone := startPoller(ctx, inbound)
 	profilesDone := startProfileWorker(ctx, logger, profiles)
+	inventoryDone := startInventoryWorker(ctx, logger, inventory)
 
 	relayCtx, stopRelay := context.WithCancel(ctx)
 	defer stopRelay()
@@ -91,7 +93,7 @@ func serve(
 	}
 	stop() // cancels the poller and tickers when the cause was not a signal
 
-	shutdownGracefully(logger, srv, readiness, stopRelay, relayDone, pollerDone, profilesDone, capabilityCacheDone)
+	shutdownGracefully(logger, srv, readiness, stopRelay, relayDone, pollerDone, profilesDone, inventoryDone, capabilityCacheDone)
 	return exitCode
 }
 
@@ -202,7 +204,7 @@ func shutdownGracefully(
 	srv *http.Server,
 	readiness *inboundhttp.Readiness,
 	stopRelay context.CancelFunc,
-	relayDone, pollerDone, profilesDone <-chan struct{},
+	relayDone, pollerDone, profilesDone, inventoryDone <-chan struct{},
 	capabilityCacheDone []chan struct{},
 ) {
 	readiness.SetNotReady()
@@ -227,6 +229,11 @@ func shutdownGracefully(
 	// write is a ledger row first and an HTTP call second, so an in-flight
 	// declaration that is cut off is resumed under the same key by the next boot.
 	waitStopped(shutdownCtx, logger, profilesDone, "node profile worker did not stop before the shutdown deadline")
+
+	// The inventory feed worker (ADR 0027 part 2) is cancelled the same way. Its
+	// feed is a ledger row first and an HTTP call second, so an in-flight feed
+	// that is cut off is resumed under the same key by the next boot.
+	waitStopped(shutdownCtx, logger, inventoryDone, "inventory feed worker did not stop before the shutdown deadline")
 
 	// capabilityCacheDone holds the two Kafka cache consumers' Run channels.
 	for _, done := range capabilityCacheDone {

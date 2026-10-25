@@ -108,6 +108,11 @@ grep -q 'NETWORK_PROFILE_INTERVAL: "5m"' <<<"$live_cm" || fail "live: NETWORK_PR
 # "0" switches the declaration off, so it must reach the process rather than be dropped as empty.
 zero_cm="$(render "${live[@]}" --set config.networkProfileInterval=0 --show-only templates/configmap.yaml)" || fail "live: networkProfileInterval=0 must render"
 grep -q 'NETWORK_PROFILE_INTERVAL: "0"' <<<"$zero_cm" || fail "live: NETWORK_PROFILE_INTERVAL=0 was not rendered"
+grep -q 'NETWORK_INVENTORY_INTERVAL: "5m"' <<<"$live_cm" || fail "live: NETWORK_INVENTORY_INTERVAL must default to 5m (ADR 0027 part 2)"
+# Same for the inventory feed: "0" switches it off and has to reach the process, and it is its own knob.
+inv_cm="$(render "${live[@]}" --set config.networkInventoryInterval=0 --show-only templates/configmap.yaml)" || fail "live: networkInventoryInterval=0 must render"
+grep -q 'NETWORK_INVENTORY_INTERVAL: "0"' <<<"$inv_cm" || fail "live: NETWORK_INVENTORY_INTERVAL=0 was not rendered"
+grep -q 'NETWORK_PROFILE_INTERVAL: "5m"' <<<"$inv_cm" || fail "live: switching the inventory feed off must not touch NETWORK_PROFILE_INTERVAL"
 grep -q 'INBOUND_RECEIVING_URL: "http://inbound-receiving.invalid"' <<<"$live_cm" || fail "live: INBOUND_RECEIVING_URL is not rendered"
 grep -q 'PRODUCT_MASTER_URL: "http://product-master.invalid"' <<<"$live_cm" || fail "live: PRODUCT_MASTER_URL is not rendered"
 grep -q 'INBOUND_INTAKE_INTERVAL: "30s"' <<<"$live_cm" || fail "live: INBOUND_INTAKE_INTERVAL is not rendered"
@@ -124,7 +129,7 @@ live_api="$(render "${live[@]}" --show-only templates/deployment.yaml)"
 [[ "$(env_value "$live_api" NETWORK_MODE)" == "live" ]] || fail "live: NETWORK_MODE must reach the api Deployment"
 if grep -qE '(^  |- name: )NETWORK_(CLIENT|REFRESH)' <<<"$(render "${live[@]}")"; then fail "live mode renders a credential variable that no code reads"; fi
 stub_cm="$(render --show-only templates/configmap.yaml)"
-if grep -qE '^  (NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE|PROFILE_INTERVAL)|INBOUND_RECEIVING_URL|PRODUCT_MASTER_URL|INBOUND_INTAKE_INTERVAL|INBOUND_RECEIPT_CONSUMER_GROUP):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
+if grep -qE '^  (NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE|PROFILE_INTERVAL|INVENTORY_INTERVAL)|INBOUND_RECEIVING_URL|PRODUCT_MASTER_URL|INBOUND_INTAKE_INTERVAL|INBOUND_RECEIPT_CONSUMER_GROUP):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
 
 # Tolerated: a legacy kafka.enabled: true, and the explicit real values.
 render --set kafka.enabled=true >/dev/null || fail "kafka.enabled=true (legacy) must still render"

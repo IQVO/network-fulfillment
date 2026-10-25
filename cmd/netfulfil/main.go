@@ -46,6 +46,7 @@ type infra struct {
 	gateway     ports.NetworkGateway
 	mode        retailnetwork.Mode
 	translation ports.ProductTranslation
+	catalogue   ports.FeedCatalogue
 	orders      ports.NetworkOrderRepo
 	pool        *pgxpool.Pool
 	offers      ports.CapabilityOfferRepo
@@ -128,6 +129,7 @@ func run(ctx context.Context) int {
 	reconcile := wireReconcile(in.orders, in.gateway, planner, eventPublisher, in.pool)
 	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
 	profiles := wireNodeProfiles(logger, in.mode, in.gateway, in.recompute.PathCap, in.recompute.Capacity)
+	inventory := wireInventoryFeed(logger, in.mode, in.gateway, in.catalogue, in.offers)
 
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
@@ -158,9 +160,9 @@ func run(ctx context.Context) int {
 	}
 	defer loop.stop(stopLoop, inboundLoopStopBudget)
 
-	// The node profile worker (ADR 0027), also live mode only, runs inside serve
-	// with the poller and the sweeps.
-	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inbound, relay, readiness, in.recompute, in.capDone)
+	// The node profile worker (ADR 0027) and the inventory feed worker (part 2),
+	// also live mode only, run inside serve with the poller and the sweeps.
+	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inventory, inbound, relay, readiness, in.recompute, in.capDone)
 	if loop.failed() && code == 0 {
 		code = 1 // a dead receipt consumer is a failure, whatever the signal said
 	}
@@ -184,11 +186,12 @@ func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig, breaker
 		return infra{}, nil, false
 	}
 
-	in.translation, err = loadProductTranslation(logger)
+	dictionary, err := loadProductTranslation(logger)
 	if err != nil {
 		logger.Error("cannot load product translation", "err", err)
 		return infra{}, nil, false
 	}
+	in.translation, in.catalogue = dictionary, dictionary
 
 	orders, pool, closeOrders, err := wireOrders(context.Background(), logger, cfg.databaseURL)
 	if err != nil {
@@ -203,7 +206,7 @@ func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig, breaker
 	// The gateway comes after the pool because the live one keeps its
 	// identifier maps and submission ledger in this service's Postgres
 	// (ADR 0026 Decision 4; ADR 0025: live mode never runs without it).
-	gateway, err := wireGateway(logger, cfg.network, nodes, pool, breaker)
+	gateway, err := wireGateway(logger, cfg.network, nodes, dictionary, pool, breaker)
 	if err != nil {
 		logger.Error("cannot wire network gateway", "mode", cfg.network.mode, "err", err)
 		closeOrders()
