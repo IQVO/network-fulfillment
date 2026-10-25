@@ -12,6 +12,14 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
+// wireSupplyLoop builds the two workers of the supply loop (ADR 0027), the node
+// profile and the inventory feed. Each is nil unless the gateway is live and its
+// own interval does not switch it off.
+func wireSupplyLoop(logger *slog.Logger, in infra) (*profileWorker, *inventoryWorker) {
+	return wireNodeProfiles(logger, in.mode, in.gateway, in.recompute.PathCap, in.recompute.Capacity),
+		wireInventoryFeed(logger, in.mode, in.gateway, in.catalogue, in.offers)
+}
+
 // inventoryWorker is the inventory feed (ADR 0027 part 2) ready to be driven:
 // the use case and how often. A nil *inventoryWorker means there is nothing to
 // run.

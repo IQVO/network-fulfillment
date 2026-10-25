@@ -96,22 +96,32 @@ func TestPlanInventoryFeeds_CompleteOnlyWhenEveryListedSkuHasAFreshOffer(t *test
 			if tc.wantFeeds == 0 {
 				return
 			}
-			feed := plan.Feeds[0]
-			if feed.Complete != tc.wantComplete {
-				t.Errorf("Complete = %v, want %v", feed.Complete, tc.wantComplete)
-			}
-			var got []shared.SKU
-			for _, l := range feed.Lines {
-				got = append(got, l.SKU)
-			}
-			if !equalSKUs(got, tc.wantSKUs) {
-				t.Errorf("lines = %v, want %v (sorted)", got, tc.wantSKUs)
-			}
-			if feed.SiteId != site || feed.Part != 1 || feed.Parts != 1 || feed.Fingerprint == "" {
-				t.Errorf("feed header = %+v", feed)
-			}
+			expectOneFeed(t, plan.Feeds[0], site, tc.wantComplete, tc.wantSKUs)
 		})
 	}
+}
+
+// expectOneFeed checks the single part a pass came to: whose and which part it is,
+// whether it is complete and exactly which SKUs it carries, sorted.
+func expectOneFeed(t *testing.T, feed contract.InventoryFeed, site shared.SiteId, wantComplete bool, wantSKUs []shared.SKU) {
+	t.Helper()
+	if feed.Complete != wantComplete {
+		t.Errorf("Complete = %v, want %v", feed.Complete, wantComplete)
+	}
+	if got := skusOfLines(feed.Lines); !equalSKUs(got, wantSKUs) {
+		t.Errorf("lines = %v, want %v (sorted)", got, wantSKUs)
+	}
+	if feed.SiteId != site || feed.Part != 1 || feed.Parts != 1 || feed.Fingerprint == "" {
+		t.Errorf("feed header = %+v", feed)
+	}
+}
+
+func skusOfLines(lines []contract.FeedLine) []shared.SKU {
+	var out []shared.SKU
+	for _, l := range lines {
+		out = append(out, l.SKU)
+	}
+	return out
 }
 
 func equalSKUs(a, b []shared.SKU) bool {
@@ -172,7 +182,7 @@ func TestPlanInventoryFeeds_SplitsOver5000LinesIntoPartialFeeds(t *testing.T) {
 			if len(plan.Feeds) != len(tc.wantParts) {
 				t.Fatalf("%d feeds, want %d", len(plan.Feeds), len(tc.wantParts))
 			}
-			next := 0
+			var fed []shared.SKU
 			for i, f := range plan.Feeds {
 				if len(f.Lines) != tc.wantParts[i] || f.Part != i+1 || f.Parts != len(tc.wantParts) || f.Complete != tc.complete {
 					t.Errorf("part %d: %d lines part %d/%d complete=%v; want %d lines, %d/%d, complete=%v",
@@ -181,15 +191,10 @@ func TestPlanInventoryFeeds_SplitsOver5000LinesIntoPartialFeeds(t *testing.T) {
 				if !f.AsOf.Equal(passAt) {
 					t.Errorf("part %d as of %v, want the pass's %v", i+1, f.AsOf, passAt)
 				}
-				for _, l := range f.Lines {
-					if l.SKU != skus[next] {
-						t.Fatalf("part %d: line %v out of order, want %v", i+1, l.SKU, skus[next])
-					}
-					next++
-				}
+				fed = append(fed, skusOfLines(f.Lines)...)
 			}
-			if next != tc.lines {
-				t.Errorf("%d lines fed, want all %d", next, tc.lines)
+			if !equalSKUs(fed, skus) {
+				t.Errorf("%d lines fed across the parts, want all %d once each in order", len(fed), tc.lines)
 			}
 		})
 	}

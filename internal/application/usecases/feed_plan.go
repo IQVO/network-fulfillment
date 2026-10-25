@@ -135,9 +135,9 @@ func splitFeeds(site shared.SiteId, asOf time.Time, allFresh bool, lines []contr
 // it says (a complete feed zeroes what it omits), so it is hashed with the lines.
 func feedFingerprint(complete bool, lines []contract.FeedLine) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "complete=%t\n", complete)
+	_, _ = fmt.Fprintf(h, "complete=%t\n", complete) // a hash.Hash never fails to write
 	for _, l := range lines {
-		fmt.Fprintf(h, "%s\x00%d\x00%s\n", l.SKU, l.Quantity, l.Basis)
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00%s\n", l.SKU, l.Quantity, l.Basis)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

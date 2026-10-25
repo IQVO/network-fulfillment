@@ -134,23 +134,29 @@ func TestSubmitInventoryFeed_TheFirstFeedIsOnePostWithItsLedgerRowKeyAndExactBod
 	if posts[0].IdemKey != "nf-inventory-FC-1-2026-10-24T12:00:00Z" {
 		t.Errorf("key = %q", posts[0].IdemKey)
 	}
-	d := decodeFeed(t, posts[0].Body)
+	expectFirstFeedBody(t, decodeFeed(t, posts[0].Body))
+	row, ok := f.store.row(KindInventory, "FC-1#2026-10-24T12:00:00Z")
+	if !ok || row.Status != StatusSuccess || row.IdempotencyKey != posts[0].IdemKey || string(row.Body) != posts[0].Body || row.TransactionID == "" {
+		t.Fatalf("ledger row = %+v ok=%v, want SUCCESS with the key and the exact body that were sent", row, ok)
+	}
+}
+
+// expectFirstFeedBody checks the body of the first feed: whose it is, that it is a
+// full update as of the pass, and its three lines in order.
+func expectFirstFeedBody(t *testing.T, d inventoryFeedRequestDTO) {
+	t.Helper()
 	want := []inventoryLineDTO{
 		{ListingID: "L-A", AvailableQty: 5, Basis: "PHYSICAL"},
 		{ListingID: "L-B", AvailableQty: 2, Basis: "THROUGHPUT_CONSTRAINED"},
 		{ListingID: "L-C", AvailableQty: 0, Basis: "PHYSICAL"},
 	}
-	if d.VendorID != "V-WS" || d.NodeID != "N-1" || !d.FullUpdate || !d.AsOf.Equal(asOf0) || len(d.Lines) != 3 {
+	if d.VendorID != "V-WS" || d.NodeID != "N-1" || !d.FullUpdate || !d.AsOf.Equal(asOf0) || len(d.Lines) != len(want) {
 		t.Fatalf("body = %+v", d)
 	}
 	for i, l := range want {
 		if d.Lines[i] != l {
 			t.Errorf("line %d = %+v, want %+v", i, d.Lines[i], l)
 		}
-	}
-	row, ok := f.store.row(KindInventory, "FC-1#2026-10-24T12:00:00Z")
-	if !ok || row.Status != StatusSuccess || row.IdempotencyKey != posts[0].IdemKey || string(row.Body) != posts[0].Body || row.TransactionID == "" {
-		t.Fatalf("ledger row = %+v ok=%v, want SUCCESS with the key and the exact body that were sent", row, ok)
 	}
 }
 

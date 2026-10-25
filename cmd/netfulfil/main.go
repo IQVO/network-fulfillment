@@ -128,8 +128,7 @@ func run(ctx context.Context) int {
 	receive, sweep, rejectOverdue := wireUseCases(in.orders, in.gateway, planner, in.translation, eventPublisher, in.pool)
 	reconcile := wireReconcile(in.orders, in.gateway, planner, eventPublisher, in.pool)
 	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
-	profiles := wireNodeProfiles(logger, in.mode, in.gateway, in.recompute.PathCap, in.recompute.Capacity)
-	inventory := wireInventoryFeed(logger, in.mode, in.gateway, in.catalogue, in.offers)
+	profiles, inventory := wireSupplyLoop(logger, in)
 
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
