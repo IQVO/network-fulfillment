@@ -427,3 +427,36 @@ differs from or adds to them:
    chart renders `NETWORK_INVENTORY_INTERVAL` from `config.networkInventoryInterval`, in live
    mode only. There is no metric for the feed: its signals are the logs and the `INVENTORY`
    ledger rows (runbook, "The inventory feed").
+
+**Evidence.** The request body, the route, the two bases and the transaction kind are
+checked against the vendored `testdata/vendor-connectivity-openapi.yaml` (contract test:
+a complete feed, a one-line partial feed, bodies the schema must reject, the DTOs against
+the schema's properties and required fields, and the failed-transaction samples that carry
+`ErrListingNotOnNode` with its line path and `ErrFeedAlreadyApplied`). The gateway runs
+against the stateful fake Vendor API of part 1 extended with the inventory route
+(`gateway_live_inventory_test.go`): the ledger row and key, a restart, the hourly repeat,
+a split feed, a refused listing left out and tried again after its 24 hours, a crash between the
+ledger row and the call. The use case and
+its planning are table tests. Against a real Postgres (testcontainers, build tag
+`integration`) the feed state and the refused listings are written, refreshed and read
+after a reopen, the ledger accepts `INVENTORY`, and migration 0011 goes up, down and up
+with a ledger row of each earlier kind, a node and a profile in it (the rebuilt check must
+keep admitting all five), next to a fresh database migrated through every migration, down one
+step and up again. Through the real entry point (`run(ctx)`, a real Postgres and Kafka, the
+fake Vendor API judging a feed as the network does, a fake inventory-storage):
+both workers switched off with `0` send nothing; one run declares the profile and feeds the
+offers of a pass, complete and with listed SKUs only; later passes, and a restart, send
+nothing while the feed is unchanged and under an hour old; after an hour the same feed is
+repeated; a changed figure is sent at once; and a listing the node does not carry fails the
+first feed at its line, applies nothing, is left out of the next feed and stays out after a
+restart.
+
+**Not verified.** Nothing ran against the real network or offer-availability: the fake models
+the documented rules (the listing check, the zeroing of a full feed), not their code, and
+`ErrFeedAlreadyApplied` is taken from the spec's description, not from a sample of the live
+service. No deployment was changed (the cluster stays `NETWORK_MODE=stub`), so the worker has
+not fed a real site. The feed reads the offers of the last recompute pass without a lock
+against the next one: a read that falls in the middle of a pass finds some SKUs of the new pass
+and some of the old, and sends a partial feed (never a complete one with a stale figure); the
+next pass of the worker completes it. A feed above 5000 lines is split and tested as a plan
+and in the gateway, not through the real entry point.

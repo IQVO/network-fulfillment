@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -209,6 +210,11 @@ func (p *ledgerProbe) profileTables() int {
 	return p.count(`SELECT count(*) FROM information_schema.tables WHERE table_name = 'network_node_profiles'`)
 }
 
+func (p *ledgerProbe) inventoryTables() int {
+	p.t.Helper()
+	return p.count(`SELECT count(*) FROM information_schema.tables WHERE table_name IN ('network_inventory_feeds', 'network_rejected_listings')`)
+}
+
 func (p *ledgerProbe) kindRows(kind string) int {
 	p.t.Helper()
 	return p.count(`SELECT count(*) FROM network_submissions WHERE kind = $1`, kind)
@@ -237,6 +243,16 @@ func (p *ledgerProbe) expectLedgerKinds(admit []string) {
 	}
 	if _, err := p.pool.Exec(p.ctx, `DELETE FROM network_submissions WHERE subject LIKE 'probe-%'`); err != nil {
 		p.t.Fatalf("remove probes: %v", err)
+	}
+}
+
+// expectLedgerRefuses checks that the ledger does not admit any of the kinds.
+func (p *ledgerProbe) expectLedgerRefuses(kinds ...string) {
+	p.t.Helper()
+	for _, kind := range kinds {
+		if err := p.insertLedger(kind, "probe-"+kind); err == nil {
+			p.t.Fatalf("version %d: the ledger must not admit %s yet", p.version(), kind)
+		}
 	}
 }
 
@@ -275,20 +291,33 @@ func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
 	if p.profileTables() != 1 {
 		t.Fatal("after Up the node profile table must exist (migration 0010)")
 	}
-	all := []string{"ACKNOWLEDGEMENT", "SHIPMENT_CONFIRMATION", "NODE_REGISTRATION", "NODE_PROFILE", "INBOUND_RECEIPT"}
-	p.expectLedgerKinds(all)
+	if p.inventoryTables() != 2 {
+		t.Fatal("after Up the inventory feed tables must exist (migration 0011)")
+	}
+	five := []string{"ACKNOWLEDGEMENT", "SHIPMENT_CONFIRMATION", "NODE_REGISTRATION", "NODE_PROFILE", "INBOUND_RECEIPT"}
+	six := append(slices.Clone(five), "INVENTORY")
+	p.expectLedgerKinds(six)
 
+	// One step down is 0011: it takes INVENTORY and its tables with it and leaves
+	// the five kinds of 0008 admitted.
 	p.step(-1)
 	if got := p.version(); got != top-1 {
 		t.Fatalf("version after one step down = %d, want %d", got, top-1)
 	}
-	p.expectLedgerKinds(all)
+	if p.inventoryTables() != 0 {
+		t.Fatal("after one step down the inventory feed tables must be gone")
+	}
+	p.expectLedgerKinds(five)
+	p.expectLedgerRefuses("INVENTORY")
 
 	p.step(1)
 	if got := p.version(); got != top {
 		t.Fatalf("version after the second up = %d, want %d", got, top)
 	}
-	p.expectLedgerKinds(all)
+	if p.inventoryTables() != 2 {
+		t.Fatal("after the second up the inventory feed tables must exist")
+	}
+	p.expectLedgerKinds(six)
 }
 
 // TestMigration0010_UpDownUp proves the node profile migration both ways on a
@@ -356,4 +385,88 @@ func TestMigration0010_UpDownUp(t *testing.T) {
 	if got := p.profileTables(); got != 1 {
 		t.Fatalf("profile table after the second up = %d, want 1", got)
 	}
+}
+
+// TestMigration0011_UpDownUp proves the inventory feed migration both ways on a
+// database that holds a ledger row of every kind 0008 admits, a node and a profile.
+// The ledger's kind check is rebuilt by 0011, not widened: an up that forgot one of
+// the five kinds would fail here on the rows that are already there, and a down
+// that kept INVENTORY in the check, or did not remove its rows first, would fail
+// on the way back. Everything the migration does not own survives it.
+func TestMigration0011_UpDownUp(t *testing.T) {
+	p := newLedgerProbe(t)
+	p.migrateTo(10)
+
+	if got := p.inventoryTables(); got != 0 {
+		t.Fatalf("inventory tables before 0011 = %d, want 0", got)
+	}
+	five := []string{"ACKNOWLEDGEMENT", "SHIPMENT_CONFIRMATION", "NODE_REGISTRATION", "NODE_PROFILE", "INBOUND_RECEIPT"}
+	p.expectLedgerKinds(five)
+	p.expectLedgerRefuses("INVENTORY")
+	for _, kind := range five {
+		if err := p.insertLedger(kind, "keep-"+kind); err != nil {
+			t.Fatalf("seed %s: %v", kind, err)
+		}
+	}
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_nodes (site_code, node_id) VALUES ('site-1', 'N-1')`); err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_node_profiles (site_code, revision, fingerprint, content) VALUES ('site-1', 1, 'a', '{}')`); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	p.migrateTo(11)
+	if got := p.inventoryTables(); got != 2 {
+		t.Fatalf("inventory tables after 0011 = %d, want 2", got)
+	}
+	for _, kind := range five {
+		if got := p.kindRows(kind); got != 1 {
+			t.Fatalf("%s ledger rows after 0011 = %d, want the seeded one (the kind check must stay a superset of 0008's)", kind, got)
+		}
+	}
+	p.expectLedgerKinds(append(slices.Clone(five), "INVENTORY"))
+	if err := p.insertLedger("INVENTORY", "site-1#2026-10-25T12:00:00Z"); err != nil {
+		t.Fatalf("after 0011 the ledger must accept INVENTORY: %v", err)
+	}
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_inventory_feeds (site_code, part, subject, fingerprint, as_of) VALUES ('site-1', 1, 's', 'f', now())`); err != nil {
+		t.Fatalf("seed a feed state: %v", err)
+	}
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_rejected_listings (site_code, listing_id, reason, rejected_at) VALUES ('site-1', 'LST-B', 'r', now())`); err != nil {
+		t.Fatalf("seed a rejected listing: %v", err)
+	}
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_inventory_feeds (site_code, part, subject, fingerprint, as_of) VALUES ('site-9', 1, 's', 'f', now())`); err == nil {
+		t.Fatal("a feed state for a site with no node must violate the foreign key")
+	}
+	if _, err := p.pool.Exec(p.ctx, `INSERT INTO network_rejected_listings (site_code, listing_id, rejected_at) VALUES ('site-9', 'LST-B', now())`); err == nil {
+		t.Fatal("a rejected listing for a site with no node must violate the foreign key")
+	}
+
+	p.step(-1)
+	if got := p.version(); got != 10 {
+		t.Fatalf("version after down = %d, want 10", got)
+	}
+	if got := p.inventoryTables(); got != 0 {
+		t.Fatalf("inventory tables after down = %d, want 0", got)
+	}
+	if got := p.kindRows("INVENTORY"); got != 0 {
+		t.Fatalf("INVENTORY ledger rows after down = %d, want 0", got)
+	}
+	for _, kind := range five {
+		if got := p.kindRows(kind); got != 1 {
+			t.Fatalf("%s ledger rows after down = %d, want 1 untouched", kind, got)
+		}
+	}
+	for table, want := range map[string]int{"network_nodes": 1, "network_node_profiles": 1} {
+		if got := p.count(`SELECT count(*) FROM ` + table); got != want {
+			t.Fatalf("%s rows after down = %d, want %d untouched", table, got, want)
+		}
+	}
+	p.expectLedgerKinds(five)
+	p.expectLedgerRefuses("INVENTORY")
+
+	p.step(1)
+	if got := p.inventoryTables(); got != 2 {
+		t.Fatalf("inventory tables after the second up = %d, want 2", got)
+	}
+	p.expectLedgerKinds(append(slices.Clone(five), "INVENTORY"))
 }

@@ -53,6 +53,14 @@ type vendorFake struct {
 	// profileKeys are the write slots of the node profile PUTs, in arrival order.
 	profileKeys []string
 
+	// inventoryKeys are the write slots of the inventory feeds (POST
+	// /vendor/inventory), in arrival order; listings are the listing ids each node
+	// carries (a node with no entry accepts any); stock is what the network holds
+	// per node and listing after the feeds it applied.
+	inventoryKeys []string
+	listings      map[string]map[string]bool
+	stock         map[string]map[string]int
+
 	// holdAcks keeps acknowledgement transactions PROCESSING until
 	// releaseAcks; otherwise one read answers PROCESSING and the next SUCCESS.
 	holdAcks bool
@@ -83,6 +91,7 @@ type fakeTx struct {
 	id, kind, status, poNumber, nodeCode, nodeID string
 	reads                                        int
 	revision                                     int                 // a NODE_PROFILE's profileRevision
+	body                                         string              // an INVENTORY feed's request body
 	errors                                       []map[string]string // why a FAILURE failed
 }
 
@@ -426,6 +435,8 @@ func (v *vendorFake) settle(tx *fakeTx) {
 		v.order(tx.poNumber).state = "ACKNOWLEDGED"
 	case "SHIPMENT_CONFIRMATION":
 		v.order(tx.poNumber).state = "SHIPPED"
+	case "INVENTORY":
+		v.settleInventory(tx)
 	}
 }
 
@@ -476,6 +487,8 @@ func (v *vendorFake) write(w http.ResponseWriter, r *http.Request, raw []byte) {
 		v.label(w, slot, raw, req.PoNumber, len(req.Packages))
 	case "/vendor/shipment-confirmations":
 		v.confirmShipment(w, slot, raw, req.PoNumber, req.TrackingNumbers)
+	case "/vendor/inventory":
+		v.writeInventory(w, slot, raw)
 	default:
 		fakeProblem(w, http.StatusNotFound, "not-found")
 	}

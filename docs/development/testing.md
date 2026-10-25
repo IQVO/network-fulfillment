@@ -69,6 +69,26 @@ runtime mode), the stub gateway and fake ports. Notable suites:
   `processpathcache/schedule_test.go`; `telemetry/node_profile_metrics_test.go`;
   `cmd/netfulfil/profile_test.go` (`NETWORK_PROFILE_INTERVAL`, the wiring and the
   worker's start and stop); and the chart's `render_test.sh` and `test_env_parity.py`.
+- The inventory feed (ADR 0027 part 2):
+  `internal/application/usecases/feed_inventory_test.go` (the pass, the complete flag
+  and its edge cases, the 5000 split, the fingerprint, unlisted SKUs said once, one
+  site's failure never stopping the others);
+  `internal/adapters/outbound/producttranslation/site_test.go` (the optional `site`
+  and the inverse lookup per site); `retailnetwork/gateway_live_inventory_test.go`
+  (the feed against a stateful fake Vendor API: ledger, key, restart, the hourly
+  repeat, a refused listing left out, `ErrFeedAlreadyApplied`);
+  `pgstore_inventory_integration_test.go` and `pgstore_profile_integration_test.go`
+  (`integration` tag: the feed state and the refused listings on a real Postgres, the
+  ledger accepting `INVENTORY`, and migration 0011 up, down and up with data, plus a
+  fresh database migrated through every migration, down one step and up again);
+  `cmd/netfulfil/inventory_feed_test.go` (`NETWORK_INVENTORY_INTERVAL`, the wiring and
+  the worker's start and stop); `cmd/netfulfil/demand_inventory_live_integration_test.go`
+  (`integration` tag: the real entry point against a real Postgres and Kafka and the
+  fake Vendor API, which judges a feed as the network does: one run declares the profile
+  and feeds the offers of a pass, an unchanged feed is not re-sent while the hour has not
+  passed, not even after a restart, a changed one is sent at once, and a listing the
+  network refuses as not on the node is left out of the next feeds, also after a
+  restart); and the chart's `render_test.sh` and `test_env_parity.py`.
 - `internal/adapters/outbound/kafka/wire_golden_test.go`: the CloudEvents wire
   shape of every event against `testdata/wire/{events,analytics}/*.json`.
 - `internal/adapters/outbound/events/testdata/log_publisher.golden`: the log
