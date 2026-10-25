@@ -11,6 +11,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 )
 
 // The inventory feed (ADR 0027 part 2) through the REAL entry point: run(ctx)
@@ -20,14 +22,17 @@ import (
 // test feeds. Named to sort before e2e_integration_test.go (see
 // demand_live_integration_test.go).
 //
-// The capability offers are made by the real RecomputeCapabilityOffers in a first
-// run in which both workers are switched off with 0 (which is itself asserted:
-// nothing reaches the network). The feed is then watched in runs where the
-// recompute is parked at one hour, so the offers are exactly the ones of that
-// pass and every later "pass" is the test's own doing (the moment of the offers
-// is moved in Postgres): a feed that reads the offers while a recompute rewrites
-// them would otherwise be racing the test, and a partial feed in between is
-// correct behaviour that no assertion here should depend on.
+// In the first test the capability offers are made by the real
+// RecomputeCapabilityOffers in a first run in which both workers are switched off
+// with 0 (which is itself asserted: nothing reaches the network); the second writes
+// the offers of a pass to Postgres directly, because it is not about how they are
+// made, and a whole service run is the most expensive thing these tests do. The
+// feed is then watched in runs where the recompute is parked at one hour, so the
+// offers are exactly the ones of that pass and every later "pass" is the test's own
+// doing (the moment of the offers is moved in Postgres): a feed that reads the
+// offers while a recompute rewrites them would otherwise be racing the test, and
+// a partial feed in between is correct behaviour that no assertion here should
+// depend on.
 
 const (
 	invSKUA      = "SKU-A"
@@ -105,6 +110,28 @@ func seedOffers(t *testing.T, ctx context.Context, rig *liveRig, stock *usableSt
 	expectEqual(t, "inventory POSTs with both workers off", rig.network.requestCount(http.MethodPost, inventoryPath), 0)
 	expectEqual(t, "profile PUTs with both workers off", rig.network.requestCount(http.MethodPut, profilePath), 0)
 	return rig.offersAsOf(t, ctx)
+}
+
+// seedOffersBySQL writes the offers of one pass straight into Postgres, migrating
+// the schema first as the service does at boot: SKU-A throughput-constrained at 30,
+// SKU-B at 5 and SKU-C (listed elsewhere) at 7, the figures the first test gets from
+// a real recompute. It returns the moment of the pass.
+func seedOffersBySQL(t *testing.T, ctx context.Context, rig *liveRig) time.Time {
+	t.Helper()
+	if err := postgres.RunMigrations(rig.env.dsn, "../../migrations"); err != nil {
+		t.Fatalf("migrate before seeding: %v", err)
+	}
+	asOf := time.Now().UTC().Truncate(time.Microsecond)
+	for _, o := range []struct {
+		sku, basis string
+		qty        int
+	}{{invSKUA, "THROUGHPUT_CONSTRAINED", 30}, {invSKUB, "PHYSICAL", 5}, {invSKUC, "PHYSICAL", 7}} {
+		if _, err := rig.pool.Exec(ctx, `INSERT INTO capability_offers (sku, site_id, advertised_quantity, basis, computed_at) VALUES ($1, $2, $3, $4, $5)`,
+			o.sku, liveSite, o.qty, o.basis, asOf); err != nil {
+			t.Fatalf("seed the offer of %s: %v", o.sku, err)
+		}
+	}
+	return asOf
 }
 
 func waitForInventoryFeeds(t *testing.T, ctx context.Context, rig *liveRig, n int) {
@@ -251,7 +278,9 @@ func TestLiveInventory_FedWithTheProfileAfterTheOffersExistAndNotResentWhileUnch
 // not carry LST-B, so the network fails the whole first feed with
 // ErrListingNotOnNode at the line of that listing. The service records the refusal,
 // does not repeat the same feed, and sends the next one without the listing, so one
-// wrong listing does not silence the rest. The refusal survives a restart.
+// wrong listing does not silence the rest. The refusal survives a restart. The site
+// is mapped to its node by the first poll of the run, so the first pass of the feed
+// may find no node yet and wait for the next.
 func TestLiveInventory_AListingTheNetworkRefusesIsLeftOutOfTheNextFeeds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 285*time.Second)
 	defer cancel()
@@ -259,13 +288,10 @@ func TestLiveInventory_AListingTheNetworkRefusesIsLeftOutOfTheNextFeeds(t *testi
 	writeInventoryProducts(t, rig)
 	expectEqual(t, "adopted node", rig.network.addNode(liveSite), "N-1")
 	rig.network.setNodeListings("N-1", invListingA)
-	publishInventoryCaches(t, ctx, rig)
-	stock := newUsableStock(t, map[string]int{invSKUA: 100, invSKUB: 5, invSKUC: 7})
-
-	asOf := seedOffers(t, ctx, rig, stock)
+	asOf := seedOffersBySQL(t, ctx, rig)
 
 	env := map[string]string{
-		"INVENTORY_STORAGE_URL": stock.srv.URL, "RECOMPUTE_INTERVAL": "1h", "POLL_INTERVAL": "500ms",
+		"RECOMPUTE_INTERVAL": "1h", "POLL_INTERVAL": "500ms",
 		"NETWORK_PROFILE_INTERVAL": "0", "NETWORK_INVENTORY_INTERVAL": inventoryEveryTick,
 	}
 	stop := rig.start(t, ctx, env)

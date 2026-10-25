@@ -108,7 +108,7 @@ coverage:
 # integration test reintroduces an env-gated skip).
 # Deliberately NOT part of `check` / `check-all`.
 integration:
-	$(GO) test -tags=integration ./... -race -count=1
+	$(GO) test -tags=integration ./... -race -count=1 -timeout 15m
 
 bdd:
 	$(GO) test ./... -run TestFeatures -v

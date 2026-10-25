@@ -158,7 +158,9 @@ Output of `go test . -run TestFeatures -count=1 -v` on this branch:
 
 ## Integration tests
 
-`make integration` runs `go test -tags=integration ./... -race -count=1`.
+`make integration` runs `go test -tags=integration ./... -race -count=1 -timeout 15m`: the
+live tests of `cmd/netfulfil` boot the whole service, and that package alone takes about ten
+minutes, which is `go test`'s default ceiling.
 Every test starts its own Postgres or Kafka with testcontainers
 (`testcontainers-go` v0.44.0, modules `postgres` and `kafka`); there is no
 `DATABASE_URL` service container and no skip gate. Two fitness tests enforce

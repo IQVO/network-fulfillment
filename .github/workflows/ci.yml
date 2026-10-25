@@ -148,7 +148,10 @@ jobs:
           go vet -tags=integration ./...
 
       - name: Integration tests
-        run: go test -tags=integration ./... -race -count=1
+        # go test's default ceiling is 10 minutes per package, and cmd/netfulfil (every live
+        # test boots the whole service) takes about that on its own: the job's limit above
+        # is the real bound.
+        run: go test -tags=integration ./... -race -count=1 -timeout 15m
 
   # ============================================================
   # CLASSIFICATION: LINTERS & STATIC ANALYSIS (API CONTRACT)
