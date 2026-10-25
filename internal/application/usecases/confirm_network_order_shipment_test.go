@@ -197,8 +197,8 @@ func (errSubmitConfirmationGateway) DeclareNodeProfile(context.Context, contract
 	return contract.ProfileResult{}, nil
 }
 
-func (errSubmitConfirmationGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
-	return nil
+func (errSubmitConfirmationGateway) SubmitInventoryFeed(context.Context, contract.InventoryFeed) (contract.FeedResult, error) {
+	return contract.FeedResult{}, nil
 }
 
 func (errSubmitConfirmationGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {

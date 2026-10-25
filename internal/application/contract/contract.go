@@ -71,17 +71,6 @@ type InboundLine struct {
 	Quantity         int
 }
 
-// AvailabilityUpdate is what we claim we can ship for one SKU at one
-// site — submitInventoryUpdate in the network's own vocabulary (ADR 0001,
-// "The obvious next question"). The quantity itself is computed by
-// CapabilityOffer's capacity-aware advertised availability; this shape
-// only carries the result outward across NetworkGateway.SubmitAvailability.
-type AvailabilityUpdate struct {
-	SiteId   shared.SiteId
-	SKU      shared.SKU
-	Quantity int
-}
-
 // NodeProfile is DeclareNodeProfile's argument (ADR 0027): what we declare about
 // how a site operates, in OUR terms. The network keeps it as the node's
 // operational profile, and its handling time becomes part of the deadline we are

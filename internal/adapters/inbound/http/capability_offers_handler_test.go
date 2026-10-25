@@ -32,8 +32,8 @@ func (nopGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef,
 func (nopGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
 	return contract.ProfileResult{}, nil
 }
-func (nopGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
-	return nil
+func (nopGateway) SubmitInventoryFeed(context.Context, contract.InventoryFeed) (contract.FeedResult, error) {
+	return contract.FeedResult{}, nil
 }
 func (nopGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {
 	return nil, nil

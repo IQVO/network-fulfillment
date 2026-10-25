@@ -65,11 +65,12 @@ type NetworkGateway interface {
 	// (ADR 0026).
 	SubmitAcknowledgement(ctx context.Context, ref shared.NetworkRef, answer contract.Acknowledgement) error
 
-	// SubmitAvailability tells the network what we claim we can ship for
-	// one SKU at one site (ADR 0001's submitInventoryUpdate signal). The
-	// live adapter treats it as a documented, non-failing no-op until the
-	// inventory feed (ADR 0027, part 2) replaces it.
-	SubmitAvailability(ctx context.Context, update contract.AvailabilityUpdate) error
+	// SubmitInventoryFeed tells the network what a site claims it can ship: one
+	// feed per site per recompute pass, never one call per SKU (ADR 0027 §9). It
+	// is idempotent per content: a feed the network already holds is not sent
+	// again, and a refusal of one line never silences the others. A site with no
+	// node on the network yet is contract.ErrSiteNotRegistered.
+	SubmitInventoryFeed(ctx context.Context, feed contract.InventoryFeed) (contract.FeedResult, error)
 
 	// DeclareNodeProfile tells the network how a site operates: its cutoffs,
 	// handling time and throughput (ADR 0027). It is idempotent per content: the
@@ -175,6 +176,20 @@ type ProcessPathCapability interface {
 // satisfies it.
 type ProfileDeclarer interface {
 	DeclareNodeProfile(ctx context.Context, profile contract.NodeProfile) (contract.ProfileResult, error)
+}
+
+// InventoryFeeder is the part of NetworkGateway that feeds inventory (ADR 0027
+// §9). FeedInventory depends on this alone; every NetworkGateway satisfies it.
+type InventoryFeeder interface {
+	SubmitInventoryFeed(ctx context.Context, feed contract.InventoryFeed) (contract.FeedResult, error)
+}
+
+// FeedCatalogue answers which SKUs the network lists at a site (ADR 0027 §10):
+// the SKUs a feed of that site can carry, and so the ones a complete feed must
+// account for. A SKU the catalogue does not list at the site is not fed. It is
+// the product dictionary read for one site; it names no network identifier.
+type FeedCatalogue interface {
+	ListedSKUs(ctx context.Context, siteId shared.SiteId) ([]shared.SKU, error)
 }
 
 // ProfileHistory answers what the gateway last declared for a site, in our

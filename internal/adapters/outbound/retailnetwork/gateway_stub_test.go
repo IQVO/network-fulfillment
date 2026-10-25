@@ -20,13 +20,17 @@ func newTestStubGateway() *StubGateway {
 	return NewStubGateway(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
-func TestStubGateway_SubmitAvailabilityIsANoop(t *testing.T) {
+func TestStubGateway_SubmitInventoryFeedSendsNothing(t *testing.T) {
 	g := newTestStubGateway()
-	err := g.SubmitAvailability(context.Background(), contract.AvailabilityUpdate{
-		SiteId: "site-1", SKU: "sku-1", Quantity: 5,
+	res, err := g.SubmitInventoryFeed(context.Background(), contract.InventoryFeed{
+		SiteId: "site-1", AsOf: time.Now(), Complete: true, Part: 1, Parts: 1,
+		Lines: []contract.FeedLine{{SKU: "sku-1", Quantity: 5, Basis: "PHYSICAL"}},
 	})
 	if err != nil {
-		t.Fatalf("SubmitAvailability = %v, want nil (the stub makes no external call)", err)
+		t.Fatalf("SubmitInventoryFeed = %v, want nil (the stub makes no external call)", err)
+	}
+	if res.Outcome != contract.FeedUnchanged || res.Sent != 0 {
+		t.Errorf("result = %+v, want %q with nothing sent", res, contract.FeedUnchanged)
 	}
 }
 

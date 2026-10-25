@@ -66,8 +66,8 @@ func (g *fakeGateway) PollDemand(_ context.Context, since time.Time) ([]contract
 func (g *fakeGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, contract.Acknowledgement) error {
 	return nil
 }
-func (g *fakeGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
-	return nil
+func (g *fakeGateway) SubmitInventoryFeed(context.Context, contract.InventoryFeed) (contract.FeedResult, error) {
+	return contract.FeedResult{}, nil
 }
 func (g *fakeGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
 	return contract.ProfileResult{}, nil

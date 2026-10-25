@@ -211,8 +211,8 @@ func (g errSubmitGateway) SubmitAcknowledgement(context.Context, shared.NetworkR
 	return g.err
 }
 
-func (errSubmitGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
-	return nil
+func (errSubmitGateway) SubmitInventoryFeed(context.Context, contract.InventoryFeed) (contract.FeedResult, error) {
+	return contract.FeedResult{}, nil
 }
 
 func (errSubmitGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {

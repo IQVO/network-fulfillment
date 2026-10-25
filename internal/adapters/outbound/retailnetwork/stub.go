@@ -116,11 +116,12 @@ func (g *StubGateway) SubmitShipmentConfirmation(_ context.Context, ref shared.N
 	return nil
 }
 
-// SubmitAvailability records what we claim we can ship, for tests and
-// local runs to assert on; the stub makes no external call.
-func (g *StubGateway) SubmitAvailability(_ context.Context, update contract.AvailabilityUpdate) error {
-	g.logger.Info("stub network availability update", "siteId", update.SiteId, "sku", update.SKU, "quantity", update.Quantity)
-	return nil
+// SubmitInventoryFeed sends nothing: the stub makes no external call, so a feed
+// never leaves the process (ADR 0027 part 2). It is logged for local runs to see.
+func (g *StubGateway) SubmitInventoryFeed(_ context.Context, feed contract.InventoryFeed) (contract.FeedResult, error) {
+	g.logger.Info("stub network inventory feed (nothing sent)", "siteId", feed.SiteId, "asOf", feed.AsOf,
+		"lines", len(feed.Lines), "complete", feed.Complete, "part", feed.Part, "of", feed.Parts)
+	return contract.FeedResult{Outcome: contract.FeedUnchanged}, nil
 }
 
 // DeclareNodeProfile records the profile (for tests and local runs to assert on)

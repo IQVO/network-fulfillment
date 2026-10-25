@@ -301,29 +301,3 @@ func TestLive_ATransactionTheNetworkFailsForAConfirmationIsRecordedAndLoggedNotT
 		t.Errorf("a failed confirmation must be logged at error level, got:\n%s", logs)
 	}
 }
-
-// ---- the supply loop's seam still open (ADR 0027, part 2) ----
-
-func TestLive_SubmitAvailabilityIsANonFailingNoOpThatLogsOnceAtInfoNamingADR0027(t *testing.T) {
-	f := readyFixture(t, nil)
-	ctx := context.Background()
-
-	for range 3 {
-		if err := f.g.SubmitAvailability(ctx, contract.AvailabilityUpdate{SiteId: "FC-1", SKU: "SKU-1", Quantity: 5}); err != nil {
-			t.Fatalf("SubmitAvailability: %v", err)
-		}
-	}
-
-	if n := len(f.fake.requests()); n != 0 {
-		t.Fatalf("%d requests; a no-op calls nobody", n)
-	}
-	var info []string
-	for _, line := range strings.Split(f.logs.String(), "\n") {
-		if strings.Contains(line, "level=INFO") && strings.Contains(line, "ADR 0027") {
-			info = append(info, line)
-		}
-	}
-	if len(info) != 1 || !strings.Contains(info[0], "SubmitAvailability") {
-		t.Fatalf("INFO lines naming ADR 0027 = %q, want exactly one over three calls", info)
-	}
-}
