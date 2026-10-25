@@ -10,7 +10,7 @@ data:
   products.json: |
     {"products": [
     {{- range $i, $m := .Values.productTranslation.mappings }}
-      {{ if $i }},{{ end }}{"networkProductId": {{ $m.networkProductId | quote }}, "sku": {{ $m.sku | quote }}}
+      {{ if $i }},{{ end }}{"networkProductId": {{ $m.networkProductId | quote }}, "sku": {{ $m.sku | quote }}{{ if hasKey $m "site" }}, "site": {{ $m.site | quote }}{{ end }}}
     {{- end }}
     ]}
 {{- end }}

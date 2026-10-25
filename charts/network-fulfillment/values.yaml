@@ -287,6 +287,14 @@ productTranslation:
   mappings: []
   # - networkProductId: ASIN-XYZ123
   #   sku: sku-1
+  # An entry may carry an optional "site" (ADR 0027 part 2): the network keys
+  # stock by a listing, one catalogue item at one node, so the inventory feed
+  # needs the id a SKU is listed under at each site. An entry without "site"
+  # applies to every site; the same SKU listed twice for one site is a load
+  # error. In live mode, give each site's listing its own entry:
+  # - networkProductId: LISTING-FC1-1
+  #   sku: sku-1
+  #   site: site-1
 
 # The node definitions the live adapter registers on the network for any site
 # that is not yet one of its nodes (ADR 0026 Decision 7), rendered into the data
