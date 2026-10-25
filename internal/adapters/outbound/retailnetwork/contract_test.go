@@ -181,6 +181,11 @@ func TestContract_RequestBodiesTheAdapterBuildsValidateAgainstTheSpec(t *testing
 		SiteId: "FC-1", Timezone: "UTC", HandlingTime: time.Minute, ThroughputPerDay: 1,
 		Cutoffs: []contract.ProfileCutoff{{LocalTime: "00:00", Days: weekdays(time.Sunday)}},
 	})
+	asOf := time.Date(2026, 10, 25, 12, 0, 0, 123456789, time.UTC)
+	inventory, _ := buildInventoryBody("V-WS", "N-1", asOf, true, []inventoryLineDTO{
+		{ListingID: "L-1", AvailableQty: 30, Basis: basisThroughputConstrained}, {ListingID: "L-2", AvailableQty: 0, Basis: basisPhysical},
+	})
+	inventoryMinimal, _ := buildInventoryBody("V-WS", "N-1", asOf, false, []inventoryLineDTO{{ListingID: "L-1", AvailableQty: 0, Basis: basisPhysical}})
 
 	cases := []struct {
 		name, schema string
@@ -194,6 +199,8 @@ func TestContract_RequestBodiesTheAdapterBuildsValidateAgainstTheSpec(t *testing
 		{"node registration, required fields only", "NodeRegistrationRequest", nodeMinimal},
 		{"node profile", "NodeProfileRequest", profile},
 		{"node profile, smallest valid", "NodeProfileRequest", profileMinimal},
+		{"inventory feed, complete", "InventoryFeedRequest", inventory},
+		{"inventory feed, partial, one line", "InventoryFeedRequest", inventoryMinimal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,6 +231,9 @@ func TestContract_TheSchemaActuallyRejectsABadBody(t *testing.T) {
 		"NodeProfileRequest":                              `{"vendorId":"V-WS","profileRevision":0,"timezone":"UTC","operatingHoursByDay":{"monday":{"start":"00:00","end":"23:59"}},"handlingTimeMinutes":30,"cutoffs":[{"localTime":"18:00"}],"throughputCap":{"value":10,"timeUnit":"DAY","unit":"ORDER"}}`,
 		"NodeProfileRequest, a cutoff with maxOrders 0":   `{"vendorId":"V-WS","profileRevision":1,"timezone":"UTC","operatingHoursByDay":{},"handlingTimeMinutes":30,"cutoffs":[{"localTime":"18:00","maxOrders":0}],"throughputCap":{"value":10,"timeUnit":"DAY","unit":"ORDER"}}`,
 		"NodeProfileRequest, a weekday the network lacks": `{"vendorId":"V-WS","profileRevision":1,"timezone":"UTC","operatingHoursByDay":{"someday":{"start":"00:00","end":"23:59"}},"handlingTimeMinutes":30,"cutoffs":[],"throughputCap":{"value":10,"timeUnit":"DAY","unit":"ORDER"}}`,
+		"InventoryFeedRequest, a negative quantity":       `{"vendorId":"V-WS","nodeId":"N-1","fullUpdate":true,"asOf":"2026-10-25T12:00:00Z","lines":[{"listingId":"L-1","availableQty":-1,"basis":"PHYSICAL"}]}`,
+		"InventoryFeedRequest, a basis the network lacks": `{"vendorId":"V-WS","nodeId":"N-1","fullUpdate":true,"asOf":"2026-10-25T12:00:00Z","lines":[{"listingId":"L-1","availableQty":1,"basis":"GUESS"}]}`,
+		"InventoryFeedRequest, no fullUpdate":             `{"vendorId":"V-WS","nodeId":"N-1","asOf":"2026-10-25T12:00:00Z","lines":[{"listingId":"L-1","availableQty":1,"basis":"PHYSICAL"}]}`,
 	}
 	for name, body := range bad {
 		var instance any
@@ -263,6 +273,8 @@ func TestContract_DTOsNameOnlyRealPropertiesAndRequestsSendEveryRequiredOne(t *t
 		"CutoffSlot":                  reflect.TypeOf(cutoffSlotDTO{}),
 		"ThroughputCap":               reflect.TypeOf(throughputCapDTO{}),
 		"DayHours":                    reflect.TypeOf(dayHoursDTO{}),
+		"InventoryFeedRequest":        reflect.TypeOf(inventoryFeedRequestDTO{}),
+		"InventoryLine":               reflect.TypeOf(inventoryLineDTO{}),
 	}
 	for name, typ := range responses {
 		for _, f := range jsonFields(typ) {
@@ -296,7 +308,8 @@ func TestContract_EveryValueTheAdapterSendsOrBranchesOnExistsInTheSpec(t *testin
 		{"reject reason", "RejectReason", "", []string{reasonCannotMeetShipBy, reasonUnknownListing}},
 		{"purchase order state", "PurchaseOrderState", "", []string{stateIssued}},
 		{"transaction status", "SubmissionStatus", "", []string{txProcessing, txSuccess, txFailure}},
-		{"submission kind", "SubmissionKind", "", []string{string(KindAcknowledgement), string(KindShipmentConfirmation), string(KindNodeRegistration), string(KindNodeProfile)}},
+		{"submission kind", "SubmissionKind", "", []string{string(KindAcknowledgement), string(KindShipmentConfirmation), string(KindNodeRegistration), string(KindNodeProfile), string(KindInventory)}},
+		{"inventory basis", "InventoryLine", "basis", []string{basisPhysical, basisThroughputConstrained}},
 		{"node type", "NodeType", "", []string{"FULFILLMENT_CENTER", "INBOUND_CROSS_DOCK", "RETURNS_CENTER"}},
 		{"throughput time unit", "ThroughputCap", "timeUnit", []string{timeUnitDay}},
 		{"throughput unit", "ThroughputCap", "unit", []string{unitOrder}},
@@ -365,6 +378,18 @@ func TestContract_RecordedTransactionsAreValidAndDecode(t *testing.T) {
 			"errors":[{"code":"ErrStaleProfileRevision","message":"revision 2 is not newer than 3","path":"$.profileRevision"}]}`,
 			func(tx transactionDTO) bool {
 				return tx.Kind == string(KindNodeProfile) && tx.Status == txFailure && tx.Errors[0].Code == errStaleProfileRevision
+			}},
+		{"a refused listing is a failed transaction that says which line", `{"transactionId":"tx-5","vendorId":"V-WS","kind":"INVENTORY","status":"FAILURE",
+			"receivedAt":"2026-10-25T12:00:00Z","processedAt":"2026-10-25T12:00:05Z",
+			"errors":[{"code":"ErrListingNotOnNode","message":"listing L-9 is not on node N-1","path":"$.lines[3].listingId"}]}`,
+			func(tx transactionDTO) bool {
+				return tx.Kind == string(KindInventory) && tx.Status == txFailure && tx.Errors[0].Code == errListingNotOnNode && tx.Errors[0].Path == "$.lines[3].listingId"
+			}},
+		{"a feed the network already holds", `{"transactionId":"tx-6","vendorId":"V-WS","kind":"INVENTORY","status":"FAILURE",
+			"receivedAt":"2026-10-25T12:00:00Z","processedAt":"2026-10-25T12:00:05Z",
+			"errors":[{"code":"ErrFeedAlreadyApplied","message":"the feed was already applied","path":"$.asOf"}]}`,
+			func(tx transactionDTO) bool {
+				return tx.Kind == string(KindInventory) && tx.Errors[0].Code == errFeedAlreadyApplied
 			}},
 	}
 	for _, tc := range cases {
@@ -435,11 +460,12 @@ func TestContract_EveryRouteTheClientCallsExistsWithItsRequiredParameters(t *tes
 	_, _ = c.postAsync(ctx, "submitShipmentConfirmation", []string{"vendor", "shipment-confirmations"}, "k2", []byte("{}"))
 	_, _ = c.postAsync(ctx, "registerVendorNode", []string{"vendor", "nodes"}, "k3", []byte("{}"))
 	_, _ = c.putAsync(ctx, "declareNodeProfile", []string{"vendor", "nodes", "N-1", "profile"}, "k5", []byte("{}"))
+	_, _ = c.postAsync(ctx, "submitInventory", pathInventory, "k6", []byte("{}"))
 	_, _ = c.requestLabels(ctx, "k4", []byte("{}"))
 
 	reqs := f.requests()
-	if len(reqs) != 10 {
-		t.Fatalf("requests = %d, want 10", len(reqs))
+	if len(reqs) != 11 {
+		t.Fatalf("requests = %d, want 11", len(reqs))
 	}
 	for _, r := range reqs {
 		checkRouteAgainstSpec(t, paths, r)

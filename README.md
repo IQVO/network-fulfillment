@@ -158,9 +158,24 @@ What exists today:
   cadence; metrics `network_fulfillment.node_profile.declarations` and
   `.revision`. Operations:
   [node profile runbook](docs/operations/runbook.md#the-node-profile).
+- **Live retail-network adapter: the inventory feed** (ADR 0027 part 2). In live
+  mode a second worker tells the network what each site can ship with
+  `POST /vendor/inventory`: one feed per site per pass, built from the
+  `CapabilityOffer`s the last recompute pass persisted (the advertised quantity, with
+  `PHYSICAL` or `THROUGHPUT_CONSTRAINED` as its basis; an unknown figure is never
+  sent), under the listing each SKU has at that site in the product dictionary. The
+  feed is complete only when every listed SKU has a fresh offer (a complete feed
+  zeroes what it omits), is split above 5000 lines, is sent when its content
+  changed and, unchanged, repeated at most hourly. A listing the network refuses as
+  not on the node is left out of the feeds for 24 h and logged at `ERROR`.
+  Persisted in migration 0011 (`network_inventory_feeds`,
+  `network_rejected_listings` and the ledger kind `INVENTORY`).
+  `NETWORK_INVENTORY_INTERVAL` (default `5m`, `0` disables) sets the cadence.
+  Operations: [inventory feed runbook](docs/operations/runbook.md#the-inventory-feed).
 - **Curated ACL files** — `PRODUCT_TRANSLATION_FILE` (network product id ->
-  SKU; without it every order is rejected as untranslatable, and a warning is
-  logged at startup; ADR 0013), `NETWORK_SEED_FILE` (stub demand; refuses
+  SKU, with an optional `site` per entry because a listing is one item at one
+  node; without the file every order is rejected as untranslatable, and a warning
+  is logged at startup; ADR 0013, ADR 0027 §10), `NETWORK_SEED_FILE` (stub demand; refuses
   to boot against the live gateway; ADR 0012) and `NETWORK_NODES_FILE` (live
   only: the nodes to register on the network, ADR 0026). The Helm chart renders
   them from `productTranslation.mappings`, `stubDemand.demands` and
@@ -216,12 +231,6 @@ What exists today:
 
 Not built yet:
 
-- **The inventory feed (the supply loop, ADR 0027 part 2).** The node profile is
-  built (above); `CapabilityOffer`s are still not submitted outward.
-  `NetworkGateway.SubmitAvailability` stays on the port and in the stub, and is a
-  logged no-op in the live gateway, and no use case calls it. ADR 0027 designs the
-  feed (one full feed per site, listings from the product dictionary) and part 2
-  builds it.
 - **A `PackageManifested`-driven shipment confirmation.** ADR 0014 chose
   the explicit endpoint until a persisted correlation exists.
 - **A real package count.** The label is requested for exactly one package.
@@ -364,6 +373,7 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 | `NETWORK_VENDOR_ID` | unset | vendor account the service acts as; required when `NETWORK_MODE=live`, ignored otherwise |
 | `NETWORK_NODES_FILE` | unset | optional, live only: node definitions to register on the network (strict JSON) |
 | `NETWORK_PROFILE_INTERVAL` | `5m` | live only: how often the node profile is derived and, if its content changed, declared (ADR 0027); `0` disables it |
+| `NETWORK_INVENTORY_INTERVAL` | `5m` | live only: how often the inventory feed is planned and, if its content changed, sent (ADR 0027 part 2); `0` disables it |
 | `INBOUND_RECEIVING_URL` | unset | inbound-receiving base URL (`POST /asns`); required when `NETWORK_MODE=live` (ADR 0028), ignored otherwise |
 | `PRODUCT_MASTER_URL` | unset | product-master base URL (`GET /gtins/{gtin}`); required when `NETWORK_MODE=live`, ignored otherwise |
 | `INBOUND_INTAKE_INTERVAL` | `30s` | Go duration; cadence of the inbound intake and receipt-return loops (live only) |

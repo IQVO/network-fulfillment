@@ -27,6 +27,8 @@ type memStore struct {
 	subs     map[string]Submission
 	labels   map[shared.NetworkRef][]Label
 	profiles map[string]NodeProfileState
+	feeds    map[string]InventoryFeedState
+	rejected map[string][]RejectedListing
 	minted   int
 }
 
@@ -36,6 +38,7 @@ func newMemStore() *memStore {
 	return &memStore{
 		nodes: map[string]string{}, orders: map[shared.NetworkRef]PurchaseOrder{}, byPo: map[string]shared.NetworkRef{},
 		subs: map[string]Submission{}, labels: map[shared.NetworkRef][]Label{}, profiles: map[string]NodeProfileState{},
+		feeds: map[string]InventoryFeedState{}, rejected: map[string][]RejectedListing{},
 	}
 }
 
@@ -186,6 +189,55 @@ func (s *memStore) AdvanceNodeProfile(_ context.Context, st NodeProfileState) (N
 	return cur, nil
 }
 
+func feedKeyOf(site string, part int) string { return fmt.Sprintf("%s#%d", site, part) }
+
+func (s *memStore) InventoryFeedState(_ context.Context, site string, part int) (InventoryFeedState, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.feeds[feedKeyOf(site, part)]
+	return st, ok, nil
+}
+
+// SaveInventoryFeedState has PGStore's guard: a site with no node is refused and
+// a part never goes back to an earlier asOf.
+func (s *memStore) SaveInventoryFeedState(_ context.Context, st InventoryFeedState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.nodes[st.SiteCode]; !ok {
+		return fmt.Errorf("%w: site %q has no node", ErrMappingConflict, st.SiteCode)
+	}
+	if cur, ok := s.feeds[feedKeyOf(st.SiteCode, st.Part)]; ok && cur.AsOf.After(st.AsOf) {
+		return nil
+	}
+	s.feeds[feedKeyOf(st.SiteCode, st.Part)] = st
+	return nil
+}
+
+func (s *memStore) RejectedListings(_ context.Context, site string) ([]RejectedListing, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]RejectedListing(nil), s.rejected[site]...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ListingID < out[j].ListingID })
+	return out, nil
+}
+
+func (s *memStore) RejectListing(_ context.Context, site string, l RejectedListing) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.nodes[site]; !ok {
+		return fmt.Errorf("%w: site %q has no node", ErrMappingConflict, site)
+	}
+	list := s.rejected[site]
+	for i := range list {
+		if list[i].ListingID == l.ListingID {
+			list[i] = l
+			return nil
+		}
+	}
+	s.rejected[site] = append(list, l)
+	return nil
+}
+
 // ---- a stateful fake Vendor API on top of client_test.go's newFake ----
 
 type vendorSim struct {
@@ -277,6 +329,8 @@ func txKind(path string) string {
 		return "NODE_PROFILE"
 	case path == "/vendor/acknowledgements":
 		return "ACKNOWLEDGEMENT"
+	case path == "/vendor/inventory":
+		return "INVENTORY"
 	default:
 		return "SHIPMENT_CONFIRMATION"
 	}

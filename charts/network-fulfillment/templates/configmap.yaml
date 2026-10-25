@@ -28,6 +28,10 @@ data:
   # that "0" reaches the process instead of being dropped as empty.
   NETWORK_PROFILE_INTERVAL: {{ .Values.config.networkProfileInterval | quote }}
 
+  # How often the inventory feed is planned and sent when it changed (ADR 0027
+  # part 2); "0" disables it. Quoted for the same reason.
+  NETWORK_INVENTORY_INTERVAL: {{ .Values.config.networkInventoryInterval | quote }}
+
   # The inbound loop (ADR 0028), live only: seller shipments polled from the
   # Vendor API become ASNs in inbound-receiving, GTINs are resolved through
   # product-master. Both URLs are mandatory, like the two above.

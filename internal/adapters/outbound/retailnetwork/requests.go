@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
+	"github.com/claudioed/network-fulfillment/internal/domain/capabilityoffer"
 )
 
 // NodeDefinition is what the network needs to register one of our sites as a
@@ -157,4 +158,32 @@ func openDaysOf(cutoffs []cutoffSlotDTO) map[string]dayHoursDTO {
 		}
 	}
 	return out
+}
+
+// wireBasis is the network's name for a basis. Only the two an offer can have are
+// sent; anything else is refused here rather than guessed (the network's UNKNOWN
+// means "we do not know", and the fleet then sends no line at all).
+func wireBasis(b capabilityoffer.Basis) (string, error) {
+	switch b {
+	case capabilityoffer.BasisPhysical:
+		return basisPhysical, nil
+	case capabilityoffer.BasisThroughputConstrained:
+		return basisThroughputConstrained, nil
+	default:
+		return "", fmt.Errorf("%w: basis %q is not one an offer can have", ErrBadFeed, b)
+	}
+}
+
+// buildInventoryBody is the exact body of one inventory feed (ADR 0027 §9). Lines
+// keep the order given, which is the order the network's error paths index.
+func buildInventoryBody(vendorID, nodeID string, asOf time.Time, full bool, lines []inventoryLineDTO) ([]byte, error) {
+	if len(lines) == 0 || len(lines) > maxInventoryLines {
+		return nil, fmt.Errorf("%w: %d lines (a feed has 1 to %d)", ErrBadFeed, len(lines), maxInventoryLines)
+	}
+	for i, l := range lines {
+		if l.ListingID == "" || l.AvailableQty < 0 {
+			return nil, fmt.Errorf("%w: line %d has no listing or a negative quantity", ErrBadFeed, i)
+		}
+	}
+	return json.Marshal(inventoryFeedRequestDTO{VendorID: vendorID, NodeID: nodeID, FullUpdate: full, AsOf: asOf.UTC(), Lines: lines})
 }

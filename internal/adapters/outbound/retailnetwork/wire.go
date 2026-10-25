@@ -166,8 +166,37 @@ type nodeProfileRequestDTO struct {
 	ThroughputCap       throughputCapDTO       `json:"throughputCap"`
 }
 
+// inventoryLineDTO is one listing of an inventory feed (ADR 0027 §9).
+type inventoryLineDTO struct {
+	ListingID    string `json:"listingId"`
+	AvailableQty int    `json:"availableQty"`
+	Basis        string `json:"basis"`
+}
+
+// inventoryFeedRequestDTO is the body of POST /vendor/inventory: a feed for one
+// node, at most maxInventoryLines lines.
+type inventoryFeedRequestDTO struct {
+	VendorID   string             `json:"vendorId"`
+	NodeID     string             `json:"nodeId"`
+	FullUpdate bool               `json:"fullUpdate"`
+	AsOf       time.Time          `json:"asOf"`
+	Lines      []inventoryLineDTO `json:"lines"`
+}
+
 const (
 	stateIssued = "ISSUED"
+
+	// maxInventoryLines is the most lines the network takes in one feed.
+	maxInventoryLines = 5000
+
+	// The bases of an inventory line the adapter sends. The network also knows
+	// UNKNOWN; an offer whose figure is unknown does not exist, so it is never sent.
+	basisPhysical              = "PHYSICAL"
+	basisThroughputConstrained = "THROUGHPUT_CONSTRAINED"
+
+	// The codes of a failed inventory transaction the adapter acts on.
+	errListingNotOnNode   = "ErrListingNotOnNode"
+	errFeedAlreadyApplied = "ErrFeedAlreadyApplied"
 
 	timeUnitDay = "DAY"
 	unitOrder   = "ORDER"

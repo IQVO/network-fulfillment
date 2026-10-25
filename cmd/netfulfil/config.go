@@ -225,14 +225,39 @@ const defaultProfileInterval = 5 * time.Minute
 // yields the default, so a typo cannot silently switch the declaration off.
 // The bool is false when the worker is disabled.
 func profileInterval(logger *slog.Logger) (time.Duration, bool) {
-	raw := strings.TrimSpace(os.Getenv("NETWORK_PROFILE_INTERVAL"))
+	return switchableInterval(logger, "NETWORK_PROFILE_INTERVAL", os.Getenv("NETWORK_PROFILE_INTERVAL"), defaultProfileInterval)
+}
+
+// defaultInventoryInterval is how often the inventory feed is planned and, when
+// the content changed, sent (ADR 0027 §11). The offers it reads are recomputed
+// every minute by default, so a few minutes is as fresh as the network needs;
+// the gateway itself holds an unchanged feed back for an hour.
+const defaultInventoryInterval = 5 * time.Minute
+
+// inventoryInterval parses NETWORK_INVENTORY_INTERVAL (ADR 0027 §11), a Go
+// duration, with the rules of NETWORK_PROFILE_INTERVAL: unset yields
+// defaultInventoryInterval, "0" disables the feed worker, a negative or
+// malformed value warns and yields the default. The bool is false when the
+// worker is disabled.
+func inventoryInterval(logger *slog.Logger) (time.Duration, bool) {
+	return switchableInterval(logger, "NETWORK_INVENTORY_INTERVAL", os.Getenv("NETWORK_INVENTORY_INTERVAL"), defaultInventoryInterval)
+}
+
+// switchableInterval parses the value of the variable called name as a Go
+// duration that may also be zero, which switches the worker it paces off (so it
+// cannot reuse durationEnv: that treats a zero duration as malformed). A
+// negative or malformed value logs a warning and yields def, so a typo cannot
+// silently switch a worker off. The callers read the variable themselves, by
+// its literal name, which is how the chart's environment parity test finds it.
+func switchableInterval(logger *slog.Logger, name, value string, def time.Duration) (time.Duration, bool) {
+	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return defaultProfileInterval, true
+		return def, true
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d < 0 {
-		logger.Warn("invalid NETWORK_PROFILE_INTERVAL, using the default", "value", raw, "default", defaultProfileInterval, "error", err)
-		return defaultProfileInterval, true
+		logger.Warn("invalid "+name+", using the default", "value", raw, "default", def, "error", err)
+		return def, true
 	}
 	return d, d > 0
 }

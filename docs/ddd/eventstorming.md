@@ -219,7 +219,7 @@ flowchart LR
     POL2["Policy: path eligible only if CycleTimeP95<br/>≤ cutoff − now; no data stays eligible<br/>(decided 2026-10-06, ADR 0017)"]:::policy
     G1["CapabilityOffer"]:::aggregate
     RM3["Capability offers<br/>GET /capability-offers"]:::readmodel
-    H1["Hotspot: offer never submitted<br/>outward, SubmitAvailability unused"]:::hotspot
+    H1["Hotspot: offer reaches the network only<br/>in live mode, via FeedInventory (ADR 0027 part 2)"]:::hotspot
     H3["Hotspot: single SITE_ID only"]:::hotspot
 
     PPM --> RM1

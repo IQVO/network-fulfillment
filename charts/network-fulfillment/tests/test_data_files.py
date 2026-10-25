@@ -410,6 +410,23 @@ def check_bad_nodes_are_refused_at_render() -> None:
     print("PASS: a typo'd or missing node key fails the render")
 
 
+def check_mapping_site_is_optional_and_rendered_only_when_set() -> None:
+    """ADR 0027 part 2: an entry may name its site; one without renders no key."""
+    docs = render(
+        "productTranslation:\n  mappings:\n"
+        "    - networkProductId: LISTING-A\n      sku: sku-one\n      site: site-a\n"
+        "    - networkProductId: LISTING-ALL\n      sku: sku-two\n"
+    )
+    cm = data_configmap(docs)
+    assert cm is not None and "products.json" in cm["data"], "mappings produced no products.json"
+    products = json.loads(cm["data"]["products.json"])["products"]
+    assert products == [
+        {"networkProductId": "LISTING-A", "sku": "sku-one", "site": "site-a"},
+        {"networkProductId": "LISTING-ALL", "sku": "sku-two"},
+    ], products
+    print("PASS: a mapping's optional site is rendered when set and absent when not")
+
+
 def main() -> int:
     check_nodes_file_is_valid_json_and_wired()
     check_nodes_are_live_only_and_optional()
@@ -421,6 +438,7 @@ def main() -> int:
     check_rendered_json_is_parseable()
     check_files_are_wired_where_the_binary_looks()
     check_translation_only_needs_no_demand()
+    check_mapping_site_is_optional_and_rendered_only_when_set()
     print("\nAll data-file assertions passed.")
     return 0
 

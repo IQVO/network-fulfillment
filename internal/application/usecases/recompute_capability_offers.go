@@ -30,9 +30,8 @@ import (
 //
 // This step of the ADR's own staged rollout ("the actual value, still
 // entirely in stub") computes and persists the offer for the read
-// surface; it deliberately does NOT call NetworkGateway.SubmitAvailability
-// yet -- that outward submission is the ADR's own later rollout step,
-// not this one.
+// surface. It calls no gateway: the outward submission is FeedInventory's
+// (ADR 0027 part 2), which reads what this use case persisted.
 type RecomputeCapabilityOffers struct {
 	Translation ports.ProductTranslation
 	Inventory   ports.InventoryAvailability

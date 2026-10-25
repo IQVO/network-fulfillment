@@ -36,6 +36,16 @@ var (
 	// It is a programming error of the caller, found before any I/O.
 	ErrBadProfile = errors.New("retail-network: this node profile cannot be sent")
 
+	// ErrBadFeed: the inventory feed handed to SubmitInventoryFeed cannot be put on
+	// the wire (no lines, more than the network takes, a negative quantity, a
+	// basis that is not one an offer can have, no moment). A programming error of
+	// the caller, found before any I/O.
+	ErrBadFeed = errors.New("retail-network: this inventory feed cannot be sent")
+
+	// ErrNoDictionary: the live gateway was built without the product dictionary
+	// the inventory feed finds listings in.
+	ErrNoDictionary = errors.New("retail-network: the live gateway has no product dictionary to find listings in")
+
 	// ErrWriteRefused: the network answered a write with a definitive refusal
 	// (for example ack-window-closed). The ledger row is FAILURE and the write
 	// is never sent again; the wrapped *APIError carries the problem.

@@ -176,7 +176,8 @@ ship-to PII enters this context at all.
 | External network | Transaction status | Query | `ports.NetworkGateway.SubmissionStatus(ref)` (stub) | Conformist |
 | External network | Shipment confirmation | Command | `ports.NetworkGateway.SubmitShipmentConfirmation(ref)` (stub) | Conformist |
 | External network | Node operational profile | Command | `ports.NetworkGateway.DeclareNodeProfile(profile)` from `DeclareNodeProfiles` (live mode; ADR 0027 part 1; the stub records it and sends nothing) | Conformist |
-| External network | Availability, label | Command / Query | `SubmitAvailability`, `RequestLabel`: **`SubmitAvailability` is on the port and in the stub, called by no use case until the inventory feed (ADR 0027 part 2)**; `RequestLabel` is called by `ConfirmNetworkOrderShipment` | Conformist |
+| External network | Inventory feed | Command | `ports.NetworkGateway.SubmitInventoryFeed(feed)` from `FeedInventory` (live mode; ADR 0027 part 2; replaces `SubmitAvailability`; the stub sends nothing) | Conformist |
+| External network | Label | Command / Query | `RequestLabel`, called by `ConfirmNetworkOrderShipment` | Conformist |
 | Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`, `OrphanedHoldCancelled` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (published through the outbox relay, always on) | Open Host / Published Language |
 | Analytics projector | The same 7 events (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
 
@@ -266,9 +267,9 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 
 ## Open Questions
 
-- **When does a live `retail-network` adapter land**, and when does
-  `CapabilityOffer` get submitted outward (`SubmitAvailability` has no
-  caller)?
+- **Decided 2026-10-25: `CapabilityOffer` is submitted outward by `FeedInventory`
+  (ADR 0027 part 2)**, in live mode only, as one feed per site built from the
+  persisted offers. The live `retail-network` adapter landed with ADR 0026.
 - **Decided 2026-10-06: Submitted at SUBMITTED, Acknowledged only on settle
   (ADR 0016).** `NetworkOrderSubmitted` is raised when the order goes
   `SUBMITTED`; `NetworkOrderAcknowledged` is raised only when

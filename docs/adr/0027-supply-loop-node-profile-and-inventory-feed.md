@@ -22,8 +22,8 @@ and ADR 0026 (Decision 1, As built 2) gave it.
 **This ADR decides both loops. Delivery is split:**
 
 - **Part 1 (built, see "As built (part 1)"):** the node profile.
-- **Part 2 (designed here, not built):** the inventory feed. It is implemented later
-  against Decisions 9 to 12 without a new ADR, and appends its own "As built (part 2)".
+- **Part 2 (built, see "As built (part 2)"):** the inventory feed, implemented against
+  Decisions 9 to 12 without a new ADR.
 
 ## Context
 
@@ -361,3 +361,102 @@ cluster stays `NETWORK_MODE=stub`), so the worker has not run against a real
 `CPTScheduleChanged` stream. `ErrIncompleteOperationalProfile` and
 `ErrCutoffOutsideOperatingHours` are treated as final from the vendor-connectivity and
 node-topology sources, not from a sample of the live service.
+
+## As built (part 2)
+
+Part 2 is on `develop` as this ADR's second deliverable: Decisions 9 to 12 are built and
+`SubmitAvailability` is gone. This section supersedes the "not built" notes of the Context
+and of "As built (part 1)". The Decisions above are unchanged; what the code does, where it
+differs from or adds to them:
+
+1. **The port.** `NetworkGateway.SubmitInventoryFeed(ctx, contract.InventoryFeed)
+   (contract.FeedResult, error)` **replaces** `SubmitAvailability`; `AvailabilityUpdate` is
+   gone. The feed is `SiteId`, `AsOf`, `Complete` (the wire's full-update flag stays in the
+   adapter), `Lines` (`SKU`, `Quantity`, `Basis`, sorted, one per SKU), `Part`/`Parts` and a
+   `Fingerprint`. Two narrow ports serve the use case: `InventoryFeeder` and
+   `FeedCatalogue` (`ListedSKUs(ctx, site)`, implemented by the product dictionary). The
+   stub logs the feed and sends nothing.
+2. **The use case** (`FeedInventory`, `feed_plan.go`, pure planning). A site's *pass* is the
+   set of its offers sharing the newest `ComputedAt`; that is the feed's `AsOf`, and an offer
+   of an earlier pass is not fresh (it is not fed, and it makes the feed incomplete). `Complete`
+   is true only when every listed SKU has a fresh offer **and** the feed fits one part: above
+   `contract.MaxFeedLines` (5000) it is split into partial parts, all with the same `AsOf`
+   (an omitted listing is zeroed by a complete feed and the other parts carry it). The
+   fingerprint hashes the complete flag and the lines, never the moment. A SKU with an offer and
+   no listing at the site is **logged once per process at `INFO`** and is not an error.
+3. **The gateway** (`retailnetwork/inventory.go`). Ledger kind `INVENTORY`, subject
+   `<site>#<asOf>` (RFC 3339 with nanoseconds; `#<part>` from the second part), key
+   `nf-inventory-<site>-<asOf>` (`-<part>` likewise), the exact body stored before the call and
+   the transaction reconciled with Decision 5's helper. A pass is fed once (a second look at the
+   same `asOf` reports where the first stands); a feed whose fingerprint changed is sent; an
+   unchanged one is sent again once **`inventoryRepeatEvery` = 1 h** has passed since the pass
+   it last described (a feed the network *failed* waits the same hour unless its content
+   changes). `ErrFeedAlreadyApplied` alone is a success. `ErrListingNotOnNode` is recorded
+   **before** the failed outcome (a crash in between records it again), the listing is taken
+   from the body we stored by the JSON path of the error, it is logged at `ERROR`, and it stays
+   out of the following feeds for **`rejectedListingTTL` = 24 h**, after which it is tried once
+   more: a listing the network learns of later is not silenced for good, and one that is still
+   wrong costs one failed feed and one `ERROR` a day. Leaving a line out changes the feed's
+   fingerprint, so the reduced feed is sent. When every line is held back nothing is sent
+   (`skipped_no_listings`, `WARN`). A SKU the dictionary lists no more (a dictionary that
+   changed under the use case) is left out and makes the feed incomplete.
+4. **Migration 0011** (`inventory_feed`). The ledger's `kind` check is **rebuilt**, not
+   widened in place: migration 0008 (ADR 0028) fixed the list at five kinds and `INVENTORY` was
+   not among them, so the constraint is dropped and recreated with all six. The new list must
+   stay a superset of 0008's (dropping `INBOUND_RECEIPT` or `NODE_PROFILE` would fail on a ledger
+   that already holds such a row), and the down migration deletes the `INVENTORY` rows before it
+   restores 0008's list. It also creates `network_inventory_feeds (site_code, part, subject,
+   fingerprint, as_of, updated_at)`, which is what lets a restart skip an unchanged feed, and
+   `network_rejected_listings (site_code, listing_id, reason, rejected_at)`; both reference
+   `network_nodes`, like `network_node_profiles`, so a site with no node has neither a feed state
+   nor a rejection and `SubmitInventoryFeed` answers `ErrSiteNotRegistered` (the use case reports
+   `skipped_no_node` at `INFO`). 0011 was the next free number on `develop` when this was built.
+5. **The dictionary reaches the gateway.** The live gateway finds the listing of a SKU through
+   `LiveConfig.Listings`, which `wireGateway` now takes: part 1 built the gateway without it, and
+   a gateway without a dictionary answers `ErrNoDictionary` rather than guessing. The one
+   `*producttranslation.Dictionary` serves three readers through their own ports (inbound
+   translation, the feed's catalogue, the gateway's listing lookup). `ListedSKUs` returns fleet
+   SKUs only, so the use case names no network identifier and no adapter was needed between
+   them; the composition root hands the dictionary over.
+6. **The worker (Decision 11).** `cmd/netfulfil/inventory_feed.go`, a copy of the profile worker:
+   live mode only, one pass at boot and then every `NETWORK_INVENTORY_INTERVAL` (default `5m`,
+   its own variable; `0` disables with a `WARN`; a malformed or negative value warns and keeps
+   `5m`), the sites are the gateway's own, and shutdown waits for the worker inside the existing
+   10 second budget (the shutdown semantics are unchanged). `5m` is a cadence of *looking*: the
+   offers change at the `RECOMPUTE_INTERVAL` (`1m`) and the gateway decides what is *sent*. The
+   chart renders `NETWORK_INVENTORY_INTERVAL` from `config.networkInventoryInterval`, in live
+   mode only. There is no metric for the feed: its signals are the logs and the `INVENTORY`
+   ledger rows (runbook, "The inventory feed").
+
+**Evidence.** The request body, the route, the two bases and the transaction kind are
+checked against the vendored `testdata/vendor-connectivity-openapi.yaml` (contract test:
+a complete feed, a one-line partial feed, bodies the schema must reject, the DTOs against
+the schema's properties and required fields, and the failed-transaction samples that carry
+`ErrListingNotOnNode` with its line path and `ErrFeedAlreadyApplied`). The gateway runs
+against the stateful fake Vendor API of part 1 extended with the inventory route
+(`gateway_live_inventory_test.go`): the ledger row and key, a restart, the hourly repeat,
+a split feed, a refused listing left out and tried again after its 24 hours, a crash between the
+ledger row and the call. The use case and
+its planning are table tests. Against a real Postgres (testcontainers, build tag
+`integration`) the feed state and the refused listings are written, refreshed and read
+after a reopen, the ledger accepts `INVENTORY`, and migration 0011 goes up, down and up
+with a ledger row of each earlier kind, a node and a profile in it (the rebuilt check must
+keep admitting all five), next to a fresh database migrated through every migration, down one
+step and up again. Through the real entry point (`run(ctx)`, a real Postgres and Kafka, the
+fake Vendor API judging a feed as the network does, a fake inventory-storage):
+both workers switched off with `0` send nothing; one run declares the profile and feeds the
+offers of a pass, complete and with listed SKUs only; later passes, and a restart, send
+nothing while the feed is unchanged and under an hour old; after an hour the same feed is
+repeated; a changed figure is sent at once; and a listing the node does not carry fails the
+first feed at its line, applies nothing, is left out of the next feed and stays out after a
+restart.
+
+**Not verified.** Nothing ran against the real network or offer-availability: the fake models
+the documented rules (the listing check, the zeroing of a full feed), not their code, and
+`ErrFeedAlreadyApplied` is taken from the spec's description, not from a sample of the live
+service. No deployment was changed (the cluster stays `NETWORK_MODE=stub`), so the worker has
+not fed a real site. The feed reads the offers of the last recompute pass without a lock
+against the next one: a read that falls in the middle of a pass finds some SKUs of the new pass
+and some of the old, and sends a partial feed (never a complete one with a stale figure); the
+next pass of the worker completes it. A feed above 5000 lines is split and tested as a plan
+and in the gateway, not through the real entry point.

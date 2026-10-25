@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 )
@@ -70,7 +71,7 @@ func bootNetwork(t *testing.T) (cfg bootConfig, nodes []retailnetwork.NodeDefini
 	if err != nil {
 		return cfg, nil, nil, err
 	}
-	gateway, err = wireGateway(quietLogger(), cfg.network, nodes, nil, nil)
+	gateway, err = wireGateway(quietLogger(), cfg.network, nodes, producttranslation.New(), nil, nil)
 	return cfg, nodes, gateway, err
 }
 

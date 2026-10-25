@@ -296,6 +296,7 @@ for the same `networkRef` may already have been delivered.
 | `SweepOrphanedHolds` | every `SWEEP_INTERVAL`, own ticker, unless `ORPHAN_HOLD_SWEEP_ENABLED=false` | the backstop for `RejectOverdueOrders` (ADR 0024): cancels the order-management hold of a `NEW` or `REJECTED` order that nobody decided, once `now > acknowledgeBy + ORPHAN_HOLD_GRACE`, records the outcome and publishes `OrphanedHoldCancelled`. Never changes the order's state. See [A held order is stuck in order-management](#a-held-order-is-stuck-in-order-management). |
 | `RecomputeCapabilityOffers` | every `RECOMPUTE_INTERVAL`, only when enabled | upserts one `capability_offers` row per known SKU. |
 | `DeclareNodeProfiles` | live mode only: immediately at start, then every `NETWORK_PROFILE_INTERVAL` (default `5m`; `0` disables) | derives each site's operational profile from the schedule, cycle-time and capacity caches and declares it to the network when its content changed (ADR 0027). See [the node profile](#the-node-profile). |
+| `FeedInventory` | live mode only: immediately at start, then every `NETWORK_INVENTORY_INTERVAL` (default `5m`; `0` disables) | plans one inventory feed per site from the persisted capability offers and the product dictionary and sends it when its content changed (an unchanged one at most hourly) (ADR 0027 part 2). See [the inventory feed](#the-inventory-feed). |
 | Outbox relay | continuous | see above. |
 
 Use-case details: [ddd/use-cases.md](../ddd/use-cases.md).
@@ -655,9 +656,8 @@ definition to register one from` on every poll.
 
 **Signals.** `retail-network:` log lines (`WARN` for skips, node convergence and
 node listing failures, `ERROR` for a failed shipment confirmation, `Info` once per
-process for the one remaining supply-loop no-op: `SubmitAvailability` does
-nothing in live mode until ADR 0027 part 2; the node profile has its own signals
-below); the poller's `poll demand failed`;
+process for the supply-loop no-ops that remain; the node profile and the
+inventory feed have their own signals below); the poller's `poll demand failed`;
 `circuit_breaker_state{dependency="retail-network"}` on `GET /metrics` next to
 `dependency="order-management"`; `GET /inbound-status` for the mode and the
 poller counters. `/readyz` does not depend on the network (ADR 0026 Decision 10):
@@ -728,6 +728,91 @@ ORDER BY updated_at DESC;
 
 **Stub mode** never starts the worker and the tables stay empty. The stub gateway
 records the last profile it was handed and sends nothing.
+
+### The inventory feed
+
+In live mode a second worker feeds each site's inventory
+([ADR 0027](../adr/0027-supply-loop-node-profile-and-inventory-feed.md), part 2):
+once at boot and then every `NETWORK_INVENTORY_INTERVAL` (default `5m`; `0` disables
+it, with a `WARN`). It reads local data only: the `capability_offers` the last
+`RECOMPUTE_INTERVAL` pass persisted and the product dictionary. It sends nothing a
+neighbour has to answer, so an outage elsewhere cannot stop it. What it sends and
+what the network is told:
+
+- **One feed per site per pass**, `POST /vendor/inventory`, one line per SKU the site
+  has a listing for: the advertised quantity and the basis (`PHYSICAL` or
+  `THROUGHPUT_CONSTRAINED`). The moment it describes (`asOf`) is the recompute pass's
+  own clock reading, not the moment of sending.
+- **Complete only when every listed SKU has a fresh offer.** A complete feed makes the
+  network zero what it omits, so when a listed SKU has no offer of the newest pass
+  (its inventory lookup failed, or it was never computed) it is left out and the feed
+  goes as a partial one. Above 5000 lines it is split into partial parts.
+- **Sent when its content changed**, otherwise held back: an unchanged feed is repeated
+  at most hourly, so the network's view carries a recent `asOf`. A feed the network
+  failed is not sent again with the same content until an hour has passed.
+- **A SKU the site has no listing for** is not an error: it is not fed, and logged
+  once per process at `INFO`.
+
+**State (migration 0011).** `network_inventory_feeds` holds, per site and part, the
+ledger subject of the latest attempt, the fingerprint of what it carried and the pass
+it described (this is what lets a restart skip an unchanged feed).
+`network_rejected_listings` holds the listings the network refused as not on the node.
+The attempts themselves are `network_submissions` rows of kind `INVENTORY`, subject
+`<site>#<asOf>` (`#<part>` from the second part of a split feed), key
+`nf-inventory-<site>-<asOf>`, the exact body stored before the call:
+
+```sql
+SELECT site_code, part, subject, fingerprint, as_of, updated_at FROM network_inventory_feeds;
+
+SELECT site_code, listing_id, reason, rejected_at FROM network_rejected_listings
+ORDER BY rejected_at DESC;
+
+SELECT subject, status, transaction_id, errors, updated_at
+FROM network_submissions
+WHERE kind = 'INVENTORY'
+ORDER BY updated_at DESC
+LIMIT 20;
+```
+
+**When the feed seems stalled**, in this order:
+
+1. Is the worker running? `inventory feed wired` at boot (`interval`, `sites`). Absent:
+   stub mode, `NETWORK_INVENTORY_INTERVAL=0` (a `WARN` says so) or a gateway with no
+   site (`inventory feed not started`).
+2. Are there offers? `GET /capability-offers`, and the log line `no capability offer
+   for the site yet` (`DEBUG`). The feed follows the recompute pass: no pass, no feed.
+3. Is the site a node? `INFO` `the site has no node on the network yet`: the demand loop
+   registers or adopts it at a poll (see `NODE_REGISTRATION`); fed once it has one.
+4. Is anything listed for the site? The dictionary needs an entry for the SKU with that
+   `site`, or without any `site`. `skipped_no_listings` / `every line of the inventory
+   feed is held back` (`WARN`) means nothing could be sent.
+5. The newest `INVENTORY` row and its `status`.
+
+| Log | Meaning | What to do |
+| --- | --- | --- |
+| `INFO` `inventory fed` (`sent`, `confirmed`) | a pass that changed something on the network | nothing |
+| `INFO` `SKU has no listing at the site; it is not fed (said once)` | an offer for a SKU the dictionary does not list at that site | add the listing if the network sells it there; otherwise nothing |
+| `WARN` `listed SKUs without a fresh offer in the pass are left out and the feed is not complete` (`skus`, `first`) | an inventory lookup failed or an offer is older than the newest pass | check inventory-storage; the next pass completes it |
+| `ERROR` `the network refused a listing as not on the node; it is left out of the next inventory feeds` (`listing`, `path`) | the listing id is not on that node on the network | fix the dictionary entry (or the node's catalogue); the listing stays out for 24 h, then is tried once more |
+| `ERROR` `the network refused a listing as not on the node but the error names no line of the feed` | the error path did not point at a line we sent | read `message`; nothing can be left out automatically |
+| `ERROR` `the network failed an inventory feed` / `refused an inventory feed` (`errors`) | the transaction failed, or the `POST` itself was refused; the list is the network's own | read `errors`; a changed feed, or an hour, sends it again |
+| `WARN` `the last inventory feed failed and its content has not changed` | a standing failure | fix the cause; it is repeated when the content changes or an hour has passed |
+| `INFO` `the network already held this inventory feed; counted as applied` | `ErrFeedAlreadyApplied` | nothing; it is a success |
+| `WARN` `could not read the outcome of an inventory feed yet; the next pass will` | the write is accepted and its transaction id is stored | nothing; the next pass reads it |
+
+**What to do with an `INVENTORY` row.**
+
+- `SENDING` or `PROCESSING`: converges by itself. The next pass resends the stored body
+  under the same key or reads the transaction by its persisted id; nothing is sent twice.
+- `FAILURE`: see `errors`. Not re-sent with the same content for an hour; a changed
+  feed is sent at once.
+- Nothing to re-arm by hand. To make the adapter forget a refused listing before its 24
+  hours are over, delete its row from `network_rejected_listings` (after fixing the
+  dictionary); the next pass sends it again.
+- A dictionary change (an added or corrected listing) is read at boot: restart the pod
+  (see [Change the product dictionary](#change-the-product-dictionary-the-stub-demand-or-the-node-definitions)).
+
+**Stub mode** never starts the worker; the tables stay empty.
 
 ## Reports API (`netfulfil-reports`)
 

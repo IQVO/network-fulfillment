@@ -60,6 +60,42 @@ type Store interface {
 	// That guard is what makes the revision monotonic across restarts and across
 	// two replicas. A site with no node is an error (ErrMappingConflict).
 	AdvanceNodeProfile(ctx context.Context, st NodeProfileState) (NodeProfileState, error)
+
+	// InventoryFeedState returns the last attempt to feed one part of a site's
+	// inventory (ADR 0027 part 2).
+	InventoryFeedState(ctx context.Context, siteCode string, part int) (InventoryFeedState, bool, error)
+	// SaveInventoryFeedState records the attempt in st, before its first HTTP
+	// call. It never moves a part back to an earlier AsOf. A site with no node
+	// is an error (ErrMappingConflict).
+	SaveInventoryFeedState(ctx context.Context, st InventoryFeedState) error
+	// RejectedListings returns the listings of a site that the network refused
+	// (ErrListingNotOnNode), with when.
+	RejectedListings(ctx context.Context, siteCode string) ([]RejectedListing, error)
+	// RejectListing records that the network refused a listing of a site, or
+	// refreshes the record. Idempotent.
+	RejectListing(ctx context.Context, siteCode string, l RejectedListing) error
+}
+
+// InventoryFeedState is where one part of a site's inventory feed stands: the
+// ledger row of the latest attempt, what it carried, and the moment it was as of.
+// "A feed is sent when its fingerprint changes" is decided against it.
+type InventoryFeedState struct {
+	SiteCode string
+	Part     int
+	// Subject is the ledger subject (kind INVENTORY) of the latest attempt.
+	Subject string
+	// Fingerprint identifies the content of that attempt as it went on the wire
+	// (the feed's fingerprint, and which lines were held back).
+	Fingerprint string
+	// AsOf is the recompute pass the attempt described.
+	AsOf time.Time
+}
+
+// RejectedListing is a listing the network refused as not on the node, and when.
+type RejectedListing struct {
+	ListingID  string
+	Reason     string
+	RejectedAt time.Time
 }
 
 // NodeProfileState is the persisted state of a site's operational profile.
@@ -89,6 +125,7 @@ const (
 	KindNodeRegistration     SubmissionKind = "NODE_REGISTRATION"
 	KindNodeProfile          SubmissionKind = "NODE_PROFILE"
 	KindInboundReceipt       SubmissionKind = "INBOUND_RECEIPT"
+	KindInventory            SubmissionKind = "INVENTORY"
 	maxIdempotencyKeyLength                 = 128
 )
 
@@ -111,7 +148,7 @@ func (s SubmissionStatus) Terminal() bool { return s == StatusSuccess || s == St
 // Submission is one row of the ledger.
 type Submission struct {
 	Kind           SubmissionKind
-	Subject        string // the NetworkRef, the site code for a node registration, <site>#<revision>#<attempt> for a profile
+	Subject        string // the NetworkRef, the site code for a node registration, <site>#<revision>#<attempt> for a profile, <site>#<asOf> for an inventory feed
 	IdempotencyKey string
 	Body           []byte // the exact request body, byte for byte
 	TransactionID  string // empty until the 202 was read

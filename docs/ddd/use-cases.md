@@ -266,8 +266,8 @@ context would advertise per SKU at `SITE_ID`. Always on.
   - `CapabilityOfferRepo.Save` (upsert per `(sku, siteId)`).
 - **Invariants** (`capability_offer.go`): SKU and site not empty, quantity
   not negative, advertised never above physical, basis one of the two.
-- **Events**: none. The offer is not sent to the network either
-  (`SubmitAvailability` is never called).
+- **Events**: none. The offer is not sent to the network by this use case: the
+  inventory feed ([FeedInventory](#feedinventory)) reads the persisted offers.
 - **Failure**: an inventory, compute or save error is logged and that SKU is
   skipped; the pass continues.
 
@@ -301,3 +301,34 @@ acknowledgement deadlines by it. Live mode only; the stub never starts the worke
   cancelled context stops the pass before the next site; a memory that cannot be
   read (`LastDeclared`) means the site is left for the next pass rather than
   declared with a ceiling that might be lowered.
+
+## FeedInventory
+
+`feed_inventory.go` and `feed_plan.go` (ADR 0027 part 2). Tells the network, per site,
+what the site claims it can ship. Live mode only; the stub never starts the worker.
+Reads local data only: the persisted `CapabilityOffer`s and the product dictionary.
+
+- **Input**: none; the sites are the ones the live gateway converges onto nodes
+  (`SITE_ID` plus the node file's).
+- **Per site** (`planInventoryFeeds`, pure): the site's *pass* is the set of its offers
+  sharing the newest `ComputedAt`, which is the feed's `AsOf`; an offer of an earlier
+  pass is not fresh and is not fed. Only a SKU the site has a listing for
+  (`FeedCatalogue.ListedSKUs`) is a line (`advertisedQuantity`, `basis`; an unknown
+  figure is never an offer). The feed is `Complete` only when every listed SKU has a
+  fresh offer and it fits in one part; above `contract.MaxFeedLines` (5000) it is
+  split into partial parts with the same `AsOf`. The fingerprint hashes the complete
+  flag and the lines, not the moment.
+- **Unlisted SKUs**: an offer for a SKU with no listing at the site is expected, not an
+  error: it is not fed and is logged once per process at `INFO`.
+- **Calls**: `NetworkGateway.SubmitInventoryFeed`, which owns delivery: it sends a feed
+  when its fingerprint changed, repeats an unchanged one at most hourly, keeps out of
+  the feed a listing the network refused as not on the node, and reconciles the
+  transaction by its persisted id.
+- **Outcomes** (`contract.FeedOutcome`): `sent`, `confirmed`, `pending`, `unchanged`,
+  `failed`, `skipped_no_node` (`contract.ErrSiteNotRegistered`), `skipped_no_offers`,
+  `skipped_no_listings`.
+- **Events**: none. **Metrics**: none; logs only
+  ([runbook](../operations/runbook.md#the-inventory-feed)).
+- **Failure**: one site's failure is logged and never stops the others; a cancelled
+  context stops the pass before the next site; offers that cannot be read fail every
+  site for this pass and the next one retries.

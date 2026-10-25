@@ -298,8 +298,8 @@ func (stubGateway) PollDemand(context.Context, time.Time) ([]contract.InboundDem
 func (stubGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, contract.Acknowledgement) error {
 	return nil
 }
-func (stubGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
-	return nil
+func (stubGateway) SubmitInventoryFeed(context.Context, contract.InventoryFeed) (contract.FeedResult, error) {
+	return contract.FeedResult{}, nil
 }
 func (stubGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
 	return contract.ProfileResult{}, nil

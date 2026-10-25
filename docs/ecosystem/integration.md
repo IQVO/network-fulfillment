@@ -93,8 +93,10 @@ route to the external network, and `NETWORK_MODE` picks its implementation
   derives each site's operational profile (cutoffs, handling time, throughput)
   from the local CPT schedule, cycle-time and capacity caches and declares it with
   `PUT /vendor/nodes/{nodeId}/profile` under a revision this service persists
-  (migration 0010) and never lowers. `SubmitAvailability` is a logged no-op until
-  the inventory feed (ADR 0027 part 2). Without `NETWORK_BASE_URL`
+  (migration 0010) and never lowers. A second worker, `FeedInventory`
+  (ADR 0027 part 2), feeds each site's capability offers with
+  `POST /vendor/inventory` (migration 0011) under the listings of the product
+  dictionary. Without `NETWORK_BASE_URL`
   or `NETWORK_VENDOR_ID` the boot fails, naming each missing one.
 
 What the stub does for each port method (the live behaviour is in ADR 0026):
@@ -105,7 +107,7 @@ What the stub does for each port method (the live behaviour is in ADR 0026):
 | `SubmitAcknowledgement(ref, {accepted, reason})` | `ReceiveNetworkDemand`, `ReconcileSubmittedOrders` (resend) | records the answer and removes the unit from the pending list |
 | `SubmissionStatus(ref)` | `ReconcileSubmittedOrders` | `SUCCESS` for a ref this process submitted, `PENDING` otherwise (so after a restart every earlier submission is `PENDING`) |
 | `SubmitShipmentConfirmation(ref, shippedAt)` | `ConfirmNetworkOrderShipment` | records it |
-| `SubmitAvailability(update)` | nobody yet | records it |
+| `SubmitInventoryFeed(feed)` | `FeedInventory`, live mode only (the stub never starts the worker) | logs it and sends nothing; replaces the old `SubmitAvailability` |
 | `DeclareNodeProfile(profile)` | `DeclareNodeProfiles`, live mode only (the stub never starts the worker) | records the last profile per site and sends nothing; replaces the old `DeclareCapability`, which the real API never had |
 | `RequestLabel(ref, packageCount)` | `ConfirmNetworkOrderShipment` (one package), before it records `CONFIRMED` | deterministic fake `{labelRef, trackingNumber, carrier}` per package |
 
@@ -313,6 +315,6 @@ annotations: [mcp/tools.md](../mcp/tools.md).
 - **No `PackageManifested` consumer** from `fulfillment-execution`. Shipment
   confirmation is an explicit REST call (ADR 0014) because there is no
   persisted `WorkUnitId -> NetworkRef` mapping.
-- **Capability offers are not sent to the network.** `SubmitAvailability`
-  exists on the port, but no use case calls it.
+- **Capability offers reach the network only in live mode.** `FeedInventory` feeds them
+  (ADR 0027 part 2); in stub mode no worker runs and nothing is sent.
 - **No call to `product-master`** or any other context not listed above.

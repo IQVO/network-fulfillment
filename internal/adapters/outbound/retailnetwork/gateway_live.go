@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
@@ -37,7 +36,10 @@ type LiveConfig struct {
 	// (NETWORK_NODES_FILE).
 	Nodes []NodeDefinition
 	// Store persists the identifier maps and the submission ledger. Required.
-	Store      Store
+	Store Store
+	// Listings is the product dictionary read for one site (ADR 0027 §10): the
+	// listing each SKU is fed under. Without it the gateway cannot feed inventory.
+	Listings   ListingResolver
 	HTTPClient *http.Client
 	Logger     *slog.Logger
 	Recorder   resilience.StateRecorder
@@ -53,7 +55,8 @@ type LiveGateway struct {
 	sites  []string
 	defs   map[string]NodeDefinition
 
-	availabilityNoted atomic.Bool // the inventory no-op logs at Info once
+	// listings finds the listing a SKU is fed under at a site (the inventory feed).
+	listings ListingResolver
 }
 
 var _ ports.NetworkGateway = (*LiveGateway)(nil)
@@ -74,7 +77,7 @@ func NewLiveGateway(cfg LiveConfig) (*LiveGateway, error) {
 }
 
 func newLiveGateway(c *apiClient, st Store, cfg LiveConfig) *LiveGateway {
-	g := &LiveGateway{client: c, store: st, logger: cfg.Logger, defs: make(map[string]NodeDefinition, len(cfg.Nodes))}
+	g := &LiveGateway{client: c, store: st, logger: cfg.Logger, listings: cfg.Listings, defs: make(map[string]NodeDefinition, len(cfg.Nodes))}
 	if g.logger == nil {
 		g.logger = c.logger
 	}
@@ -597,23 +600,4 @@ func (g *LiveGateway) recordConfirmationOutcome(ctx context.Context, ref shared.
 	failed, _, _ := g.store.Submission(ctx, row.Kind, row.Subject)
 	g.logger.Error("retail-network: the network failed a shipment confirmation; the order stays accepted there until an operator acts",
 		"networkRef", ref, "errors", failed.Errors)
-}
-
-// ---- the supply loop's seam still open (ADR 0027, part 2) ----
-
-// SubmitAvailability is a documented, non-failing no-op: the inventory feed
-// belongs to part 2 of the supply loop, ADR 0027. It logs once at Info, then at
-// Debug.
-func (g *LiveGateway) SubmitAvailability(_ context.Context, _ contract.AvailabilityUpdate) error {
-	g.noteSupplyNoOp(&g.availabilityNoted, "SubmitAvailability")
-	return nil
-}
-
-func (g *LiveGateway) noteSupplyNoOp(noted *atomic.Bool, method string) {
-	msg := "retail-network: " + method + " is a no-op in the live gateway until the inventory feed (ADR 0027, part 2) is built"
-	if noted.CompareAndSwap(false, true) {
-		g.logger.Info(msg, "method", method)
-		return
-	}
-	g.logger.Debug(msg, "method", method)
 }
