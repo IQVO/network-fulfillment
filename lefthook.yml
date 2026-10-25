@@ -1,4 +1,4 @@
-# lefthook.yml — git hooks template (warehouse-harness-template v1).
+# lefthook.yml — git hooks template (warehouse-harness-template v2).
 #
 # One-time local activation (hooks are NOT tracked in git, so every clone must
 # do this once):
