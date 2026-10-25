@@ -200,6 +200,11 @@ func expectOneAnswerThenRelease(t *testing.T, ctx context.Context, rig *liveRig,
 	if lines := rig.planner.heldLines(); !slices.Equal(lines, []string{liveSKU + " x2"}) {
 		t.Fatalf("order-management lines = %v, want [%s x2] (the listing translated to the SKU)", lines, liveSKU)
 	}
+	// The site the network addressed the demand to rides along on the hold, so
+	// order-management projects the demand THERE (its ADR 0044).
+	if sites := rig.planner.raisedSites(); !slices.Equal(sites, []string{liveSite}) {
+		t.Fatalf("fulfillmentSiteId sent on the hold = %v, want [%s]", sites, liveSite)
+	}
 	expectEqual(t, "acknowledgement requests", rig.network.requestCount(http.MethodPost, "/vendor/acknowledgements"), 1)
 	expectEqual(t, "acknowledgement writes", rig.network.writeCount("/vendor/acknowledgements"), 1)
 	expectEqual(t, "network order state", rig.network.orderState(livePO), "ACKNOWLEDGED")

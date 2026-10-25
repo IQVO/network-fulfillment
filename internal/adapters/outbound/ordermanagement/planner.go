@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"time"
@@ -52,6 +53,45 @@ type receiveOrderRequest struct {
 	// IT decides feasibility via PromisePolicy.FeasibleBy. This is what
 	// ADR 0001 §7 means by "asked, never recomputed here".
 	RequiredShipBy time.Time `json:"requiredShipBy"`
+	// FulfillmentSiteID is the site this network order is destined for, as
+	// this service already knows it (ADR 0029). OPTIONAL and caller-assigned
+	// on order-management's side (its ADR 0044): omitted when the site is
+	// empty or not a facility-layout site code, so the request is then
+	// byte-identical to what was sent before the field existed.
+	FulfillmentSiteID string `json:"fulfillmentSiteId,omitempty"`
+}
+
+// validSiteCode mirrors order-management's FulfillmentSiteID rule (its ADR
+// 0044, itself a mirror of facility-layout's site code): at least one
+// character, uppercase ASCII letters and digits only. It is a mirror, not a
+// lookup: an unknown but well-formed code is sent as is.
+func validSiteCode(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// fulfillmentSite returns the site to send, or "" to omit the field. A
+// malformed site is logged and left out rather than sent: order-management
+// would answer 400 for it, and the hold (and the network's answer) must not
+// fail on a field that is optional there.
+func fulfillmentSite(ref shared.NetworkRef, site shared.SiteId) string {
+	if site == "" {
+		return ""
+	}
+	if !validSiteCode(string(site)) {
+		slog.Warn("network order site is not a site code; fulfillmentSiteId omitted",
+			"networkRef", string(ref), "siteId", string(site))
+		return ""
+	}
+	return string(site)
 }
 
 type orderResponse struct {
@@ -104,6 +144,7 @@ func (p *Planner) RaiseHeldOrder(ctx context.Context, req contract.HeldOrderRequ
 		ReleaseOnAllocation:  false,
 		AllowPartialShipment: false,
 		RequiredShipBy:       req.RequiredShipBy,
+		FulfillmentSiteID:    fulfillmentSite(req.NetworkRef, req.SiteId),
 	}
 
 	var out orderResponse
