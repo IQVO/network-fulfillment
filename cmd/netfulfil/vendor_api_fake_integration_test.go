@@ -624,6 +624,7 @@ type planFake struct {
 	raises   int
 	keys     map[string]string // Idempotency-Key -> order id
 	skus     []string
+	sites    []string // fulfillmentSiteId of every raise ("" = the field was absent)
 	releases []string
 	cancels  int
 }
@@ -658,8 +659,10 @@ func (p *planFake) serve(w http.ResponseWriter, r *http.Request) {
 				SKU      string `json:"sku"`
 				Quantity int    `json:"quantity"`
 			} `json:"lines"`
+			FulfillmentSiteID string `json:"fulfillmentSiteId"`
 		}
 		_ = json.Unmarshal(raw, &body)
+		p.sites = append(p.sites, body.FulfillmentSiteID)
 		for _, l := range body.Lines {
 			p.skus = append(p.skus, fmt.Sprintf("%s x%d", l.SKU, l.Quantity))
 		}
@@ -688,4 +691,11 @@ func (p *planFake) heldLines() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return slices.Clone(p.skus)
+}
+
+// raisedSites is the fulfillmentSiteId carried by every raise ("" = absent).
+func (p *planFake) raisedSites() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.sites)
 }

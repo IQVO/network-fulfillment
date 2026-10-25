@@ -274,3 +274,61 @@ func TestRaiseHeldOrder_SerialisesTheSameDemandIdentically(t *testing.T) {
 		}
 	}
 }
+
+// raiseBody raises a held order for site and returns the JSON body sent.
+func raiseBody(t *testing.T, site shared.SiteId) map[string]any {
+	t.Helper()
+	rec := &recorder{handler: func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ord-1","promiseDate":"2026-09-24T08:00:00Z","lines":[]}`))
+	}}
+	srv := rec.server(t)
+	p := ordermanagement.NewPlanner(srv.URL, srv.Client())
+	if _, err := p.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{
+		NetworkRef: "po-1", SiteId: site, RequiredShipBy: now().Add(time.Hour),
+		Lines: map[shared.SKU]int{"SKU-1": 2},
+	}); err != nil {
+		t.Fatalf("RaiseHeldOrder: %v", err)
+	}
+	return rec.bodies[0]
+}
+
+// The site the service already knows rides along as fulfillmentSiteId; an
+// empty or malformed one is OMITTED, so the body is then identical to the one
+// sent before the field existed.
+func TestRaiseHeldOrder_FulfillmentSiteID(t *testing.T) {
+	cases := []struct {
+		name string
+		site shared.SiteId
+		want any // nil = key absent
+	}{
+		{"a site code is sent", "WH1", "WH1"},
+		{"letters only", "A", "A"},
+		{"digits only", "7", "7"},
+		{"the whole alphabet range", "AZ09", "AZ09"},
+		{"empty is omitted", "", nil},
+		{"lowercase is omitted", "wh1", nil},
+		{"a dash is omitted", "WH-1", nil},
+		{"a space is omitted", "WH 1", nil},
+		{"just under A is omitted", "@", nil},
+		{"just over Z is omitted", "[", nil},
+		{"just under 0 is omitted", "/", nil},
+		{"just over 9 is omitted", ":", nil},
+		{"one bad char among good ones is omitted", "WH1_", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := raiseBody(t, tc.site)
+			got, present := body["fulfillmentSiteId"]
+			if tc.want == nil {
+				if present {
+					t.Fatalf("fulfillmentSiteId = %v, want the key absent", got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Fatalf("fulfillmentSiteId = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -42,7 +42,7 @@ import (
 
 const (
 	e2eNetworkRef = "po-e2e-1"
-	e2eSite       = "site-1"
+	e2eSite       = "SITE1"
 )
 
 type e2eEnv struct {
