@@ -147,6 +147,58 @@ channels:
           - $ref: "#/components/messages/AcknowledgementDeadlineAtRiskAnalytics"
           - $ref: "#/components/messages/OrphanedHoldCancelledAnalytics"
 
+  warehouse.process-path-management.events:
+    description: |
+      process-path-management's integration topic, CONSUMED by this service,
+      not published (the `Topic` constant in
+      `internal/adapters/outbound/processpathcache/consumer.go`). The
+      process-path capability cache replays it from the earliest offset under
+      a per-process unique group
+      (`network-fulfillment-process-path-capability-cache`), started only when
+      `CAPABILITY_OFFER_ENABLED=true`. It acts on `ProcessPathCreated`,
+      `ProcessPathUpdated`, `ProcessPathDeactivated` and `CPTScheduleChanged`
+      and ignores every other type.
+    subscribe:
+      operationId: consumeProcessPathEvents
+      summary: Keep the local process-path and CPT-schedule capability cache current.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ProcessPathCreated"
+          - $ref: "#/components/messages/ProcessPathUpdated"
+          - $ref: "#/components/messages/ProcessPathDeactivated"
+          - $ref: "#/components/messages/CPTScheduleChanged"
+  warehouse.work-planning.events:
+    description: |
+      wes-work-planning's integration topic, CONSUMED by this service, not
+      published (the `Topic` constant in
+      `internal/adapters/outbound/pathcapacitycache/consumer.go`). The path
+      capacity cache replays it under a per-process unique group, started only
+      when `CAPABILITY_OFFER_ENABLED=true`, and acts only on
+      `PathCapacityChanged`.
+    subscribe:
+      operationId: consumeWorkPlanningEvents
+      summary: Keep the local remaining-admission-capacity read model current.
+      message:
+        $ref: "#/components/messages/PathCapacityChanged"
+  warehouse.inbound-receiving.events:
+    description: |
+      inbound-receiving's integration topic, CONSUMED by this service, not
+      published (the inbound loop of ADR 0028: `TypeReceiptCartonReceived`,
+      `TypeCartonDiscrepancyRaised`, `TypeReceiptClosed` in
+      `internal/adapters/inbound/kafka/receipt_consumer.go`). The consumer
+      books the vendor's seller-shipment cartons onto inbound-receiving's ASNs
+      and reports the receipts back to the network, under the stable group
+      `INBOUND_RECEIPT_CONSUMER_GROUP` (set in warehouse-infra develop as
+      `network-fulfillment-inbound-receiving`).
+    subscribe:
+      operationId: consumeInboundReceiptEvents
+      summary: Apply the receipt handover of the inbound loop (ADR 0028).
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ReceiptCartonReceived"
+          - $ref: "#/components/messages/CartonDiscrepancyRaised"
+          - $ref: "#/components/messages/ReceiptClosed"
+
 components:
   messages:
     NetworkOrderReceived:
@@ -749,6 +801,94 @@ components:
               answer: "CANCELLED"
               at: "2026-09-23T08:00:00Z"
 
+    ProcessPathCreated:
+      name: ProcessPathCreated
+      title: Process path created (consumed from process-path-management)
+      summary: A process path was defined.
+      description: |
+        CONSUMED, not produced. Pinned by process-path-management's `apis/asyncapi.yaml`:
+        `source=/warehouse/process-path-management`, type
+        `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/ProcessPathCreatedEvent"
+    ProcessPathUpdated:
+      name: ProcessPathUpdated
+      title: Process path updated (consumed from process-path-management)
+      summary: A process path definition changed.
+      description: |
+        CONSUMED, not produced. Pinned by process-path-management's `apis/asyncapi.yaml`:
+        `source=/warehouse/process-path-management`, type
+        `com.warehouse.wes.process-path-management.processpath.ProcessPathUpdated`.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/ProcessPathUpdatedEvent"
+    ProcessPathDeactivated:
+      name: ProcessPathDeactivated
+      title: Process path deactivated (consumed from process-path-management)
+      summary: A process path was deactivated.
+      description: |
+        CONSUMED, not produced. Pinned by process-path-management's `apis/asyncapi.yaml`:
+        `source=/warehouse/process-path-management`, type
+        `com.warehouse.wes.process-path-management.processpath.ProcessPathDeactivated`.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/ProcessPathDeactivatedEvent"
+    CPTScheduleChanged:
+      name: CPTScheduleChanged
+      title: CPT schedule changed (consumed from process-path-management)
+      summary: The CPT cutoff schedule of a path changed.
+      description: |
+        CONSUMED, not produced. Pinned by process-path-management's `apis/asyncapi.yaml`:
+        `source=/warehouse/process-path-management`, type
+        `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged`.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/CPTScheduleChangedEvent"
+    PathCapacityChanged:
+      name: PathCapacityChanged
+      title: Path capacity changed (consumed from wes-work-planning)
+      summary: The remaining admission capacity of a process path changed.
+      description: |
+        CONSUMED, not produced. Pinned by wes-work-planning's `apis/asyncapi.yaml`:
+        `source=/warehouse/wes-work-planning`, type
+        `com.warehouse.wes.work-planning.workpool.PathCapacityChanged`.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/PathCapacityChangedEvent"
+    ReceiptCartonReceived:
+      name: ReceiptCartonReceived
+      title: Receipt carton received (consumed from inbound-receiving)
+      summary: One carton of a receipt was received (identity-only handover to this service; the carton contents stay in inbound-receiving).
+      description: |
+        CONSUMED, not produced. Pinned by inbound-receiving's `apis/asyncapi.yaml`:
+        `source=/warehouse/inbound-receiving`, type
+        `com.warehouse.wms.inbound-receiving.receipt.ReceiptCartonReceived`.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/ReceiptCartonReceivedEvent"
+    CartonDiscrepancyRaised:
+      name: CartonDiscrepancyRaised
+      title: Carton discrepancy raised (consumed from inbound-receiving)
+      summary: A carton-level finding was raised during receipt.
+      description: |
+        CONSUMED, not produced. Pinned by inbound-receiving's `apis/asyncapi.yaml`:
+        `source=/warehouse/inbound-receiving`, type
+        `com.warehouse.wms.inbound-receiving.receipt.CartonDiscrepancyRaised`.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/CartonDiscrepancyRaisedEvent"
+    ReceiptClosed:
+      name: ReceiptClosed
+      title: Receipt closed (consumed from inbound-receiving)
+      summary: A receipt was closed.
+      description: |
+        CONSUMED, not produced. Pinned by inbound-receiving's `apis/asyncapi.yaml`:
+        `source=/warehouse/inbound-receiving`, type
+        `com.warehouse.wms.inbound-receiving.receipt.ReceiptClosed`.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/ReceiptClosedEvent"
   schemas:
     KafkaHeaders:
       type: object
@@ -1232,3 +1372,362 @@ components:
               const: "urn:warehouse:network-fulfillment:analytics:OrphanedHoldCancelled:v1"
             data:
               $ref: "#/components/schemas/OrphanedHoldCancelledData"
+    ProcessPathCreatedEvent:
+      type: object
+      description: |
+        CloudEvents 1.0 envelope of process-path-management's ProcessPathCreated, the integration payload, as
+        consumed here.
+      required: [specversion, id, source, type, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+        id:
+          type: string
+        source:
+          type: string
+          enum: ["/warehouse/process-path-management"]
+        type:
+          type: string
+          const: "com.warehouse.wes.process-path-management.processpath.ProcessPathCreated"
+        subject:
+          type: string
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          const: "urn:warehouse:process-path-management:events:ProcessPathCreated:v1"
+        data:
+          type: object
+          description: The fields this service reads; the producer's payload carries more (required_capabilities, eligibility, intake), ignored here.
+          required: [path_id]
+          properties:
+            path_id:
+              type: string
+            cycle_time_p95:
+              type: string
+              description: Go duration string, e.g. "24h0m0s".
+            match_prefix:
+              type: string
+            destination_location_role:
+              type: string
+              enum: [Drop, WorkCenter, Shipping]
+    ProcessPathUpdatedEvent:
+      type: object
+      description: |
+        CloudEvents 1.0 envelope of process-path-management's ProcessPathUpdated, the integration payload, as
+        consumed here.
+      required: [specversion, id, source, type, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+        id:
+          type: string
+        source:
+          type: string
+          enum: ["/warehouse/process-path-management"]
+        type:
+          type: string
+          const: "com.warehouse.wes.process-path-management.processpath.ProcessPathUpdated"
+        subject:
+          type: string
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          const: "urn:warehouse:process-path-management:events:ProcessPathUpdated:v1"
+        data:
+          type: object
+          description: The fields this service reads; the producer's payload carries more (required_capabilities, eligibility, intake), ignored here.
+          required: [path_id]
+          properties:
+            path_id:
+              type: string
+            cycle_time_p95:
+              type: string
+              description: Go duration string, e.g. "24h0m0s".
+            match_prefix:
+              type: string
+            destination_location_role:
+              type: string
+              enum: [Drop, WorkCenter, Shipping]
+    ProcessPathDeactivatedEvent:
+      type: object
+      description: |
+        CloudEvents 1.0 envelope of process-path-management's ProcessPathDeactivated, the integration payload, as
+        consumed here.
+      required: [specversion, id, source, type, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+        id:
+          type: string
+        source:
+          type: string
+          enum: ["/warehouse/process-path-management"]
+        type:
+          type: string
+          const: "com.warehouse.wes.process-path-management.processpath.ProcessPathDeactivated"
+        subject:
+          type: string
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          const: "urn:warehouse:process-path-management:events:ProcessPathDeactivated:v1"
+        data:
+          type: object
+          required: [path_id]
+          properties:
+            path_id:
+              type: string
+    CPTScheduleChangedEvent:
+      type: object
+      description: |
+        CloudEvents 1.0 envelope of process-path-management's CPTScheduleChanged, the integration payload, as
+        consumed here.
+      required: [specversion, id, source, type, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+        id:
+          type: string
+        source:
+          type: string
+          enum: ["/warehouse/process-path-management"]
+        type:
+          type: string
+          const: "com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged"
+        subject:
+          type: string
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          const: "urn:warehouse:process-path-management:events:CPTScheduleChanged:v1"
+        data:
+          type: object
+          description: A full snapshot of the site's cutoff schedule, not a diff; the cache keeps path id -> next cutoff.
+          required: [site_id, timezone, cutoffs]
+          properties:
+            site_id:
+              type: string
+            timezone:
+              type: string
+              description: IANA zone.
+            cutoffs:
+              type: array
+              items:
+                type: object
+                required: [cpt_id, local_time, days_of_week, ship_method, eligible_path_ids]
+                properties:
+                  cpt_id:
+                    type: string
+                  local_time:
+                    type: string
+                    description: Recurring daily cutoff, HH:MM.
+                  days_of_week:
+                    type: array
+                    items:
+                      type: string
+                  ship_method:
+                    type: string
+                  eligible_path_ids:
+                    type: array
+                    items:
+                      type: string
+    PathCapacityChangedEvent:
+      type: object
+      description: |
+        CloudEvents 1.0 envelope of wes-work-planning's PathCapacityChanged, the integration payload, as
+        consumed here.
+      required: [specversion, id, source, type, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+        id:
+          type: string
+        source:
+          type: string
+          enum: ["/warehouse/wes-work-planning"]
+        type:
+          type: string
+          const: "com.warehouse.wes.work-planning.workpool.PathCapacityChanged"
+        subject:
+          type: string
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          const: "urn:warehouse:wes-work-planning:events:PathCapacityChanged:v1"
+        data:
+          type: object
+          required: [path_id, cutoff_at, remaining_units, known]
+          properties:
+            path_id:
+              type: string
+            cutoff_at:
+              type: string
+            remaining_units:
+              type: integer
+            known:
+              type: boolean
+    ReceiptCartonReceivedEvent:
+      type: object
+      description: |
+        CloudEvents 1.0 envelope of inbound-receiving's ReceiptCartonReceived, the integration payload, as
+        consumed here.
+      required: [specversion, id, source, type, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+        id:
+          type: string
+        source:
+          type: string
+          enum: ["/warehouse/inbound-receiving"]
+        type:
+          type: string
+          const: "com.warehouse.wms.inbound-receiving.receipt.ReceiptCartonReceived"
+        subject:
+          type: string
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          const: "urn:warehouse:inbound-receiving:events:ReceiptCartonReceived:v1"
+        data:
+          type: object
+          description: The fields this service reads (receipt, ASN, carton identity); the full contents stay with inbound-receiving.
+          required: [receipt_id, asn_number, sealed, lpn, contents, received_at]
+          properties:
+            receipt_id:
+              type: string
+            asn_number:
+              type: string
+            sscc:
+              type: string
+            lpn:
+              type: string
+            received_at:
+              type: string
+              format: date-time
+    CartonDiscrepancyRaisedEvent:
+      type: object
+      description: |
+        CloudEvents 1.0 envelope of inbound-receiving's CartonDiscrepancyRaised, the integration payload, as
+        consumed here.
+      required: [specversion, id, source, type, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+        id:
+          type: string
+        source:
+          type: string
+          enum: ["/warehouse/inbound-receiving"]
+        type:
+          type: string
+          const: "com.warehouse.wms.inbound-receiving.receipt.CartonDiscrepancyRaised"
+        subject:
+          type: string
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          const: "urn:warehouse:inbound-receiving:events:CartonDiscrepancyRaised:v1"
+        data:
+          type: object
+          required: [receipt_id, kind, at]
+          properties:
+            receipt_id:
+              type: string
+            sscc:
+              type: string
+            kind:
+              type: string
+            expected:
+              type: string
+            actual:
+              type: string
+            at:
+              type: string
+              format: date-time
+    ReceiptClosedEvent:
+      type: object
+      description: |
+        CloudEvents 1.0 envelope of inbound-receiving's ReceiptClosed, the integration payload, as
+        consumed here.
+      required: [specversion, id, source, type, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+        id:
+          type: string
+        source:
+          type: string
+          enum: ["/warehouse/inbound-receiving"]
+        type:
+          type: string
+          const: "com.warehouse.wms.inbound-receiving.receipt.ReceiptClosed"
+        subject:
+          type: string
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        dataschema:
+          type: string
+          const: "urn:warehouse:inbound-receiving:events:ReceiptClosed:v1"
+        data:
+          type: object
+          required: [receipt_id, asn_number, closed_at, discrepancies]
+          properties:
+            receipt_id:
+              type: string
+            asn_number:
+              type: string
+            closed_at:
+              type: string
+              format: date-time
+            discrepancies:
+              type: array
+              items:
+                type: object
