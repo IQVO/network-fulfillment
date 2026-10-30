@@ -427,7 +427,26 @@ def check_mapping_site_is_optional_and_rendered_only_when_set() -> None:
     print("PASS: a mapping's optional site is rendered when set and absent when not")
 
 
+def check_a_dictionary_change_rolls_the_pod() -> None:
+    """The binary reads products.json once at boot (\"product translation
+    loaded\"), and ArgoCD only updates the data ConfigMap when the values
+    change: without a pod-template checksum the running pod keeps the OLD
+    dictionary until something else restarts it, so new listings are refused."""
+    def checksum(values: str) -> str:
+        docs = render(values)
+        for d in docs:
+            if d.get("kind") == "Deployment" and d["metadata"]["name"] == "network-fulfillment":
+                return d["spec"]["template"]["metadata"]["annotations"]["checksum/data"]
+        raise AssertionError("no network-fulfillment Deployment rendered")
+    before = checksum(VALUES)
+    after = checksum(VALUES.replace("sku: sku-two", "sku: sku-three"))
+    assert before != after, "changing productTranslation must change checksum/data"
+    assert checksum(VALUES) == before, "checksum/data must be deterministic"
+    print("ok: a dictionary change rolls the pod (checksum/data)")
+
+
 def main() -> int:
+    check_a_dictionary_change_rolls_the_pod()
     check_nodes_file_is_valid_json_and_wired()
     check_nodes_are_live_only_and_optional()
     check_bad_nodes_are_refused_at_render()
