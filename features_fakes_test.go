@@ -201,18 +201,21 @@ func (i *fakeInventory) UsableQuantity(_ context.Context, sku shared.SKU) (int, 
 }
 
 // fakePathCap is process-path-management's fulfillment-capability cache: the
-// next CPT cutoff and the paths eligible for it.
+// site's CPT cutoffs (ascending instants) and the paths eligible for each. Like
+// the real cache it answers the first cutoff on or after `after`; past the last
+// cutoff the scenario declared it answers found=false.
 type fakePathCap struct {
-	scheduled bool
-	cutoffIn  time.Duration
-	paths     []contract.EligiblePath
+	cutoffs []time.Time
+	paths   []contract.EligiblePath
 }
 
 func (p *fakePathCap) NextCutoff(_ shared.SiteId, after time.Time) (contract.NextCutoff, bool) {
-	if !p.scheduled {
-		return contract.NextCutoff{}, false
+	for _, at := range p.cutoffs {
+		if !at.Before(after) {
+			return contract.NextCutoff{CutoffAt: at, Paths: p.paths}, true
+		}
 	}
-	return contract.NextCutoff{CutoffAt: after.Add(p.cutoffIn), Paths: p.paths}, true
+	return contract.NextCutoff{}, false
 }
 
 // Schedule: these scenarios never declare a node profile.

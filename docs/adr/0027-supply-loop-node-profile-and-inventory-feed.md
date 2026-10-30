@@ -19,6 +19,12 @@ second time (Decision 2) and replaces the "documented no-op" status of
 `DeclareCapability` that ADR 0001, [ADR 0009](./0009-retail-network-not-a-real-network-counterpart.md)
 and ADR 0026 (Decision 1, As built 2) gave it.
 
+The "inherited and recorded" note of Decision 3 (the cache's cutoff instants ignore
+the schedule's timezone) is resolved by
+[ADR 0031](./0031-advertise-against-the-next-feasible-cutoff.md) §2: a slot's
+`NextAt` is now the UTC instant of its next local occurrence in the zone; the
+declared local times, days and zone are unchanged.
+
 **This ADR decides both loops. Delivery is split:**
 
 - **Part 1 (built, see "As built (part 1)"):** the node profile.
