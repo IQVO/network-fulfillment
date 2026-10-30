@@ -147,3 +147,5 @@ Claude Code loads each rule below automatically when you touch the matching path
 
 Hooks (`scripts/harness/hook.py`, wired for Claude Code, Codex and OpenCode) block pushes to develop/main, `--no-verify`, bare `rm -rf`, and edits to generated files, and feed gofmt/vet findings back after each edit. Before saying "done" run `make check-fast`; the full gate is `make check-all`. `HARNESS_OFF=1` disables the hooks when debugging the harness itself.
 <!-- harness:scoped-rules:end -->
+
+A2A: `cmd/a2a` (port 8093) is this context's read-only Agent2Agent agent, skills `network_demand_status` (read), `advertised_availability` (read), decided in `docs/adr/0030-a2a-inbound-adapter.md`; delegation only (facts stay CloudEvents on Kafka), unauthenticated like REST and MCP; rules in `.claude/rules/fleet/a2a.md`.
