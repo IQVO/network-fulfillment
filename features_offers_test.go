@@ -47,8 +47,15 @@ func (w *world) inventoryIsUnreachableFor(sku string) error {
 }
 
 func (w *world) nextCutoffIn(minutes int) error {
-	w.pathCap.scheduled = true
-	w.pathCap.cutoffIn = time.Duration(minutes) * time.Minute
+	w.pathCap.cutoffs = []time.Time{w.clock.Now().Add(time.Duration(minutes) * time.Minute)}
+	return nil
+}
+
+func (w *world) laterCutoffIn(minutes int) error {
+	if len(w.pathCap.cutoffs) == 0 {
+		return fmt.Errorf("a later cutoff needs the next cutoff first")
+	}
+	w.pathCap.cutoffs = append(w.pathCap.cutoffs, w.clock.Now().Add(time.Duration(minutes)*time.Minute))
 	return nil
 }
 
@@ -141,6 +148,7 @@ func (w *world) registerOfferSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^inventory-storage reports (\d+) usable units? of "([^"]*)"$`, w.inventoryReportsUsable)
 	sc.Step(`^inventory-storage is unreachable for "([^"]*)"$`, w.inventoryIsUnreachableFor)
 	sc.Step(`^process-path-management reports the next cutoff in (\d+) minutes$`, w.nextCutoffIn)
+	sc.Step(`^process-path-management reports a later cutoff in (\d+) minutes$`, w.laterCutoffIn)
 	sc.Step(`^path "([^"]*)" is eligible with a cycle time of (\d+) minutes$`, w.pathHasCycleTime)
 	sc.Step(`^path "([^"]*)" is eligible with an unknown cycle time$`, w.pathHasUnknownCycleTime)
 	sc.Step(`^path "([^"]*)" has (\d+) units of remaining capacity$`, w.pathHasRemainingCapacity)
