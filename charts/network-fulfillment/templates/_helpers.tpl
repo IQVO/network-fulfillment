@@ -92,6 +92,13 @@ select it.
 {{- include "network-fulfillment.fullname" . }}-mcp
 {{- end }}
 
+{{/*
+Fully qualified name of the A2A agent Deployment/Service (<release>-a2a, ADR 0030).
+*/}}
+{{- define "network-fulfillment.a2aFullname" -}}
+{{- include "network-fulfillment.fullname" . }}-a2a
+{{- end }}
+
 {{- define "network-fulfillment.projectorFullname" -}}
 {{- include "network-fulfillment.fullname" . }}-projector
 {{- end }}
@@ -239,6 +246,7 @@ release fails whichever optional component is enabled.
 {{- include "network-fulfillment.requireAnalytics" . -}}
 {{- include "network-fulfillment.requireRealEnv" (dict "env" .Values.extraEnv "where" "extraEnv") -}}
 {{- include "network-fulfillment.requireRealEnv" (dict "env" .Values.mcp.extraEnv "where" "mcp.extraEnv") -}}
+{{- include "network-fulfillment.requireRealEnv" (dict "env" .Values.a2a.extraEnv "where" "a2a.extraEnv") -}}
 {{- end }}
 
 
