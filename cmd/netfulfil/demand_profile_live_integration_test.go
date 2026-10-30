@@ -59,7 +59,7 @@ type profileFeed struct {
 	ctx     context.Context
 	brokers []string
 	seq     int
-	times   []string // the two cutoff local times, in order
+	times   []string  // the two cutoff local times, in order
 	now     time.Time // in the schedule's zone
 }
 

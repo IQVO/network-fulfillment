@@ -200,8 +200,11 @@ at boot, always on.
 
 - Any other type is ignored. A message that is not a CloudEvent is logged
   (`skipping non-CloudEvents message`) and skipped. No DLQ.
-- Simplification in the code: a cutoff's `local_time` is treated as UTC; the
-  schedule `timezone` is not applied.
+- A cutoff's `local_time` and `days_of_week` are read in the schedule's IANA
+  `timezone` (days on the local calendar, DST-correct) and resolved to UTC
+  instants (ADR 0031 §2). An unknown or missing zone is read as UTC with one
+  WARN (`the CPT schedule's timezone is unknown or missing`) per schedule
+  received; `cmd/netfulfil` embeds the zone database.
 - Boot waits up to 60 s for the cache to catch up with the topic's end
   offset (read from the first broker in `KAFKA_BROKERS`), inside one shared
   120 s budget with the capacity cache. A timeout exits the process.

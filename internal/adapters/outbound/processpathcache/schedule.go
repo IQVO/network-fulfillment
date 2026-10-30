@@ -41,7 +41,7 @@ func (c *Consumer) Schedule(siteId shared.SiteId, after time.Time) (contract.Cut
 		out.Slots = append(out.Slots, contract.ScheduleSlot{
 			LocalTime: local,
 			Days:      days,
-			NextAt:    nextOccurrence(cutoff, after),
+			NextAt:    nextOccurrence(cutoff, after, zoneOf(sched)),
 			Paths:     c.eligiblePaths([]cutoffData{cutoff}),
 		})
 	}
@@ -51,11 +51,12 @@ func (c *Consumer) Schedule(siteId shared.SiteId, after time.Time) (contract.Cut
 	return out, true
 }
 
-// nextOccurrence is the first instant on or after `after` at which cutoff
-// applies within the lookahead, or the zero time.
-func nextOccurrence(cutoff cutoffData, after time.Time) time.Time {
+// nextOccurrence is the first instant (UTC) on or after `after` at which
+// cutoff applies within the lookahead, days walked on loc's local calendar,
+// or the zero time.
+func nextOccurrence(cutoff cutoffData, after time.Time, loc *time.Location) time.Time {
 	for day := 0; day < scheduleLookaheadDays; day++ {
-		if at, ok := cutoffOnDate(cutoff, after.AddDate(0, 0, day), after); ok {
+		if at, ok := cutoffOnDay(cutoff, after, day, loc); ok {
 			return at
 		}
 	}
