@@ -112,6 +112,24 @@ for the tool list.
 `list_capability_offers` is always registered by this binary: it reads the
 `capability_offers` table, which `netfulfil` fills (the pipeline is always on).
 
+## `cmd/a2a` (the A2A agent)
+
+A separate, read-only deployable (ADR 0030) that serves the Agent Card at
+`/.well-known/agent-card.json` and the A2A JSON-RPC endpoint at `/` and `/a2a`, plus
+`GET /healthz`. It reads the same OLTP database as `cmd/mcp`; it runs no Kafka client,
+publisher, outbox or relay, so it needs no `KAFKA_BROKERS`. It has two read skills,
+`network_demand_status` and `advertised_availability`; see
+[ADR 0030](../adr/0030-a2a-inbound-adapter.md).
+
+| Variable | Default | Required? | Meaning | Source |
+| --- | --- | --- | --- | --- |
+| `A2A_ADDR` | `:8093` | no | Listen address. | `cmd/a2a/main.go` |
+| `A2A_AGENT_URL` | none | **yes** | The absolute http(s) URL the Agent Card advertises as the JSON-RPC endpoint, one agent clients can dial. Missing or not absolute: boot error naming `A2A_AGENT_URL`, before any dependency is touched. The chart defaults it to `http://<release>-a2a.<ns>.svc.cluster.local:8093/` and `a2a.agentUrl` overrides it. | `cmd/a2a/main.go` (`loadBootConfig`) |
+| `DATABASE_URL` | none | **yes** | Postgres DSN of the **same** OLTP database `netfulfil` writes. Missing: boot error `DATABASE_URL is required`. | `cmd/a2a/main.go` (`buildOrders`) |
+| `MIGRATIONS_DATABASE_URL` | value of `DATABASE_URL` | no | Direct DSN for the migration step this binary also runs at startup (ADR 0007), not retried. | `cmd/a2a/main.go` |
+| `MIGRATIONS_PATH` | `/app/migrations` | no | OLTP migrations directory. | `cmd/a2a/main.go` |
+| `LOG_LEVEL` | `info` | no | Same values as `netfulfil`. | `cmd/a2a/main.go` (`newLogger`) |
+
 ## `cmd/netfulfil-projector` (analytics writer)
 
 Consumes `warehouse.network-fulfillment.analytics` into the analytical
@@ -181,12 +199,14 @@ can only be set with `extraEnv` (API Deployment) or `mcp.extraEnv`.
 | `config.eventPublisher` | `EVENT_PUBLISHER` | api |
 | `config.outboxMaxAttempts` | `OUTBOX_MAX_ATTEMPTS` (ConfigMap and env) | api |
 | `kafka.enabled` + `kafka.brokers` | `KAFKA_BROKERS` | api, projector |
-| `database.existingSecret` / `database.url` | `DATABASE_URL`, `MIGRATIONS_DATABASE_URL` (optional key) | api, mcp |
+| `database.existingSecret` / `database.url` | `DATABASE_URL`, `MIGRATIONS_DATABASE_URL` (optional key) | api, mcp, a2a |
 | `productTranslation.mappings` | `PRODUCT_TRANSLATION_FILE=/etc/network-fulfillment/products.json` | api |
 | `stubDemand.demands` | `NETWORK_SEED_FILE=/etc/network-fulfillment/demand.json` (stub only; the render fails in live mode) | api |
-| `otel.enabled`, `otel.endpoint`, `otel.serviceName`, `environment` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `SERVICE_VERSION`, `ENVIRONMENT` | api, mcp, projector, reports |
+| `otel.enabled`, `otel.endpoint`, `otel.serviceName`, `environment` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `SERVICE_VERSION`, `ENVIRONMENT` | api, mcp, a2a, projector, reports |
 | `mcp.httpAddr` | `MCP_ADDR` | mcp |
 | `mcp.reportsBaseUrl` | `REPORTS_BASE_URL` | mcp |
+| `a2a.httpAddr` | `A2A_ADDR` | a2a |
+| `a2a.agentUrl` | `A2A_AGENT_URL` (empty: the in-cluster Service DNS) | a2a |
 | `analytics.database.*` | `ANALYTICS_DATABASE_URL` | projector, reports |
 | `analytics.projector.adminAddr` | `ADMIN_ADDR` | projector |
 | `analytics.migrationsPath` | `ANALYTICS_MIGRATIONS_PATH` | projector |

@@ -75,6 +75,11 @@ mcp:
   route:
     enabled: true
     path: /api/mcp/network-fulfillment
+a2a:
+  enabled: true
+  route:
+    enabled: true
+    path: /api/a2a/network-fulfillment
 productTranslation:
   mappings:
     - networkProductId: ASIN-LOCAL-1

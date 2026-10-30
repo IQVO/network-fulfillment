@@ -606,3 +606,45 @@ mcp:
     requests:
       cpu: 100m
       memory: 128Mi
+
+# A2A (Agent2Agent) agent (cmd/a2a, ADR 0030): the third driving adapter over the
+# same read repositories as the REST and MCP surfaces. READ-ONLY, like MCP (ADR
+# 0002): skills network_demand_status and advertised_availability. Off by
+# default; warehouse-infra turns it on. A2A carries delegation only; facts still
+# travel as CloudEvents on Kafka. No Kafka/outbox runs in this Deployment, so it
+# renders no KAFKA_BROKERS / EVENT_PUBLISHER. Unlike mcp, it holds no per-process
+# session state (a message-only agent), so it could scale horizontally.
+a2a:
+  enabled: false
+  replicaCount: 1
+  # A2A_ADDR the binary listens on; keep in sync with service.targetPort.
+  # (8090 is mcp, 8091 the projector admin port, 8092 the reports API, so 8093.)
+  httpAddr: ":8093"
+  # Absolute URL advertised on the Agent Card. Empty defaults to this release's
+  # in-cluster Service DNS (http://<release>-a2a.<ns>.svc.cluster.local:8093/);
+  # warehouse-infra can override it with the Kong path when the agent must be
+  # reachable off-cluster.
+  agentUrl: ""
+  service:
+    type: ClusterIP
+    port: 8093
+    targetPort: 8093
+  # Kong exposure of the A2A agent (a2a-route.yaml): host path
+  # /api/a2a/<context> rewritten to / (JSON-RPC root; the well-known agent card
+  # stays reachable under the same prefix). Off by default; warehouse-infra
+  # turns it on with the real parentRefs and path.
+  route:
+    enabled: false
+    path: "/api/a2a/network-fulfillment"
+    parentRefs:
+      - name: ""
+        namespace: ""
+        sectionName: "http"
+  extraEnv: []
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi

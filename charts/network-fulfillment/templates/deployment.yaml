@@ -19,6 +19,8 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        # The product dictionary and node file are read once at boot: roll the pod when they change.
+        checksum/data: {{ include (print $.Template.BasePath "/configmap-data.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

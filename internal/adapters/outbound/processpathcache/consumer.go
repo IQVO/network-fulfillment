@@ -20,6 +20,14 @@
 // ADR 0001 §8's throughput formula needs the site-level cutoff schedule
 // as well as each path's own cycle-time-p95 — the two event families
 // share this one topic and this is their one combined read model.
+//
+// Time: a cutoff's local_time and days_of_week are wall-clock values in the
+// schedule's IANA timezone. They are resolved in that zone (days walked on its
+// local calendar, DST-correct through time.Date in the location) and answered
+// as UTC instants, the form wes-work-planning's capacity figures are keyed by
+// (zone.go, ADR 0031 §2). An unknown or missing zone is read as UTC with one
+// WARN per schedule received. Every binary running this cache embeds the zone
+// database (cmd/netfulfil/tzdata.go).
 package processpathcache
 
 import (
@@ -28,7 +36,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -99,6 +106,10 @@ type scheduleData struct {
 	SiteId   string       `json:"site_id"`
 	Timezone string       `json:"timezone"`
 	Cutoffs  []cutoffData `json:"cutoffs"`
+
+	// loc is Timezone resolved when the schedule is applied (UTC when it is
+	// unknown or missing); local_time and days_of_week are read in it.
+	loc *time.Location
 }
 
 // Reader is the subset of *kafkago.Reader this Consumer needs, so tests
@@ -279,7 +290,7 @@ func (c *Consumer) NextCutoff(siteId shared.SiteId, after time.Time) (contract.N
 		return contract.NextCutoff{}, false
 	}
 
-	best, bestPaths, found := earliestCutoff(sched.Cutoffs, after)
+	best, bestPaths, found := earliestCutoff(sched.Cutoffs, after, zoneOf(sched))
 	if !found {
 		return contract.NextCutoff{}, false
 	}
@@ -289,20 +300,15 @@ func (c *Consumer) NextCutoff(siteId shared.SiteId, after time.Time) (contract.N
 // earliestCutoff resolves each cutoff's NEXT occurrence on or after
 // `after` within the next 7 days (every schedule repeats weekly at
 // most), then returns the earliest one(s) -- more than one cutoff can
-// tie on the same instant. The cutoff's own timezone is deliberately not
-// interpreted beyond a direct string compare against `after` treated as
-// UTC-equivalent local time for THIS v1 -- a real timezone-aware
-// resolution is tracked as a known simplification, not silently assumed
-// correct; see the package's own tests for the exact boundary this
-// produces.
-func earliestCutoff(cutoffs []cutoffData, after time.Time) (time.Time, []cutoffData, bool) {
+// tie on the same instant. Days are walked on the local calendar of loc,
+// the schedule's zone, and the instant is UTC (zone.go, ADR 0031 §2).
+func earliestCutoff(cutoffs []cutoffData, after time.Time, loc *time.Location) (time.Time, []cutoffData, bool) {
 	var best time.Time
 	var bestPaths []cutoffData
 	found := false
 	for day := 0; day < 8; day++ {
-		candidateDate := after.AddDate(0, 0, day)
 		for _, cutoff := range cutoffs {
-			at, ok := cutoffOnDate(cutoff, candidateDate, after)
+			at, ok := cutoffOnDay(cutoff, after, day, loc)
 			if !ok {
 				continue
 			}
@@ -319,20 +325,6 @@ func earliestCutoff(cutoffs []cutoffData, after time.Time) (time.Time, []cutoffD
 		}
 	}
 	return best, bestPaths, found
-}
-
-// cutoffOnDate resolves one cutoff's instant on candidateDate, reporting
-// ok=false when the cutoff does not apply that day, is malformed, or
-// falls before `after`.
-func cutoffOnDate(cutoff cutoffData, candidateDate, after time.Time) (time.Time, bool) {
-	if !dayMatches(cutoff.DaysOfWeek, candidateDate) {
-		return time.Time{}, false
-	}
-	at, err := cutoffInstant(candidateDate, cutoff.LocalTime)
-	if err != nil || at.Before(after) {
-		return time.Time{}, false
-	}
-	return at, true
 }
 
 // eligiblePaths resolves the deduplicated, joined path list for a set of
@@ -355,31 +347,6 @@ func (c *Consumer) eligiblePaths(cutoffs []cutoffData) []contract.EligiblePath {
 		}
 	}
 	return paths
-}
-
-func dayMatches(days []string, at time.Time) bool {
-	want := at.Weekday().String()[:3]
-	for _, d := range days {
-		if strings.EqualFold(d, want) {
-			return true
-		}
-	}
-	return false
-}
-
-func cutoffInstant(date time.Time, localTime string) (time.Time, error) {
-	parts := strings.Split(localTime, ":")
-	if len(parts) != 2 {
-		return time.Time{}, fmt.Errorf("processpathcache: malformed local_time %q", localTime)
-	}
-	var h, m int
-	if _, err := fmt.Sscanf(parts[0], "%d", &h); err != nil {
-		return time.Time{}, err
-	}
-	if _, err := fmt.Sscanf(parts[1], "%d", &m); err != nil {
-		return time.Time{}, err
-	}
-	return time.Date(date.Year(), date.Month(), date.Day(), h, m, 0, 0, date.Location()), nil
 }
 
 // Run consumes Topic until ctx is cancelled or the reader returns a
@@ -471,6 +438,7 @@ func (c *Consumer) applyDeactivated(d deactivatedData) {
 }
 
 func (c *Consumer) applySchedule(d scheduleData) {
+	d.loc = resolveZone(c.Logger, d)
 	c.mu.Lock()
 	c.schedules[shared.SiteId(d.SiteId)] = d
 	c.mu.Unlock()

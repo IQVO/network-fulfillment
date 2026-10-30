@@ -67,8 +67,9 @@ inside the diagram for `{id}` / `{sku}`.
 | own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | always on | retry 3 times, then `.dlq` |
 | `warehouse-console` (via `web/` remote) | downstream | REST | `GET /network-orders`, `GET /inbound-status` | on | n/a |
 | MCP clients | downstream | MCP, Streamable HTTP | 4 read-only tools | `mcp.enabled` | n/a |
+| A2A agents | downstream | A2A, JSON-RPC over HTTP | 2 read-only skills (ADR 0030) | `a2a.enabled` | n/a |
 
-REST and MCP are unauthenticated, like every context in the fleet. Through
+REST, MCP and A2A are unauthenticated, like every context in the fleet. Through
 Kong the REST API is at `/api/network-fulfillment` and the reports API at
 `/api/network-fulfillment/reports`.
 
@@ -199,8 +200,11 @@ at boot, always on.
 
 - Any other type is ignored. A message that is not a CloudEvent is logged
   (`skipping non-CloudEvents message`) and skipped. No DLQ.
-- Simplification in the code: a cutoff's `local_time` is treated as UTC; the
-  schedule `timezone` is not applied.
+- A cutoff's `local_time` and `days_of_week` are read in the schedule's IANA
+  `timezone` (days on the local calendar, DST-correct) and resolved to UTC
+  instants (ADR 0031 §2). An unknown or missing zone is read as UTC with one
+  WARN (`the CPT schedule's timezone is unknown or missing`) per schedule
+  received; `cmd/netfulfil` embeds the zone database.
 - Boot waits up to 60 s for the cache to catch up with the topic's end
   offset (read from the first broker in `KAFKA_BROKERS`), inside one shared
   120 s budget with the capacity cache. A timeout exits the process.
@@ -307,6 +311,16 @@ Streamable HTTP: `get_network_order`, `list_network_orders`,
 `list_capability_offers` and `get_acknowledgement_report` (only when
 `REPORTS_BASE_URL` is set). There is no write tool. Inputs, outputs and
 annotations: [mcp/tools.md](../mcp/tools.md).
+
+## A2A skills
+
+`cmd/a2a` serves an Agent2Agent agent (JSON-RPC over HTTP at `/` and `/a2a`, Agent Card
+at `/.well-known/agent-card.json`) with two read-only, goal-shaped skills over the same
+read ports as REST and MCP: `network_demand_status` (one order by `networkRef`, or the
+orders in a `state`) and `advertised_availability` (the stored capability offers). A2A
+carries delegation only: it is not a data-sync channel, and there is no write skill
+because the MCP charter is read-only (shipment confirmation stays REST only). See
+[ADR 0030](../adr/0030-a2a-inbound-adapter.md).
 
 ## Edges that do not exist
 

@@ -47,8 +47,9 @@ troubleshooting); CI jobs and gremlins thresholds: `docs/development/testing.md`
 doc map: `docs/overview/introduction.md`.
 
 Core concept: **throughput-constrained advertised availability**
-= `min(physicalAvailable, throughputFeasibleBefore(nextCutoff))` (ADR 0001,
-implemented by `CapabilityOffer.Compute()`).
+= `min(physicalAvailable, throughputFeasibleBefore(nextFeasibleCutoff))` (ADR 0001;
+the first cutoff, in the site schedule's own time zone, that an eligible path can still
+make, ADR 0031; implemented by `CapabilityOffer.Compute()`).
 `.claude/rules/*.md` describe the code as it is; never write planned
 concepts into them as if they exist.
 
@@ -147,3 +148,5 @@ Claude Code loads each rule below automatically when you touch the matching path
 
 Hooks (`scripts/harness/hook.py`, wired for Claude Code, Codex and OpenCode) block pushes to develop/main, `--no-verify`, bare `rm -rf`, and edits to generated files, and feed gofmt/vet findings back after each edit. Before saying "done" run `make check-fast`; the full gate is `make check-all`. `HARNESS_OFF=1` disables the hooks when debugging the harness itself.
 <!-- harness:scoped-rules:end -->
+
+A2A: `cmd/a2a` (port 8093) is this context's read-only Agent2Agent agent, skills `network_demand_status` (read), `advertised_availability` (read), decided in `docs/adr/0030-a2a-inbound-adapter.md`; delegation only (facts stay CloudEvents on Kafka), unauthenticated like REST and MCP; rules in `.claude/rules/fleet/a2a.md`.

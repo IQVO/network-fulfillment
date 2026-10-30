@@ -84,10 +84,32 @@ Feature: Capability offers
     Then the capability offer for "sku-1" at "site-1" advertises <advertised> with basis "THROUGHPUT_CONSTRAINED"
 
     Examples:
-      | cycle | advertised | case                                             |
-      | 60    | 25         | fits comfortably                                 |
-      | 120   | 25         | equal to the time left is still eligible         |
-      | 121   | 0          | too slow for the cutoff: a proven zero, not a fallback |
+      | cycle | advertised | case                                                        |
+      | 60    | 25         | fits comfortably                                            |
+      | 120   | 25         | equal to the time left is still eligible                    |
+      | 121   | 0          | too slow for the only cutoff: a proven zero, not a fallback |
+
+  @bdd
+  Scenario: A path too slow for the next cutoff is advertised against the next cutoff it can make
+    Given inventory-storage reports 40 usable units of "sku-1"
+    And process-path-management reports the next cutoff in 44 minutes
+    And process-path-management reports a later cutoff in 1440 minutes
+    And path "p1" is eligible with a cycle time of 120 minutes
+    And path "p1" has 25 units of remaining capacity
+    When the capability offers are recomputed
+    And I list the capability offers
+    Then the capability offer for "sku-1" at "site-1" advertises 25 with basis "THROUGHPUT_CONSTRAINED"
+
+  @bdd
+  Scenario: No cutoff within a week can be made, a proven zero
+    Given inventory-storage reports 40 usable units of "sku-1"
+    And process-path-management reports the next cutoff in 44 minutes
+    And process-path-management reports a later cutoff in 10081 minutes
+    And path "p1" is eligible with a cycle time of 120 minutes
+    And path "p1" has 25 units of remaining capacity
+    When the capability offers are recomputed
+    And I list the capability offers
+    Then the capability offer for "sku-1" at "site-1" advertises 0 with basis "THROUGHPUT_CONSTRAINED"
 
   @bdd
   Scenario: A path with an unknown cycle time stays eligible
