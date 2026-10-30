@@ -38,10 +38,12 @@ func TestSchedule_ReturnsTheWholeWeekWithNextOccurrencesAndPaths(t *testing.T) {
 	if got.Timezone != "America/Sao_Paulo" || len(got.Slots) != 2 {
 		t.Fatalf("schedule = %+v, want the zone and 2 slots", got)
 	}
+	// America/Sao_Paulo is UTC-3 (no DST): the local times resolve to these
+	// UTC instants (the cache reads local_time in the schedule's zone).
 	checkSlot(t, "weekday", got.Slots[0], "18:00", []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday},
-		time.Date(2026, 10, 5, 18, 0, 0, 0, time.UTC), true, 45*time.Minute)
+		time.Date(2026, 10, 5, 21, 0, 0, 0, time.UTC), true, 45*time.Minute)
 	checkSlot(t, "saturday", got.Slots[1], "10:30", []time.Weekday{time.Saturday},
-		time.Date(2026, 10, 10, 10, 30, 0, 0, time.UTC), false, 0)
+		time.Date(2026, 10, 10, 13, 30, 0, 0, time.UTC), false, 0)
 }
 
 // checkSlot asserts a slot's time, days, next occurrence and its one eligible
