@@ -7,7 +7,8 @@ alone selects ALL components. Every Deployment here carries
 `app.kubernetes.io/component` in selector.matchLabels and its pod labels, and
 every Service selects on it, so each Service selects EXACTLY ONE Deployment.
 Components: api (always), projector and reports (analytics read side, gated on
-analytics.enabled), mcp (read-only MCP server, default off) and frontend (the
+analytics.enabled), mcp (read-only MCP server, default off), a2a (read-only
+A2A agent, default off) and frontend (the
 nginx pod serving the netfulfil_mfe remote, default off), all rendered
 TOGETHER here. The frontend is never routed by this chart. Env parity between
 the chart and the binaries is asserted by test_env_parity.py next to this
@@ -36,14 +37,15 @@ ENABLE_EVERYTHING = BASE + [
     "--set", "analytics.enabled=true",
     "--set", "analytics.database.url=postgres://a@example.invalid:5432/analytics",
     "--set", "mcp.enabled=true",
+    "--set", "a2a.enabled=true",
     "--set", "frontend.enabled=true",
     "--set", "autoscaling.api.enabled=true",
     "--set", "gatewayApi.enabled=true",
     "--set", "ingress.enabled=true",
 ]
 
-COMPONENTS = ("mcp", "frontend", "projector", "reports")
-SERVED = ("mcp", "frontend", "reports")  # components with a Service of their own
+COMPONENTS = ("mcp", "a2a", "frontend", "projector", "reports")
+SERVED = ("mcp", "a2a", "frontend", "reports")  # components with a Service of their own
 
 
 def render(extra_args: list[str]) -> list[dict]:
@@ -103,6 +105,8 @@ def main() -> int:
         failures.append("the api Service selector must pin component=api")
     if not pins(services.get(f"{RELEASE}-mcp"), "mcp"):
         failures.append("the MCP Service must exist and pin component=mcp")
+    if not pins(services.get(f"{RELEASE}-a2a"), "a2a"):
+        failures.append("the A2A Service must exist and pin component=a2a")
     if not pins(services.get(f"{RELEASE}-frontend"), "frontend"):
         failures.append("the frontend Service must exist and pin component=frontend")
     elif services[f"{RELEASE}-frontend"]["spec"].get("type") != "ClusterIP":
@@ -140,11 +144,16 @@ def main() -> int:
     # Read-side binaries run their own commands; the MCP server is /app/mcp.
     for name, cmd in (
         (f"{RELEASE}-mcp", ["/app/mcp"]),
+        (f"{RELEASE}-a2a", ["/app/a2a"]),
         (f"{RELEASE}-projector", ["/app/netfulfil-projector"]),
         (f"{RELEASE}-reports", ["/app/netfulfil-reports"]),
     ):
         if deployments.get(name) is not None and command_of(deployments[name]) != cmd:
             failures.append(f"Deployment {name} must run {cmd}")
+    # The A2A agent is read-only: no publisher, no outbox, so no Kafka env.
+    a2a = deployments.get(f"{RELEASE}-a2a")
+    if a2a is not None and {"KAFKA_BROKERS", "EVENT_PUBLISHER"} & set(env_names(a2a)):
+        failures.append("the a2a Deployment is read-only: it must not get KAFKA_BROKERS / EVENT_PUBLISHER")
     # The frontend serves static bytes: no database, no Kafka.
     fe = deployments.get(f"{RELEASE}-frontend")
     if fe is not None and {"DATABASE_URL", "KAFKA_BROKERS"} & set(env_names(fe)):

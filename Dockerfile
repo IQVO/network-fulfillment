@@ -22,7 +22,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/netfulfil ./cmd/netfulfil && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/netfulfil-projector ./cmd/netfulfil-projector && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/netfulfil-reports ./cmd/netfulfil-reports && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mcp ./cmd/mcp
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mcp ./cmd/mcp && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/a2a ./cmd/a2a
 
 # --- runtime stage ---
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
@@ -42,6 +43,7 @@ COPY --from=build --chown=app:app /out/netfulfil ./netfulfil
 COPY --from=build --chown=app:app /out/netfulfil-projector ./netfulfil-projector
 COPY --from=build --chown=app:app /out/netfulfil-reports ./netfulfil-reports
 COPY --from=build --chown=app:app /out/mcp ./mcp
+COPY --from=build --chown=app:app /out/a2a ./a2a
 # Migrations ship IN the image and run at startup, matching every
 # database-backed sibling. OLTP migrations land at /app/migrations
 # (cmd/netfulfil's default MIGRATIONS_PATH); analytics migrations land
@@ -53,8 +55,9 @@ USER 1000
 
 # 8080: netfulfil's OLTP HTTP API. 8092: netfulfil-reports' read-only
 # reports API. 8090: mcp's Streamable HTTP MCP endpoint, matching every
-# sibling's MCP port convention. netfulfil-projector exposes no port (a
+# sibling's MCP port convention. 8093: a2a's JSON-RPC endpoint and Agent Card
+# (the fleet's A2A port). netfulfil-projector exposes no port (a
 # pure consumer); it and netfulfil-reports use ANALYTICS_DATABASE_URL,
 # not DATABASE_URL — see AGENTS.md.
-EXPOSE 8080 8092 8090
+EXPOSE 8080 8092 8090 8093
 ENTRYPOINT ["./netfulfil"]

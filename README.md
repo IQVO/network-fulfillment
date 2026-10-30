@@ -113,6 +113,21 @@ What exists today:
   and `get_acknowledgement_report` (when `REPORTS_BASE_URL` is set); the
   `network-order://network-fulfillment/{networkRef}` resource; and the
   `answer_network_demand` prompt.
+- **A2A agent** (ADR 0030; `cmd/a2a`, JSON-RPC on `A2A_ADDR`, default
+  `:8093`, mounted at `/` and `/a2a`, Agent Card at
+  `/.well-known/agent-card.json`, `GET /healthz`) — a read-only,
+  message-only Agent2Agent agent over the same read ports as REST and MCP,
+  with two curated skills called as a `SendMessage` data part
+  `{"skill": "<id>", "arguments": {...}}`: `network_demand_status`
+  (`{networkRef}` for one order, or `{state}` / nothing for a list;
+  the two are exclusive) and `advertised_availability` (the stored
+  capability offers, optionally `{sku, siteId}`). Read-only because the MCP
+  charter is: no write skill (shipment confirmation stays REST only).
+  Rejections come back as in-band RFC 7807 `problem`s with the REST
+  classification (404 / 400 / 500). `A2A_AGENT_URL` (an absolute http(s) URL
+  the card advertises) is mandatory, `DATABASE_URL` too; no Kafka. Helm:
+  `a2a.enabled` (default off), Kong at `/api/a2a/network-fulfillment`.
+  A2A carries delegation only; facts still leave as CloudEvents.
 - **Analytics data product** (ADR 0002) — `cmd/netfulfil-projector`
   consumes this service's own analytics topic into a separate analytical
   Postgres (`migrations/analytics/`), and `cmd/netfulfil-reports` serves
@@ -193,7 +208,7 @@ What exists today:
   of waits in total) to survive this cluster's first-dial connection reset, and the chart has
   a `startupProbe`. After the budget the service still refuses to boot.
 - **Packaging** — `Dockerfile`, `web/` (a Module Federation remote, ADR
-  0010) and `charts/network-fulfillment/` (API, MCP, projector, reports and
+  0010) and `charts/network-fulfillment/` (API, MCP, A2A, projector, reports and
   frontend Deployments, HPA per ADR 0006). The chart's Python tests live in
   `charts/network-fulfillment/tests/`. It is deployed to the kind cluster by
   `warehouse-infra`, and Kong serves it at `/api/network-fulfillment`.
@@ -319,6 +334,7 @@ CapabilityOffer   (sku, siteId) -> advertisedQuantity + basis + computedAt
 ```
 cmd/netfulfil/                 OLTP composition root (REST, poller, tickers, outbox relay)
 cmd/mcp/                       MCP server (Streamable HTTP, read-only)
+cmd/a2a/                       A2A agent (JSON-RPC over HTTP, Agent Card at /.well-known/agent-card.json, read-only)
 cmd/netfulfil-projector/       analytics writer (Kafka -> analytical Postgres)
 cmd/netfulfil-reports/         analytics reader (REST over a read-only pool)
 internal/
@@ -339,6 +355,7 @@ internal/
   adapters/inbound/http/       REST (+ the reports router)
   adapters/inbound/poller/     the inbound leg
   adapters/inbound/mcp/        MCP tools, resource, prompt
+  adapters/inbound/a2a/        A2A skills: network_demand_status, advertised_availability (both read)
   adapters/inbound/kafka/      analytics consumer (own topic)
   adapters/kafka/cloudevents/  the CloudEvents 1.0 envelope
   adapters/outbound/retailnetwork/  NETWORK_MODE switch, stub gateway + seed file, live Vendor API gateway (ADR 0026)
@@ -406,6 +423,8 @@ credential. (ADR 0009 §4 removed the earlier `sandbox` tier.)
 
 `cmd/mcp`: `MCP_ADDR` (`:8090`), `DATABASE_URL` (required), `MIGRATIONS_DATABASE_URL`,
 `MIGRATIONS_PATH`, `REPORTS_BASE_URL` (unset = no report tool), `LOG_LEVEL`.
+`cmd/a2a`: `A2A_ADDR` (`:8093`), `A2A_AGENT_URL` (required, absolute http(s) URL), `DATABASE_URL`
+(required), `MIGRATIONS_DATABASE_URL`, `MIGRATIONS_PATH`, `LOG_LEVEL`.
 `cmd/netfulfil-projector`: `ANALYTICS_DATABASE_URL` (required),
 `ADMIN_ADDR` (`:8091`), `KAFKA_BROKERS` (required), `ANALYTICS_MIGRATIONS_PATH`
 (`migrations/analytics`), `LOG_LEVEL`. `cmd/netfulfil-reports`:
@@ -442,7 +461,7 @@ but nothing publishes to it today.
 | Overview | [Introduction](docs/overview/introduction.md), [Architecture](docs/overview/architecture.md), [Quickstart](docs/overview/quickstart.md) |
 | Operations | [Configuration](docs/operations/configuration.md), [Runbook](docs/operations/runbook.md), [Observability](docs/operations/observability.md), [Troubleshooting](docs/operations/troubleshooting.md) |
 | Development | [Testing and CI](docs/development/testing.md) |
-| Interfaces | [Integration](docs/ecosystem/integration.md), [MCP tools](docs/mcp/tools.md), `apis/openapi.yaml`, `apis/asyncapi.yaml` |
+| Interfaces | [Integration](docs/ecosystem/integration.md), [MCP tools](docs/mcp/tools.md), [A2A inbound adapter (ADR 0030)](docs/adr/0030-a2a-inbound-adapter.md), `apis/openapi.yaml`, `apis/asyncapi.yaml` |
 | Domain | [Use cases](docs/ddd/use-cases.md), [Subdomain classification](docs/ddd/subdomain-classification.md), [DDD artifact pack](docs/ddd/README.md) |
 | Decisions | [ADR index](docs/adr/README.md) |
 
