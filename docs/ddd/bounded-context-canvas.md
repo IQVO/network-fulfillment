@@ -290,6 +290,9 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 - **Decided 2026-10-06: cycle time gates eligibility (ADR 0017).** A path is
   eligible for a cutoff only if `CycleTimeP95 <= cutoff - now`; a missing or
   zero cycle time stays eligible (fail-open); capacity is not scaled.
+- **Decided 2026-10-30: the next feasible cutoff (ADR 0031).** When no path
+  can make the next cutoff, the offer is computed against the first one a
+  path can make, up to 7 days ahead; only none in that bound is a zero.
 - **Contract drift (fixed 2026-10-06, ADR 0015).** CORS now allows
   `GET/POST/OPTIONS`, `ErrConfirmBeforeAcknowledge` maps to a 409,
   `apis/openapi.yaml` documents `GET /capability-offers` and the

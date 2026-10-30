@@ -33,16 +33,33 @@ func (f *fakeInventory) UsableQuantity(_ context.Context, sku shared.SKU) (int, 
 	return f.usable[sku], nil
 }
 
+// fakePathCap is a schedule of cutoffs: next, then later (ascending). Like
+// the real cache, NextCutoff answers the first cutoff ON OR AFTER `after`
+// (inclusive); past the last one listed it answers found=false. With later
+// empty it is a schedule of exactly one cutoff.
 type fakePathCap struct {
 	next  contract.NextCutoff
+	later []contract.NextCutoff
 	found bool
+
+	// asked records every `after` NextCutoff was called with.
+	asked []time.Time
 
 	schedule      contract.CutoffSchedule
 	scheduleFound bool
 }
 
-func (f *fakePathCap) NextCutoff(shared.SiteId, time.Time) (contract.NextCutoff, bool) {
-	return f.next, f.found
+func (f *fakePathCap) NextCutoff(_ shared.SiteId, after time.Time) (contract.NextCutoff, bool) {
+	f.asked = append(f.asked, after)
+	if !f.found {
+		return contract.NextCutoff{}, false
+	}
+	for _, c := range append([]contract.NextCutoff{f.next}, f.later...) {
+		if !c.CutoffAt.Before(after) {
+			return c, true
+		}
+	}
+	return contract.NextCutoff{}, false
 }
 
 func (f *fakePathCap) Schedule(shared.SiteId, time.Time) (contract.CutoffSchedule, bool) {
@@ -52,9 +69,17 @@ func (f *fakePathCap) Schedule(shared.SiteId, time.Time) (contract.CutoffSchedul
 type fakeCapacity struct {
 	remaining map[string]int
 	known     map[string]bool
+
+	// perCutoff, when set, replaces remaining/known: the figure of a path
+	// for one cutoff instant (absent = never observed).
+	perCutoff map[time.Time]map[string]int
 }
 
-func (f *fakeCapacity) RemainingCapacity(pathId string, _ time.Time) (int, bool) {
+func (f *fakeCapacity) RemainingCapacity(pathId string, cutoffAt time.Time) (int, bool) {
+	if f.perCutoff != nil {
+		units, ok := f.perCutoff[cutoffAt][pathId]
+		return units, ok
+	}
 	return f.remaining[pathId], f.known[pathId]
 }
 

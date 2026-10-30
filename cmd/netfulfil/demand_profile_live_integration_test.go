@@ -50,21 +50,26 @@ var (
 )
 
 // profileFeed publishes what process-path-management and wes-work-planning
-// would publish for the site: the cutoffs sit 6 and 12 hours from now (UTC, which
-// is how the cache reads a local_time), so no cutoff is ever too close for the
-// path's cycle time to fit.
+// would publish for the site: the cutoffs sit 6 and 12 hours from now, as wall
+// clock times in the schedule's zone (profileTimezone, which is how the cache
+// reads a local_time), so no cutoff is ever too close for the path's cycle time
+// to fit. The capacity is published at the UTC instants of those local times.
 type profileFeed struct {
 	t       *testing.T
 	ctx     context.Context
 	brokers []string
 	seq     int
-	times   []string // the two cutoff local times, in order
-	now     time.Time
+	times   []string  // the two cutoff local times, in order
+	now     time.Time // in the schedule's zone
 }
 
 func newProfileFeed(t *testing.T, ctx context.Context, brokers []string) *profileFeed {
 	t.Helper()
-	now := time.Now().UTC()
+	loc, err := time.LoadLocation(profileTimezone)
+	if err != nil {
+		t.Fatalf("load %s: %v", profileTimezone, err)
+	}
+	now := time.Now().In(loc)
 	return &profileFeed{
 		t: t, ctx: ctx, brokers: brokers, now: now,
 		times: []string{now.Add(6 * time.Hour).Format("15:04"), now.Add(12 * time.Hour).Format("15:04")},
@@ -130,7 +135,7 @@ func (f *profileFeed) publishCapacity() {
 		for _, lt := range f.times {
 			var h, m int
 			_, _ = fmt.Sscanf(lt, "%d:%d", &h, &m)
-			at := time.Date(f.now.Year(), f.now.Month(), f.now.Day()+off, h, m, 0, 0, time.UTC)
+			at := time.Date(f.now.Year(), f.now.Month(), f.now.Day()+off, h, m, 0, 0, f.now.Location()).UTC()
 			msgs = append(msgs, f.message(pathCapacityType, profilePathID, map[string]any{
 				"path_id": profilePathID, "cutoff_at": at.Format(time.RFC3339), "remaining_units": profileCeiling, "known": true,
 			}))

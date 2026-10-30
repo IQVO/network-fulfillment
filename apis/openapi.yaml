@@ -494,7 +494,8 @@ components:
             Which rule produced `advertisedQuantity`. `PHYSICAL` means
             physical stock on hand was the binding constraint (or
             throughput was unknown). `THROUGHPUT_CONSTRAINED` means the
-            eligible paths' remaining capacity before the next cutoff was.
+            eligible paths' remaining capacity before the next cutoff some
+            path can still make (ADR 0031) was.
           enum: [PHYSICAL, THROUGHPUT_CONSTRAINED]
         computedAt:
           type: string

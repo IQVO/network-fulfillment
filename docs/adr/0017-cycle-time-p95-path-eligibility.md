@@ -17,6 +17,9 @@ open. Implements the cycle-time input that
 [ADR 0001](./0001-network-fulfillment-bounded-context.md) §8 already names for
 `throughputFeasibleBefore`; it does not amend ADR 0001. No REST, MCP or event
 contract changes; only the *value* of an advertised quantity can change.
+The "every path ruled out by cycle time is a proven zero" bullet is amended by
+[ADR 0031](./0031-advertise-against-the-next-feasible-cutoff.md): the offer
+walks to the next cutoff some path can make; only none within 7 days is a zero.
 
 ## Context
 
