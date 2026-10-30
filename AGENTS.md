@@ -47,8 +47,9 @@ troubleshooting); CI jobs and gremlins thresholds: `docs/development/testing.md`
 doc map: `docs/overview/introduction.md`.
 
 Core concept: **throughput-constrained advertised availability**
-= `min(physicalAvailable, throughputFeasibleBefore(nextCutoff))` (ADR 0001,
-implemented by `CapabilityOffer.Compute()`).
+= `min(physicalAvailable, throughputFeasibleBefore(nextFeasibleCutoff))` (ADR 0001;
+the first cutoff, in the site schedule's own time zone, that an eligible path can still
+make, ADR 0031; implemented by `CapabilityOffer.Compute()`).
 `.claude/rules/*.md` describe the code as it is; never write planned
 concepts into them as if they exist.
 
