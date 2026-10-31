@@ -40,10 +40,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/producttranslation"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
@@ -258,7 +258,7 @@ type wiredUsecases struct {
 	confirm   *usecases.ConfirmNetworkOrderShipment
 	orders    *postgres.NetworkOrderRepo
 	pool      *pgxpool.Pool
-	gateway   *network.StubGateway
+	gateway   *retailnetwork.StubGateway
 	om        *orderManagementStub
 }
 
@@ -278,7 +278,7 @@ func newWiredUsecases(t *testing.T, feasible bool) *wiredUsecases {
 		outboundkafka.NewAnalyticsPublisher(nil, mint),
 	)
 	uow := postgres.NewUnitOfWork(pool)
-	gateway := network.NewStubGateway(nil)
+	gateway := retailnetwork.NewStubGateway(nil)
 	om := newOrderManagementStub(t, feasible)
 	planner := ordermanagement.NewPlanner(om.baseURL(), nil)
 

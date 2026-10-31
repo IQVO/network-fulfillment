@@ -19,6 +19,8 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        # The product dictionary and node file are read once at boot: roll the pod when they change.
+        checksum/data: {{ include (print $.Template.BasePath "/configmap-data.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -110,30 +112,6 @@ spec:
                   key: {{ .Values.database.migrationsExistingSecretKey }}
                   optional: true
             {{- end }}
-            {{- if ne .Values.config.networkMode "stub" }}
-            {{- if not (or .Values.credentials.existingSecret .Values.credentials.clientId) }}
-            {{- fail (printf "config.networkMode is %q but no credentials are set: provide credentials.existingSecret or credentials.clientId/clientSecret/refreshToken. Rendering these secretKeyRefs against a Secret that is never created would leave the pod in CreateContainerConfigError instead of the binary's own fail-closed error." .Values.config.networkMode) }}
-            {{- end }}
-            # Only mounted outside stub mode. This is what keeps the kind
-            # cluster and e2e-tests credential-free: the default install
-            # needs no Secret to exist at all, and asking for live mode
-            # is an explicit, visible act.
-            - name: NETWORK_CLIENT_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "network-fulfillment.credentialsSecretName" . }}
-                  key: NETWORK_CLIENT_ID
-            - name: NETWORK_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "network-fulfillment.credentialsSecretName" . }}
-                  key: NETWORK_CLIENT_SECRET
-            - name: NETWORK_REFRESH_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "network-fulfillment.credentialsSecretName" . }}
-                  key: NETWORK_REFRESH_TOKEN
-            {{- end }}
             {{- if .Values.otel.enabled }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.otel.endpoint | quote }}
@@ -147,7 +125,7 @@ spec:
             {{- range .Values.extraEnv }}
             - {{ toYaml . | nindent 14 | trim }}
             {{- end }}
-          {{- if or .Values.productTranslation.mappings .Values.stubDemand.demands }}
+          {{- if include "network-fulfillment.hasDataFiles" . }}
           volumeMounts:
             - name: data
               mountPath: /etc/network-fulfillment
@@ -167,7 +145,7 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-      {{- if or .Values.productTranslation.mappings .Values.stubDemand.demands }}
+      {{- if include "network-fulfillment.hasDataFiles" . }}
       volumes:
         - name: data
           configMap:

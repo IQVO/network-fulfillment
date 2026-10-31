@@ -4,7 +4,7 @@
 # Go 1.27 (this repo's go.mod), unlike most of the fleet's 1.26 — digest
 # resolved from the registry, not copied from a sibling repo whose tag
 # points at a different minor.
-FROM golang:1.27-alpine@sha256:738d1cf061836894ff6bb8c33881080ac66de8cf0586615012a0c8f592649cfa AS build
+FROM golang:1.27-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS build
 WORKDIR /src
 
 # Cache go.mod/go.sum download separately from source so editing source
@@ -22,7 +22,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/netfulfil ./cmd/netfulfil && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/netfulfil-projector ./cmd/netfulfil-projector && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/netfulfil-reports ./cmd/netfulfil-reports && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mcp ./cmd/mcp
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mcp ./cmd/mcp && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/a2a ./cmd/a2a
 
 # --- runtime stage ---
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
@@ -35,13 +36,14 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 # TLS (NETWORK_MODE=live), and without a trust store that fails at runtime,
 # not at build time.
 RUN apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates=20260909-r0 && \
+    apk add --no-cache ca-certificates=20261020-r0 && \
     addgroup -g 1000 -S app && adduser -u 1000 -S app -G app
 WORKDIR /app
 COPY --from=build --chown=app:app /out/netfulfil ./netfulfil
 COPY --from=build --chown=app:app /out/netfulfil-projector ./netfulfil-projector
 COPY --from=build --chown=app:app /out/netfulfil-reports ./netfulfil-reports
 COPY --from=build --chown=app:app /out/mcp ./mcp
+COPY --from=build --chown=app:app /out/a2a ./a2a
 # Migrations ship IN the image and run at startup, matching every
 # database-backed sibling. OLTP migrations land at /app/migrations
 # (cmd/netfulfil's default MIGRATIONS_PATH); analytics migrations land
@@ -53,8 +55,9 @@ USER 1000
 
 # 8080: netfulfil's OLTP HTTP API. 8092: netfulfil-reports' read-only
 # reports API. 8090: mcp's Streamable HTTP MCP endpoint, matching every
-# sibling's MCP port convention. netfulfil-projector exposes no port (a
+# sibling's MCP port convention. 8093: a2a's JSON-RPC endpoint and Agent Card
+# (the fleet's A2A port). netfulfil-projector exposes no port (a
 # pure consumer); it and netfulfil-reports use ANALYTICS_DATABASE_URL,
 # not DATABASE_URL — see AGENTS.md.
-EXPOSE 8080 8092 8090
+EXPOSE 8080 8092 8090 8093
 ENTRYPOINT ["./netfulfil"]

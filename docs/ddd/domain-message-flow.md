@@ -161,7 +161,8 @@ Omitted: full CE types are
 `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged`
 and `com.warehouse.wes.work-planning.workpool.PathCapacityChanged`. The
 whole scenario always runs. No message
-goes to the network: `SubmitAvailability` is not called yet.
+goes to the network from this scenario. In live mode the separate `FeedInventory`
+worker later reads the persisted offers and feeds them (ADR 0027 part 2).
 
 ## 5. Orphaned hold freed
 

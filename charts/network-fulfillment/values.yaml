@@ -198,18 +198,64 @@ config:
   # the e2e suite all work with nothing configured -- and none of them
   # can accidentally acknowledge a real retailer's order.
   #
-  # live REQUIRES credentials below AND networkBaseUrl, and the pod
-  # refuses to start without them. That refusal is deliberate: silently
-  # degrading to stub would leave a pod that looks healthy while quietly
-  # acknowledging nothing the network sent. (ADR 0009 §4 removed the
-  # earlier sandbox tier: the network has no separate sandbox environment
-  # of its own to target.)
+  # live (ADR 0026) calls the retail network's Vendor API. It REQUIRES
+  # networkBaseUrl and networkVendorId (the chart refuses to render without
+  # them, and the binary refuses to start without them). That refusal is
+  # deliberate: silently degrading to stub would leave a pod that looks
+  # healthy while quietly acknowledging nothing the network sent. Live takes
+  # NO credential: neither the fleet nor the Vendor API has one. It also
+  # needs the database (always required) because its identifier maps and
+  # submission ledger live in Postgres (migration 0006). Any value other than
+  # stub or live is refused at render, because the binary would read it as stub.
+  # (ADR 0009 §4 removed the earlier sandbox tier: the network has no separate
+  # sandbox environment of its own to target.)
   networkMode: "stub"
 
-  # The live-mode target (ADR 0009 §4). Only read when config.networkMode
-  # is "live" -- ignored, and not required, in stub mode. No default: a
-  # live deployment must name its own target explicitly.
+  # NETWORK_BASE_URL, the Vendor API's base URL (ADR 0026). Only read when
+  # config.networkMode is "live"; rendered only then. No default: a live
+  # deployment must name its own target explicitly.
   networkBaseUrl: ""
+
+  # NETWORK_VENDOR_ID, the vendor account the service acts as (ADR 0026). The
+  # account must already exist on the network; this service never creates it.
+  # Only read when config.networkMode is "live"; rendered only then. No default.
+  networkVendorId: ""
+
+  # NETWORK_PROFILE_INTERVAL, how often the node profile (cutoffs, handling time,
+  # throughput) is re-derived from the local caches and, when its content changed,
+  # declared to the network (ADR 0027). A Go duration; "0" switches the
+  # declaration off. Only read when config.networkMode is "live"; rendered only
+  # then. The network judges our acknowledgement deadlines by the declared handling
+  # time, so leave it on unless the network is being declared to by something else.
+  networkProfileInterval: "5m"
+
+  # NETWORK_INVENTORY_INTERVAL, how often the inventory feed is planned from the
+  # capability offers the last recompute pass persisted and, when its content
+  # changed, sent to the network (ADR 0027 part 2). A Go duration; "0" switches the
+  # feed off. An unchanged feed is still held back by the service (repeated at most
+  # hourly), so this is the cadence of looking, not of sending. Only read when
+  # config.networkMode is "live"; rendered only then. With the feed off the network
+  # keeps selling against whatever stock it was last told.
+  networkInventoryInterval: "5m"
+
+  # INBOUND_RECEIVING_URL and PRODUCT_MASTER_URL, the REST base URLs of the two
+  # fleet contexts the inbound loop calls (ADR 0028): it registers an ASN for
+  # each seller shipment and resolves each GTIN to a SKU. Only read when
+  # config.networkMode is "live"; rendered only then; the chart and the binary
+  # both refuse live without them. No default: a deployment names its own.
+  inboundReceivingUrl: ""
+  productMasterUrl: ""
+
+  # INBOUND_INTAKE_INTERVAL: how often the inbound loop polls shipments and
+  # retries the ones that could not be registered yet (ADR 0028). Live only.
+  inboundIntakeInterval: "30s"
+
+  # INBOUND_RECEIPT_CONSUMER_GROUP: this service's consumer group on
+  # inbound-receiving's events topic, through which closed receipts (cartons and
+  # discrepancies included) come back to be reported to the network (ADR 0028).
+  # Durable and unique to this service. Live only; the chart and the binary both
+  # refuse live without it. No default: warehouse-infra names it.
+  inboundReceiptConsumerGroup: ""
 
   # order-management's in-cluster REST base URL. The one upstream this
   # context calls; the default matches the fleet's service naming.
@@ -227,20 +273,12 @@ config:
   # this context's own netfulfil_mfe remote dev port (web/vite.config.ts).
   corsAllowedOrigins: "http://localhost:5173,http://localhost:5188"
 
-# External-network credentials. Used ONLY when config.networkMode is
-# "live" -- in stub mode nothing here is read and no Secret is created,
-# which is what keeps local installs credential-free.
-#
-# Set existingSecret to point at a Secret you manage yourself (its keys
-# must be named NETWORK_CLIENT_ID / NETWORK_CLIENT_SECRET /
-# NETWORK_REFRESH_TOKEN). Prefer that over the inline values below for
-# anything that is not a throwaway sandbox: inline values land in the
-# release's stored manifest in plain text.
-credentials:
-  existingSecret: ""
-  clientId: ""
-  clientSecret: ""
-  refreshToken: ""
+# There is no credentials block: the live adapter (ADR 0026) authenticates with
+# nothing, and the only Secret this chart renders or references is the
+# database one below. NETWORK_CLIENT_ID, NETWORK_CLIENT_SECRET and
+# NETWORK_REFRESH_TOKEN were mounted for an adapter that never existed and no
+# code reads them; a values file that still sets credentials.* has those keys
+# ignored.
 
 # The Anti-Corruption Layer's dictionary: the network's product identifier
 # to our SKU, rendered into a ConfigMap and mounted as a file.
@@ -258,6 +296,38 @@ productTranslation:
   mappings: []
   # - networkProductId: ASIN-XYZ123
   #   sku: sku-1
+  # An entry may carry an optional "site" (ADR 0027 part 2): the network keys
+  # stock by a listing, one catalogue item at one node, so the inventory feed
+  # needs the id a SKU is listed under at each site. An entry without "site"
+  # applies to every site; the same SKU listed twice for one site is a load
+  # error. In live mode, give each site's listing its own entry:
+  # - networkProductId: LISTING-FC1-1
+  #   sku: sku-1
+  #   site: site-1
+
+# The node definitions the live adapter registers on the network for any site
+# that is not yet one of its nodes (ADR 0026 Decision 7), rendered into the data
+# ConfigMap as nodes.json and read from NETWORK_NODES_FILE.
+#
+# Used ONLY when config.networkMode is "live"; ignored in stub mode. OPTIONAL: a
+# site whose vendorNodeCode is already a node on the network is adopted without
+# a definition. A site with neither is logged at every poll and gets no demand.
+# The keys are the file's strict schema (the chart refuses a typo or a missing
+# required key): siteCode, nodeType, regionId, timezone, postalCode and
+# countryCode are required; subtype is optional; lat and lon are optional and go
+# together. The values are the network's to judge. The service reads the file
+# once, at boot: change it, then roll the pod.
+networkNodes:
+  nodes: []
+  # - siteCode: site-1
+  #   nodeType: FULFILLMENT_CENTER
+  #   subtype: SORTABLE
+  #   regionId: SP
+  #   timezone: America/Sao_Paulo
+  #   postalCode: 01000-000
+  #   countryCode: BR
+  #   lat: -23.55
+  #   lon: -46.63
 
 # Declarative demand for a STUB run: the same pattern as this fleet's
 # PATH_CATALOGUE_FILE, and the reason this context needs no write endpoint.
@@ -267,9 +337,10 @@ productTranslation:
 # order becomes instantly infeasible, which reads like a promise bug rather
 # than an expired fixture.
 #
-# Ignored unless config.networkMode is "stub" — the binary REFUSES to boot
-# if a seed file is set against a real gateway, because seeded demand would
-# never be delivered and somebody would be waiting for it.
+# For config.networkMode "stub" only. The binary REFUSES to boot if a seed
+# file is set against the live gateway, because seeded demand would never be
+# delivered and somebody would be waiting for it, so the chart refuses to
+# render live mode with demands set.
 stubDemand:
   demands: []
   # - networkRef: po-4711
@@ -527,6 +598,48 @@ mcp:
   # calls. When empty and analytics.enabled=true, defaults to the
   # in-cluster reports Service.
   reportsBaseUrl: ""
+  extraEnv: []
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# A2A (Agent2Agent) agent (cmd/a2a, ADR 0030): the third driving adapter over the
+# same read repositories as the REST and MCP surfaces. READ-ONLY, like MCP (ADR
+# 0002): skills network_demand_status and advertised_availability. Off by
+# default; warehouse-infra turns it on. A2A carries delegation only; facts still
+# travel as CloudEvents on Kafka. No Kafka/outbox runs in this Deployment, so it
+# renders no KAFKA_BROKERS / EVENT_PUBLISHER. Unlike mcp, it holds no per-process
+# session state (a message-only agent), so it could scale horizontally.
+a2a:
+  enabled: false
+  replicaCount: 1
+  # A2A_ADDR the binary listens on; keep in sync with service.targetPort.
+  # (8090 is mcp, 8091 the projector admin port, 8092 the reports API, so 8093.)
+  httpAddr: ":8093"
+  # Absolute URL advertised on the Agent Card. Empty defaults to this release's
+  # in-cluster Service DNS (http://<release>-a2a.<ns>.svc.cluster.local:8093/);
+  # warehouse-infra can override it with the Kong path when the agent must be
+  # reachable off-cluster.
+  agentUrl: ""
+  service:
+    type: ClusterIP
+    port: 8093
+    targetPort: 8093
+  # Kong exposure of the A2A agent (a2a-route.yaml): host path
+  # /api/a2a/<context> rewritten to / (JSON-RPC root; the well-known agent card
+  # stays reachable under the same prefix). Off by default; warehouse-infra
+  # turns it on with the real parentRefs and path.
+  route:
+    enabled: false
+    path: "/api/a2a/network-fulfillment"
+    parentRefs:
+      - name: ""
+        namespace: ""
+        sectionName: "http"
   extraEnv: []
   resources:
     limits:

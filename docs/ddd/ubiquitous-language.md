@@ -24,7 +24,7 @@ difference is flagged in the last section. Code wins over this page.
 | **NetworkOrder** | Demand from the network with a deadline we did not choose, answered exactly once, in full or not at all. | `networkorder.NetworkOrder` |
 | **Line** | One line already translated into our vocabulary. It keeps the network's product id, because answers go back in the network's terms. | `networkorder.Line`, `NewLine` |
 | **SKU** | Our product identity. It is only ever the output of translation. | `shared.SKU` |
-| **Product translation** | The ACL dictionary from `NetworkProductId` to `SKU`. | `ports.ProductTranslation` (`ToSKU`, `KnownSKUs`); file `PRODUCT_TRANSLATION_FILE` |
+| **Product translation** | The ACL dictionary from `NetworkProductId` to `SKU`. | `ports.ProductTranslation` (`ToSKU`, `KnownSKUs`) and, read the other way per site by the inventory feed, `ports.FeedCatalogue` (`ListedSKUs`) and the live gateway's listing lookup (`ListingFor`); file `PRODUCT_TRANSLATION_FILE` |
 | **Untranslatable demand** | Demand naming a product with no mapping. It is recorded lineless and rejected. | `networkorder.ReceiveUntranslatable`; `shared.ErrUnknownProduct` |
 | **SiteId** | The fulfillment site the demand is destined for. | `shared.SiteId` |
 | **requiredShipBy** | The network's deadline, passed to `order-management` unchanged. | `NetworkOrder.RequiredShipBy()`; `HeldOrderRequest.RequiredShipBy` |
@@ -66,5 +66,5 @@ difference is flagged in the last section. Code wins over this page.
 | "Not acknowledged" error | `ErrNotAcknowledged` | Returned by `LinkLocalOrder` when the state is not `SUBMITTED`/`ACKNOWLEDGED`. The name predates the `SUBMITTED` state. |
 | "Linked" local order | `LocalOrderId` on the aggregate, recorded by `RecordHold` at raise time | `LinkLocalOrder` (at `SUBMITTED`) is now a no-op for the id `RecordHold` already stored; `ErrLocalOrderAlreadyLinked` still means a different id. |
 | "Deadline at risk" | `AcknowledgementDeadlineAtRisk` | ADR 0001 §6 says "approaching" the deadline. The code fires only once it is already **past** (`AcknowledgementOverdue`). |
-| Purchase order / ASIN / `poNumber` | `NetworkRef` / `NetworkProductId` | By design (Hard rule 1). The counterpart's names never appear outside `adapters/outbound/network/`. |
+| Purchase order / ASIN / `poNumber` | `NetworkRef` / `NetworkProductId` | By design (Hard rule 1). The counterpart's names never appear outside `adapters/outbound/retailnetwork/`. |
 | "Planner" | `FulfillmentPlanner` | This is `order-management` seen through a port. It does not plan anything itself. |

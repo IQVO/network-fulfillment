@@ -27,11 +27,12 @@ import (
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/system"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
 func main() {
@@ -43,13 +44,15 @@ func main() {
 // pool, and the CapabilityOffer pipeline.
 type infra struct {
 	gateway     ports.NetworkGateway
-	mode        network.Mode
+	mode        retailnetwork.Mode
 	translation ports.ProductTranslation
+	catalogue   ports.FeedCatalogue
 	orders      ports.NetworkOrderRepo
 	pool        *pgxpool.Pool
 	offers      ports.CapabilityOfferRepo
 	recompute   *usecases.RecomputeCapabilityOffers
 	capDone     []chan struct{}
+	sites       []shared.SiteId
 }
 
 // run wires every adapter and use case in startup order, serves until a
@@ -93,13 +96,17 @@ func run(ctx context.Context) int {
 		}
 	}()
 
-	in, closeInfra, ok := bootInfra(ctx, logger, cfg)
+	// The one gauge registry: order-management's breaker and the retail
+	// network's (ADR 0026 Decision 8) both report into it, served at /metrics.
+	circuitBreakerMetrics := telemetry.NewCircuitBreakerMetrics()
+
+	in, closeInfra, ok := bootInfra(ctx, logger, cfg, circuitBreakerMetrics)
 	if !ok {
 		return 1
 	}
 	defer closeInfra()
 
-	planner, circuitBreakerMetrics := wirePlanner()
+	planner := wirePlanner(circuitBreakerMetrics)
 
 	// readiness gates GET /readyz (ADR 0004 §graceful shutdown). The
 	// zero value is ready; SetNotReady is called as the FIRST step of
@@ -121,6 +128,7 @@ func run(ctx context.Context) int {
 	receive, sweep, rejectOverdue := wireUseCases(in.orders, in.gateway, planner, in.translation, eventPublisher, in.pool)
 	reconcile := wireReconcile(in.orders, in.gateway, planner, eventPublisher, in.pool)
 	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
+	profiles, inventory := wireSupplyLoop(logger, in)
 
 	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
 	// DISCARDED (`_ = receive`), so nothing in a deployed environment
@@ -143,7 +151,21 @@ func run(ctx context.Context) int {
 		serviceName: serviceName,
 	})
 
-	return serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, inbound, relay, readiness, in.recompute, in.capDone)
+	// The inbound loop (ADR 0028): live mode only, stopped before the pool closes.
+	loop, stopLoop, err := startInboundLoop(ctx, stop, cfg, in, circuitBreakerMetrics, logger)
+	if err != nil {
+		logger.Error("cannot wire the inbound loop", "err", err)
+		return 1
+	}
+	defer loop.stop(stopLoop, inboundLoopStopBudget)
+
+	// The node profile worker (ADR 0027) and the inventory feed worker (part 2),
+	// also live mode only, run inside serve with the poller and the sweeps.
+	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inventory, inbound, relay, readiness, in.recompute, in.capDone)
+	if loop.failed() && code == 0 {
+		code = 1 // a dead receipt consumer is a failure, whatever the signal said
+	}
+	return code
 }
 
 // bootInfra builds the pieces that must exist before any use case, in
@@ -152,29 +174,23 @@ func run(ctx context.Context) int {
 // open pool/reader at that point is irrelevant. On success the returned
 // closer releases the capability-offer caches first, then the order
 // repository (the reverse of their construction).
-func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig) (in infra, closeAll func(), ok bool) {
-	gateway, mode, err := wireGateway(logger)
+func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig, breaker *telemetry.CircuitBreakerMetrics) (in infra, closeAll func(), ok bool) {
+	in.mode = cfg.network.mode
+
+	// Node definitions and the product dictionary are plain files: read them
+	// before the database is dialled so a malformed one fails the boot at once.
+	nodes, err := loadNetworkNodes(logger, cfg.network)
 	if err != nil {
-		logger.Error("cannot wire network gateway", "mode", mode, "err", err)
-		return infra{}, nil, false
-	}
-	in.gateway, in.mode = gateway, mode
-
-	// Declarative stub seeding, the same shape as the fleet's
-	// PATH_CATALOGUE_FILE. This is how a stub deployment is given
-	// something to receive: the network offers no push (ADR 0001 section 5),
-	// so the alternative would be a write endpoint that exists only for
-	// testing and has no production counterpart.
-	if err := seedStubDemand(gateway, logger); err != nil {
-		logger.Error("cannot load stub demand", "err", err)
+		logger.Error("cannot load network node definitions", "err", err)
 		return infra{}, nil, false
 	}
 
-	in.translation, err = loadProductTranslation(logger)
+	dictionary, err := loadProductTranslation(logger)
 	if err != nil {
 		logger.Error("cannot load product translation", "err", err)
 		return infra{}, nil, false
 	}
+	in.translation, in.catalogue = dictionary, dictionary
 
 	orders, pool, closeOrders, err := wireOrders(context.Background(), logger, cfg.databaseURL)
 	if err != nil {
@@ -185,6 +201,29 @@ func bootInfra(ctx context.Context, logger *slog.Logger, cfg bootConfig) (in inf
 		return infra{}, nil, false
 	}
 	in.orders, in.pool = orders, pool
+
+	// The gateway comes after the pool because the live one keeps its
+	// identifier maps and submission ledger in this service's Postgres
+	// (ADR 0026 Decision 4; ADR 0025: live mode never runs without it).
+	gateway, err := wireGateway(logger, cfg.network, nodes, dictionary, pool, breaker)
+	if err != nil {
+		logger.Error("cannot wire network gateway", "mode", cfg.network.mode, "err", err)
+		closeOrders()
+		return infra{}, nil, false
+	}
+	in.gateway = gateway
+	in.sites = networkSites(nodes)
+
+	// Declarative stub seeding, the same shape as the fleet's
+	// PATH_CATALOGUE_FILE. This is how a stub deployment is given
+	// something to receive: the network offers no push (ADR 0001 section 5),
+	// so the alternative would be a write endpoint that exists only for
+	// testing and has no production counterpart. It refuses a live gateway.
+	if err := seedStubDemand(gateway, logger); err != nil {
+		logger.Error("cannot load stub demand", "err", err)
+		closeOrders()
+		return infra{}, nil, false
+	}
 
 	// CapabilityOffer (ADR 0001 §8): always on, because Kafka is a
 	// mandatory dependency (the real-wiring ADR); the two Kafka cache

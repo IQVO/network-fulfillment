@@ -58,26 +58,33 @@ type NetworkGateway interface {
 	PollDemand(ctx context.Context, since time.Time) ([]contract.InboundDemand, error)
 
 	// SubmitAcknowledgement tells the network we will fulfil the order
-	// in full, or will not fulfil it at all. accepted=false is a
-	// rejection; the protocol has no middle answer.
-	SubmitAcknowledgement(ctx context.Context, ref shared.NetworkRef, accepted bool) error
+	// in full, or will not fulfil it at all. Accepted=false is a
+	// rejection and carries our reason; the protocol has no middle
+	// answer. It is idempotent per ref: calling it again after a crash or
+	// a failed call never creates a second answer on the network
+	// (ADR 0026).
+	SubmitAcknowledgement(ctx context.Context, ref shared.NetworkRef, answer contract.Acknowledgement) error
 
-	// SubmitAvailability tells the network what we claim we can ship for
-	// one SKU at one site (ADR 0001's submitInventoryUpdate signal).
-	SubmitAvailability(ctx context.Context, update contract.AvailabilityUpdate) error
+	// SubmitInventoryFeed tells the network what a site claims it can ship: one
+	// feed per site per recompute pass, never one call per SKU (ADR 0027 §9). It
+	// is idempotent per content: a feed the network already holds is not sent
+	// again, and a refusal of one line never silences the others. A site with no
+	// node on the network yet is contract.ErrSiteNotRegistered.
+	SubmitInventoryFeed(ctx context.Context, feed contract.InventoryFeed) (contract.FeedResult, error)
 
-	// DeclareCapability would tell the network our cutoffs and cycle
-	// times directly. See contract.CapabilityDeclaration's doc comment:
-	// the network's real API has no such operation, so every adapter in
-	// this codebase today treats this as a documented no-op kept for
-	// port-shape completeness and for a future program that might accept
-	// one.
-	DeclareCapability(ctx context.Context, offer contract.CapabilityDeclaration) error
+	// DeclareNodeProfile tells the network how a site operates: its cutoffs,
+	// handling time and throughput (ADR 0027). It is idempotent per content: the
+	// same profile again sends nothing, a changed one becomes the next
+	// revision, which the adapter owns and persists and which never goes down.
+	// A site with no node on the network yet is contract.ErrSiteNotRegistered.
+	DeclareNodeProfile(ctx context.Context, profile contract.NodeProfile) (contract.ProfileResult, error)
 
-	// RequestLabel asks the network for a shipping label, returning only
-	// {labelRef, trackingNumber, carrier} — never ship-to PII (ADR 0009
-	// §3).
-	RequestLabel(ctx context.Context, ref shared.NetworkRef) (contract.LabelResult, error)
+	// RequestLabel asks the network for the shipping labels of an order that
+	// leaves in packageCount packages (at least one), returning only
+	// {labelRef, trackingNumber, carrier} per package — never ship-to PII
+	// (ADR 0009 §3). The count is the caller's: this context holds no other
+	// package data, and none is needed (ADR 0026). Idempotent per ref.
+	RequestLabel(ctx context.Context, ref shared.NetworkRef, packageCount int) ([]contract.LabelResult, error)
 
 	// SubmissionStatus reconciles a previously-submitted acknowledgement
 	// against the network's own transaction-status record (ADR 0001 §5).
@@ -86,9 +93,11 @@ type NetworkGateway interface {
 	// commitment.
 	SubmissionStatus(ctx context.Context, ref shared.NetworkRef) (contract.SubmissionStatusValue, error)
 
-	// SubmitShipmentConfirmation tells the network the order has
-	// shipped.
-	SubmitShipmentConfirmation(ctx context.Context, ref shared.NetworkRef) error
+	// SubmitShipmentConfirmation tells the network the order shipped at
+	// shippedAt, with the tracking numbers of the labels RequestLabel
+	// returned for it. It is an error to confirm an order that has no label.
+	// Idempotent per ref: the first shippedAt wins (ADR 0026).
+	SubmitShipmentConfirmation(ctx context.Context, ref shared.NetworkRef, shippedAt time.Time) error
 }
 
 // FulfillmentPlanner is order-management, seen from here through the
@@ -154,6 +163,48 @@ type ProcessPathCapability interface {
 	// the site has no schedule in the cache yet (not: the site has no
 	// SKUs).
 	NextCutoff(siteId shared.SiteId, after time.Time) (contract.NextCutoff, bool)
+
+	// Schedule returns the site's whole weekly cutoff schedule, each slot with
+	// its next occurrence on or after `after` and the paths eligible for it
+	// (ADR 0027): NextCutoff answers only the next cutoff, which cannot describe
+	// a week. found=false means the site has no schedule in the cache yet.
+	Schedule(siteId shared.SiteId, after time.Time) (contract.CutoffSchedule, bool)
+}
+
+// ProfileDeclarer is the part of NetworkGateway that declares a node profile
+// (ADR 0027). DeclareNodeProfiles depends on this alone; every NetworkGateway
+// satisfies it.
+type ProfileDeclarer interface {
+	DeclareNodeProfile(ctx context.Context, profile contract.NodeProfile) (contract.ProfileResult, error)
+}
+
+// InventoryFeeder is the part of NetworkGateway that feeds inventory (ADR 0027
+// §9). FeedInventory depends on this alone; every NetworkGateway satisfies it.
+type InventoryFeeder interface {
+	SubmitInventoryFeed(ctx context.Context, feed contract.InventoryFeed) (contract.FeedResult, error)
+}
+
+// FeedCatalogue answers which SKUs the network lists at a site (ADR 0027 §10):
+// the SKUs a feed of that site can carry, and so the ones a complete feed must
+// account for. A SKU the catalogue does not list at the site is not fed. It is
+// the product dictionary read for one site; it names no network identifier.
+type FeedCatalogue interface {
+	ListedSKUs(ctx context.Context, siteId shared.SiteId) ([]shared.SKU, error)
+}
+
+// ProfileHistory answers what the gateway last declared for a site, in our
+// vocabulary (ADR 0027 §3). DeclareNodeProfiles reads it so that a declared
+// ceiling is never lowered by an observation. The live gateway implements it from
+// its own persisted state; found=false means nothing was declared yet.
+type ProfileHistory interface {
+	LastDeclared(ctx context.Context, siteId shared.SiteId) (profile contract.NodeProfile, found bool, err error)
+}
+
+// ProfileMetrics counts what DeclareNodeProfiles did for each site (ADR 0027 §8),
+// one call per site and attempt, and keeps the per-site revision gauge. A nil
+// implementation is valid: the use case then counts nothing.
+type ProfileMetrics interface {
+	Declared(ctx context.Context, site shared.SiteId, result contract.ProfileResult)
 }
 
 // PathCapacity answers wes-work-planning's own remaining-admission-

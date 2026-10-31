@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -25,6 +26,46 @@ import (
 type bootConfig struct {
 	databaseURL  string
 	kafkaBrokers []string
+	network      networkConfig
+	inbound      inboundConfig
+}
+
+// networkConfig is the retail-network side of the boot configuration (ADR 0009
+// §4, ADR 0026 Decision 10). Stub is the default; everything else is read only
+// in live mode.
+type networkConfig struct {
+	mode     retailnetwork.Mode
+	baseURL  string // NETWORK_BASE_URL, required in live mode
+	vendorID string // NETWORK_VENDOR_ID, required in live mode
+	// nodesFile is NETWORK_NODES_FILE, optional: without it live mode relies
+	// on every site already being a node on the network (adoption).
+	nodesFile string
+}
+
+// loadNetworkConfig reads NETWORK_MODE and, in live mode, the variables the
+// Vendor API adapter cannot run without. A missing one stops the boot with one
+// error naming every variable that is absent, before anything is dialled.
+func loadNetworkConfig(get func(string) string) (networkConfig, error) {
+	cfg := networkConfig{mode: retailnetwork.ParseMode(get("NETWORK_MODE"))}
+	if cfg.mode != retailnetwork.ModeLive {
+		// Not read in stub mode: a stale NETWORK_BASE_URL on a stub deployment
+		// is harmless, and the stub never dials it.
+		return cfg, nil
+	}
+	cfg.baseURL = strings.TrimSpace(get("NETWORK_BASE_URL"))
+	cfg.vendorID = strings.TrimSpace(get("NETWORK_VENDOR_ID"))
+	cfg.nodesFile = strings.TrimSpace(get("NETWORK_NODES_FILE"))
+	var missing []string
+	if cfg.baseURL == "" {
+		missing = append(missing, "NETWORK_BASE_URL")
+	}
+	if cfg.vendorID == "" {
+		missing = append(missing, "NETWORK_VENDOR_ID")
+	}
+	if len(missing) > 0 {
+		return networkConfig{}, fmt.Errorf("NETWORK_MODE=live requires %s to be set", strings.Join(missing, " and "))
+	}
+	return cfg, nil
 }
 
 // loadBootConfig reads and validates the mandatory configuration through
@@ -46,6 +87,19 @@ func loadBootConfig(get func(string) string) (bootConfig, error) {
 	if err := checkCapabilityOffer(get("CAPABILITY_OFFER_ENABLED")); err != nil {
 		return bootConfig{}, err
 	}
+	// After DATABASE_URL on purpose: live mode keeps its submission ledger and
+	// identifier maps in Postgres (ADR 0025, ADR 0026 Decision 4), so a live
+	// boot without a database is refused by the check above, by name.
+	network, err := loadNetworkConfig(get)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	cfg.network = network
+	inbound, err := loadInboundConfig(get, network.mode)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	cfg.inbound = inbound
 	return cfg, nil
 }
 
@@ -157,6 +211,55 @@ func sweepInterval() time.Duration {
 		}
 	}
 	return time.Minute
+}
+
+// defaultProfileInterval is how often the node profile is re-derived and, when
+// its content changed, declared (ADR 0027 §6). The profile changes with the
+// schedule and the cycle times, not with orders, so minutes are plenty.
+const defaultProfileInterval = 5 * time.Minute
+
+// profileInterval parses NETWORK_PROFILE_INTERVAL (ADR 0027 §6), a Go duration.
+// Unset yields defaultProfileInterval; "0" (or "0s") is valid and disables the
+// declaration worker, which is why this cannot reuse durationEnv (it treats a
+// zero duration as malformed). A negative or malformed value logs a warning and
+// yields the default, so a typo cannot silently switch the declaration off.
+// The bool is false when the worker is disabled.
+func profileInterval(logger *slog.Logger) (time.Duration, bool) {
+	return switchableInterval(logger, "NETWORK_PROFILE_INTERVAL", os.Getenv("NETWORK_PROFILE_INTERVAL"), defaultProfileInterval)
+}
+
+// defaultInventoryInterval is how often the inventory feed is planned and, when
+// the content changed, sent (ADR 0027 §11). The offers it reads are recomputed
+// every minute by default, so a few minutes is as fresh as the network needs;
+// the gateway itself holds an unchanged feed back for an hour.
+const defaultInventoryInterval = 5 * time.Minute
+
+// inventoryInterval parses NETWORK_INVENTORY_INTERVAL (ADR 0027 §11), a Go
+// duration, with the rules of NETWORK_PROFILE_INTERVAL: unset yields
+// defaultInventoryInterval, "0" disables the feed worker, a negative or
+// malformed value warns and yields the default. The bool is false when the
+// worker is disabled.
+func inventoryInterval(logger *slog.Logger) (time.Duration, bool) {
+	return switchableInterval(logger, "NETWORK_INVENTORY_INTERVAL", os.Getenv("NETWORK_INVENTORY_INTERVAL"), defaultInventoryInterval)
+}
+
+// switchableInterval parses the value of the variable called name as a Go
+// duration that may also be zero, which switches the worker it paces off (so it
+// cannot reuse durationEnv: that treats a zero duration as malformed). A
+// negative or malformed value logs a warning and yields def, so a typo cannot
+// silently switch a worker off. The callers read the variable themselves, by
+// its literal name, which is how the chart's environment parity test finds it.
+func switchableInterval(logger *slog.Logger, name, value string, def time.Duration) (time.Duration, bool) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return def, true
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		logger.Warn("invalid "+name+", using the default", "value", raw, "default", def, "error", err)
+		return def, true
+	}
+	return d, d > 0
 }
 
 // defaultOrphanHoldGrace is how long past acknowledgeBy the orphaned-hold

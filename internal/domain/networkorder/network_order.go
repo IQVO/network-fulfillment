@@ -175,6 +175,21 @@ func Receive(
 	lines []Line,
 	receivedAt time.Time,
 ) (*NetworkOrder, error) {
+	return ReceiveBy(ref, siteId, requiredShipBy, lines, receivedAt, time.Time{})
+}
+
+// ReceiveBy is Receive for demand that carries the deadline the network itself
+// set for answering it (ADR 0026): acknowledgeBy replaces the local
+// AcknowledgementWindow, so every sweep judges the order by the network's real
+// clock. A zero acknowledgeBy keeps the local window.
+func ReceiveBy(
+	ref shared.NetworkRef,
+	siteId shared.SiteId,
+	requiredShipBy time.Time,
+	lines []Line,
+	receivedAt time.Time,
+	acknowledgeBy time.Time,
+) (*NetworkOrder, error) {
 	if ref == "" {
 		return nil, shared.ErrEmptyNetworkRef
 	}
@@ -185,11 +200,20 @@ func Receive(
 		networkRef:     ref,
 		siteId:         siteId,
 		requiredShipBy: requiredShipBy,
-		acknowledgeBy:  receivedAt.Add(AcknowledgementWindow),
+		acknowledgeBy:  answerDeadline(receivedAt, acknowledgeBy),
 		lines:          lines,
 		state:          StateNew,
 		receivedAt:     receivedAt,
 	}, nil
+}
+
+// answerDeadline is the instant by which the network must be answered: the
+// network's own when it gave one, otherwise the local window from receipt.
+func answerDeadline(receivedAt, acknowledgeBy time.Time) time.Time {
+	if acknowledgeBy.IsZero() {
+		return receivedAt.Add(AcknowledgementWindow)
+	}
+	return acknowledgeBy
 }
 
 // ReceiveUntranslatable builds a NetworkOrder for demand we cannot
@@ -211,6 +235,18 @@ func ReceiveUntranslatable(
 	requiredShipBy time.Time,
 	receivedAt time.Time,
 ) (*NetworkOrder, error) {
+	return ReceiveUntranslatableBy(ref, siteId, requiredShipBy, receivedAt, time.Time{})
+}
+
+// ReceiveUntranslatableBy is ReceiveUntranslatable for demand that carries the
+// network's own acknowledgeBy (see ReceiveBy).
+func ReceiveUntranslatableBy(
+	ref shared.NetworkRef,
+	siteId shared.SiteId,
+	requiredShipBy time.Time,
+	receivedAt time.Time,
+	acknowledgeBy time.Time,
+) (*NetworkOrder, error) {
 	if ref == "" {
 		return nil, shared.ErrEmptyNetworkRef
 	}
@@ -218,7 +254,7 @@ func ReceiveUntranslatable(
 		networkRef:     ref,
 		siteId:         siteId,
 		requiredShipBy: requiredShipBy,
-		acknowledgeBy:  receivedAt.Add(AcknowledgementWindow),
+		acknowledgeBy:  answerDeadline(receivedAt, acknowledgeBy),
 		state:          StateNew,
 		receivedAt:     receivedAt,
 	}, nil
@@ -300,10 +336,21 @@ func (o *NetworkOrder) LinkLocalOrder(id shared.LocalOrderId) error {
 // ConfirmShipment records that the shipment has been confirmed to the
 // network, closing the order.
 func (o *NetworkOrder) ConfirmShipment() error {
+	if err := o.CheckConfirmable(); err != nil {
+		return err
+	}
+	o.state = StateConfirmed
+	return nil
+}
+
+// CheckConfirmable reports whether ConfirmShipment would be allowed, without
+// changing anything. A caller that must do something fallible first (ask the
+// network for the labels) asks this before it starts, so a refused order never
+// causes a network call.
+func (o *NetworkOrder) CheckConfirmable() error {
 	if o.state != StateAcknowledged {
 		return ErrConfirmBeforeAcknowledge
 	}
-	o.state = StateConfirmed
 	return nil
 }
 

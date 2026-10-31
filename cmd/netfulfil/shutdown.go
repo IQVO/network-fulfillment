@@ -41,12 +41,18 @@ func serve(
 	rejectOverdue *usecases.RejectOverdueOrders,
 	orphanHolds *usecases.SweepOrphanedHolds,
 	reconcile *usecases.ReconcileSubmittedOrders,
+	profiles *profileWorker,
+	inventory *inventoryWorker,
 	inbound *poller.Poller,
 	relay *postgres.OutboxRelay,
 	readiness *inboundhttp.Readiness,
 	recompute *usecases.RecomputeCapabilityOffers,
 	capabilityCacheDone []chan struct{},
 ) int {
+	// The caches were started on this outer context, serve's own signal context
+	// is its child: a shutdown cancels the outer one first and the child a moment
+	// later, so a consumer that returns because of it must not look like a death.
+	outer := ctx
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -59,6 +65,8 @@ func serve(
 	go runRecompute(ctx, recompute, logger)
 
 	pollerDone := startPoller(ctx, inbound)
+	profilesDone := startProfileWorker(ctx, logger, profiles)
+	inventoryDone := startInventoryWorker(ctx, logger, inventory)
 
 	relayCtx, stopRelay := context.WithCancel(ctx)
 	defer stopRelay()
@@ -70,7 +78,7 @@ func serve(
 	for i, done := range capabilityCacheDone {
 		watched = append(watched, namedDone{fmt.Sprintf("capability-offer cache consumer %d", i+1), done})
 	}
-	died := watchDeaths(ctx, watched)
+	died := watchDeaths(ctx, watched, outer)
 
 	exitCode := 0
 	select {
@@ -85,7 +93,7 @@ func serve(
 	}
 	stop() // cancels the poller and tickers when the cause was not a signal
 
-	shutdownGracefully(logger, srv, readiness, stopRelay, relayDone, pollerDone, capabilityCacheDone)
+	shutdownGracefully(logger, srv, readiness, stopRelay, relayDone, pollerDone, profilesDone, inventoryDone, capabilityCacheDone)
 	return exitCode
 }
 
@@ -97,15 +105,18 @@ type namedDone struct {
 }
 
 // watchDeaths reports, on the returned channel, the name of every watched
-// goroutine that finishes while ctx is still live — that is, one that died
-// on its own instead of being stopped by shutdown.
-func watchDeaths(ctx context.Context, watched []namedDone) <-chan string {
+// goroutine that finishes while ctx (and every upstream context it derives
+// from) is still live — that is, one that died on its own instead of being
+// stopped by shutdown. A goroutine started on an upstream context returns the
+// moment that context is cancelled, before the cancellation has reached ctx:
+// checking only ctx would report that clean stop as a death.
+func watchDeaths(ctx context.Context, watched []namedDone, upstream ...context.Context) <-chan string {
 	died := make(chan string, len(watched))
 	for _, w := range watched {
 		go func() {
 			select {
 			case <-w.done:
-				if ctx.Err() == nil {
+				if ctx.Err() == nil && !anyDone(upstream) {
 					died <- w.name
 				}
 			case <-ctx.Done():
@@ -113,6 +124,16 @@ func watchDeaths(ctx context.Context, watched []namedDone) <-chan string {
 		}()
 	}
 	return died
+}
+
+// anyDone reports whether any of the contexts is already cancelled.
+func anyDone(ctxs []context.Context) bool {
+	for _, c := range ctxs {
+		if c.Err() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // startPoller runs the inbound poller and returns a channel that closes
@@ -183,7 +204,7 @@ func shutdownGracefully(
 	srv *http.Server,
 	readiness *inboundhttp.Readiness,
 	stopRelay context.CancelFunc,
-	relayDone, pollerDone <-chan struct{},
+	relayDone, pollerDone, profilesDone, inventoryDone <-chan struct{},
 	capabilityCacheDone []chan struct{},
 ) {
 	readiness.SetNotReady()
@@ -203,6 +224,16 @@ func shutdownGracefully(
 	// inbound.Run's own select has already seen it. This wait is purely
 	// for the in-flight pass (if any) to finish before main returns.
 	waitStopped(shutdownCtx, logger, pollerDone, "poller did not stop before the shutdown deadline")
+
+	// The node profile worker (ADR 0027) is cancelled by the same context. Its
+	// write is a ledger row first and an HTTP call second, so an in-flight
+	// declaration that is cut off is resumed under the same key by the next boot.
+	waitStopped(shutdownCtx, logger, profilesDone, "node profile worker did not stop before the shutdown deadline")
+
+	// The inventory feed worker (ADR 0027 part 2) is cancelled the same way. Its
+	// feed is a ledger row first and an HTTP call second, so an in-flight feed
+	// that is cut off is resumed under the same key by the next boot.
+	waitStopped(shutdownCtx, logger, inventoryDone, "inventory feed worker did not stop before the shutdown deadline")
 
 	// capabilityCacheDone holds the two Kafka cache consumers' Run channels.
 	for _, done := range capabilityCacheDone {

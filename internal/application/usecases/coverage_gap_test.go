@@ -207,27 +207,27 @@ func (errSubmitGateway) PollDemand(context.Context, time.Time) ([]contract.Inbou
 	return nil, nil
 }
 
-func (g errSubmitGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, bool) error {
+func (g errSubmitGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, contract.Acknowledgement) error {
 	return g.err
 }
 
-func (errSubmitGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
-	return nil
+func (errSubmitGateway) SubmitInventoryFeed(context.Context, contract.InventoryFeed) (contract.FeedResult, error) {
+	return contract.FeedResult{}, nil
 }
 
-func (errSubmitGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
-	return nil
+func (errSubmitGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
+	return contract.ProfileResult{}, nil
 }
 
-func (errSubmitGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
-	return contract.LabelResult{}, nil
+func (errSubmitGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {
+	return nil, nil
 }
 
 func (errSubmitGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {
 	return contract.SubmissionSuccess, nil
 }
 
-func (errSubmitGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error {
+func (errSubmitGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef, time.Time) error {
 	return nil
 }
 

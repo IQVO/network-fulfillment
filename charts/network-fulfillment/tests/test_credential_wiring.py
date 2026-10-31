@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""Assert this chart never wires credentials it did not create.
+"""Assert this chart never wires a Secret it did not create, and no credential.
 
-Why this exists: an earlier draft of this chart rendered the three
-NETWORK_* secretKeyRefs whenever networkMode was not "stub", but only
-created the Secret when inline credential values were supplied. Asking
-for sandbox mode without credentials therefore produced a Deployment
-referencing a Secret that does not exist -- Kubernetes leaves that pod in
-CreateContainerConfigError, an opaque failure that looks like a cluster
-problem rather than the binary's own clear fail-closed message.
+Why this exists: an earlier draft of this chart rendered three NETWORK_*
+secretKeyRefs outside stub mode but only created the Secret when inline
+credential values were supplied, so the Deployment referenced a Secret that did
+not exist and Kubernetes left the pod in CreateContainerConfigError, an opaque
+failure that looks like a cluster problem. The live adapter (ADR 0026) has no
+credential at all: no code reads NETWORK_CLIENT_ID, NETWORK_CLIENT_SECRET or
+NETWORK_REFRESH_TOKEN, so the chart no longer renders them in any mode, and
+these tests pin that.
 
-The guard is a template-time `fail`, and these are its regression tests.
-The stub assertions matter just as much: stub mode is what lets the kind
-cluster and the e2e suite run with no credentials anywhere, and a chart
-that started demanding a Secret by default would break both.
+The guard that remains is a template-time `fail`: live mode needs
+config.networkBaseUrl and config.networkVendorId (the binary refuses to boot
+without them, naming each). The stub assertions matter just as much: stub mode is
+what lets the kind cluster and the e2e suite run with nothing configured, and a
+chart that started demanding a Secret or a live value by default would break
+both.
 
-The same invariant now also covers the DATABASE_URL Secret, for the same
-reason: a chart that references a database Secret it never creates fails
-the identical opaque way, and the default (no database at all, in-memory
-repo) must keep needing no Secret whatsoever.
+The same invariant covers the DATABASE_URL Secret: a chart that references a
+database Secret it never creates fails the identical opaque way, and a chart
+with no database source must refuse to render (there is no in-memory mode).
 
 Run: python3 charts/network-fulfillment/tests/test_credential_wiring.py
 """
@@ -30,11 +32,16 @@ from pathlib import Path
 
 CHART_DIR = Path(__file__).resolve().parents[1]
 
-INLINE_CREDS = [
-    "--set", "credentials.clientId=test-id",
-    "--set", "credentials.clientSecret=test-secret",
-    "--set", "credentials.refreshToken=test-token",
+# What live mode needs and nothing else: no credential exists (ADR 0026).
+LIVE = [
+    "--set", "config.networkMode=live",
+    "--set", "config.networkBaseUrl=https://vendor.invalid",
+    "--set", "config.networkVendorId=V-1",
+    "--set", "config.inboundReceivingUrl=http://inbound-receiving.invalid",
+    "--set", "config.productMasterUrl=http://product-master.invalid",
+    "--set", "config.inboundReceiptConsumerGroup=network-fulfillment-inbound-receipts",
 ]
+CREDENTIAL_ENV_PREFIXES = ("NETWORK_CLIENT", "NETWORK_REFRESH")
 
 # Postgres and Kafka are the only runtime: the chart refuses to render without
 # a database source and kafka.brokers. Every render here gets both, so these
@@ -120,61 +127,96 @@ def check_stub_default_needs_no_secret() -> None:
 
     assert not secret_names(docs), (
         "the default (stub) install created a Secret; stub mode must need no "
-        "credentials at all, which is what keeps the kind cluster and e2e "
-        "suite credential-free"
+        "external configuration at all, which is what keeps the kind cluster "
+        "and e2e suite free of it"
     )
     assert not secret_refs(docs), (
         "the default (stub) install referenced a Secret; nothing should be "
         "mounted when no external network is contacted"
     )
 
-    leaked = {n for n in env_names(docs) if n.startswith("NETWORK_CLIENT") or n.startswith("NETWORK_REFRESH")}
+    leaked = {n for n in env_names(docs) if n.startswith(CREDENTIAL_ENV_PREFIXES)}
     assert not leaked, f"stub mode exposed credential env vars: {sorted(leaked)}"
 
     print("PASS: stub default creates and references no Secret")
 
 
-def check_every_ref_is_created() -> None:
-    """The actual invariant: never reference a Secret nothing creates."""
-    for mode in ("live",):
-        docs = render(["--set", f"config.networkMode={mode}", *INLINE_CREDS])
-        created, referenced = secret_names(docs), secret_refs(docs)
-
-        dangling = referenced - created
-        assert not dangling, (
-            f"{mode} mode references Secret(s) {sorted(dangling)} that this "
-            f"chart never creates (it creates {sorted(created)}); the pod "
-            f"would land in CreateContainerConfigError"
-        )
-        print(f"PASS: {mode} + inline credentials -- every referenced Secret is created")
-
-
-def check_existing_secret_is_trusted() -> None:
-    """existingSecret is the user's promise that the Secret exists."""
-    docs = render([
-        "--set", "config.networkMode=live",
-        "--set", "credentials.existingSecret=my-own-creds",
-    ])
+def check_live_needs_no_credential_and_no_secret() -> None:
+    """Live mode is configured by values alone: no credential, no extra Secret."""
+    docs = render(LIVE)
 
     assert not secret_names(docs), (
-        "existingSecret was set but the chart created its own Secret anyway, "
-        "which would overwrite externally-managed credentials"
+        f"live mode created Secret(s) {sorted(secret_names(docs))}; the Vendor API "
+        f"has no credential, so the only Secret is the database one"
     )
-    assert secret_refs(docs) == {"my-own-creds"}, (
-        f"expected the container to reference only my-own-creds, got {secret_refs(docs)}"
+    assert not secret_refs(docs), (
+        f"live mode referenced Secret(s) {sorted(secret_refs(docs))} beyond the "
+        f"database one; there is no credential to mount"
     )
-    print("PASS: existingSecret is referenced and not overwritten")
+    leaked = {n for n in env_names(docs) if n.startswith(CREDENTIAL_ENV_PREFIXES)}
+    assert not leaked, f"live mode exposed credential env vars: {sorted(leaked)}"
+    print("PASS: live mode needs no credential and mounts no Secret beyond the database one")
 
 
-def check_non_stub_without_credentials_fails_closed() -> None:
-    """The regression this file exists for."""
-    for mode in ("live",):
+def check_credentials_values_are_inert() -> None:
+    """A values file written for the retired credentials block must not wire anything."""
+    docs = render([
+        *LIVE,
+        "--set", "credentials.existingSecret=legacy",
+        "--set", "credentials.clientId=x",
+        "--set", "credentials.clientSecret=y",
+        "--set", "credentials.refreshToken=z",
+    ])
+    assert not secret_names(docs), f"retired credentials.* created {sorted(secret_names(docs))}"
+    assert not secret_refs(docs), f"retired credentials.* wired {sorted(secret_refs(docs))}"
+    assert not {n for n in env_names(docs) if n.startswith(CREDENTIAL_ENV_PREFIXES)}
+    print("PASS: the retired credentials.* values wire nothing")
+
+
+def check_live_without_its_values_fails_closed() -> None:
+    """Live names every missing value, as the binary does, instead of rendering a pod that cannot boot."""
+    stderr = render_expecting_failure(["--set", "config.networkMode=live"])
+    for needle in ("config.networkBaseUrl", "NETWORK_BASE_URL", "config.networkVendorId", "NETWORK_VENDOR_ID"):
+        assert needle in stderr, f"live with no values: the refusal does not name {needle}. stderr was:\n{stderr}"
+
+    only_url = render_expecting_failure(
+        ["--set", "config.networkMode=live", "--set", "config.networkBaseUrl=https://vendor.invalid"])
+    assert "config.networkVendorId" in only_url and "config.networkBaseUrl" not in only_url, (
+        f"live without a vendor id must name only the vendor id. stderr was:\n{only_url}")
+
+    only_vendor = render_expecting_failure(
+        ["--set", "config.networkMode=live", "--set", "config.networkVendorId=V-1"])
+    assert "config.networkBaseUrl" in only_vendor and "config.networkVendorId" not in only_vendor, (
+        f"live without a base URL must name only the base URL. stderr was:\n{only_vendor}")
+    print("PASS: live without a base URL and/or a vendor id fails at template time, naming each")
+
+
+def check_unknown_mode_is_refused() -> None:
+    """The binary reads anything but live as stub, so the chart must not let a typo through."""
+    for mode in ("sandbox", "lve", ""):
         stderr = render_expecting_failure(["--set", f"config.networkMode={mode}"])
-        assert "no credentials are set" in stderr, (
-            f"{mode} without credentials failed, but not with the explanatory "
-            f"message a reader needs. stderr was:\n{stderr}"
-        )
-        print(f"PASS: {mode} without credentials fails at template time, with a reason")
+        assert "config.networkMode" in stderr and "stub" in stderr, (
+            f"networkMode={mode!r} was refused without explaining the allowed values. stderr was:\n{stderr}")
+    docs = render(["--set", "config.networkMode=LIVE ", "--set", "config.networkBaseUrl=https://vendor.invalid",
+                   "--set", "config.networkVendorId=V-1",
+                   "--set", "config.inboundReceivingUrl=http://inbound-receiving.invalid",
+                   "--set", "config.productMasterUrl=http://product-master.invalid",
+                   "--set", "config.inboundReceiptConsumerGroup=network-fulfillment-inbound-receipts"])
+    assert docs, "a case/whitespace variant of live must render like the binary reads it"
+    print("PASS: a mode other than stub or live is refused; LIVE (any case) is live")
+
+
+def check_live_with_seeded_demand_is_refused() -> None:
+    """NETWORK_SEED_FILE against the live gateway is a boot error in the binary."""
+    stderr = render_expecting_failure([
+        *LIVE,
+        "--set", "stubDemand.demands[0].networkRef=po-1",
+        "--set", "stubDemand.demands[0].siteId=site-1",
+        "--set", "stubDemand.demands[0].requiredShipBy=+36h",
+    ])
+    assert "stubDemand.demands" in stderr and "NETWORK_SEED_FILE" in stderr, (
+        f"seeded demand in live mode was refused without naming the cause. stderr was:\n{stderr}")
+    print("PASS: seeded stub demand in live mode is refused at template time")
 
 
 def check_default_has_no_database() -> None:
@@ -241,13 +283,15 @@ def check_database_existing_secret_is_trusted() -> None:
 
 def main() -> int:
     check_stub_default_needs_no_secret()
-    check_every_ref_is_created()
-    check_existing_secret_is_trusted()
-    check_non_stub_without_credentials_fails_closed()
+    check_live_needs_no_credential_and_no_secret()
+    check_credentials_values_are_inert()
+    check_live_without_its_values_fails_closed()
+    check_unknown_mode_is_refused()
+    check_live_with_seeded_demand_is_refused()
     check_default_has_no_database()
     check_database_url_creates_the_secret_it_references()
     check_database_existing_secret_is_trusted()
-    print("\nAll credential- and database-wiring assertions passed.")
+    print("\nAll secret-, network- and database-wiring assertions passed.")
     return 0
 
 

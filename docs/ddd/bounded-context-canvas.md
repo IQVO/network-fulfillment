@@ -114,7 +114,7 @@ tables) and anything the tables mark as deprecated or platform-only
 
 To be the one place where the fleet meets an external retail fulfillment
 network. Since ADR 0009 the counterpart is the fleet's own `retail-network`
-service; the original learning target was a large retailer's Selling Partner
+service; the original learning target was a large retailer's vendor platform
 API. The context:
 
 - receives the network's demand by polling;
@@ -140,7 +140,7 @@ ship-to PII enters this context at all.
 
 | Role | Applies? | Evidence |
 | --- | --- | --- |
-| **Gateway / Anti-Corruption Layer** | **Yes, primary** | The network vocabulary stops at `internal/adapters/outbound/network/`. `ports.NetworkGateway` and `contract.*` are expressed in our terms, and `NetworkOrder.SKUQuantities()` is the only shape sent to `order-management`. |
+| **Gateway / Anti-Corruption Layer** | **Yes, primary** | The network vocabulary stops at `internal/adapters/outbound/retailnetwork/`. `ports.NetworkGateway` and `contract.*` are expressed in our terms, and `NetworkOrder.SKUQuantities()` is the only shape sent to `order-management`. |
 | **Execution (protocol)** | **Yes, narrow** | Owns the answer, the 24h clock (`acknowledgeBy`, the sweep, `RejectOverdueOrders`) and reconciliation. It does not own the fulfillment work, which belongs to `order-management`. |
 | **Analysis** | **Yes, always on** | `RecomputeCapabilityOffers` derives advertised availability from inventory, the CPT schedule and path capacity (wired at boot; `CAPABILITY_OFFER_ENABLED` is only a boot guard, ADR 0025). |
 | **Published Language / Open Host** | **Partly** | Publishes 6 CloudEvents types on `warehouse.network-fulfillment.events` (documented in `apis/asyncapi.yaml`). No other fleet context was found consuming them. Read-only REST and MCP are exposed for operators and agents. |
@@ -149,7 +149,7 @@ ship-to PII enters this context at all.
 
 | Collaborator | Message | Type | Channel | Relationship |
 | --- | --- | --- | --- | --- |
-| External network (`retail-network`, stub only) | Inbound demand (`contract.InboundDemand`) | Query (poll) | `ports.NetworkGateway.PollDemand`, driven by `internal/adapters/inbound/poller` | Conformist (we are downstream) |
+| External network (`retail-network`; stub by default, live opt-in, ADR 0026) | Inbound demand (`contract.InboundDemand`) | Query (poll) | `ports.NetworkGateway.PollDemand`, driven by `internal/adapters/inbound/poller` | Conformist (we are downstream) |
 | Operator / upstream caller | Confirm shipment | Command | REST `POST /network-orders/{networkRef}/shipment-confirmation` (ADR 0014) | Open Host (unauthenticated) |
 | Operators, `web/` remote in `warehouse-console` | List unanswered orders | Query | REST `GET /network-orders` | Open Host |
 | Operators | Get one order | Query | REST `GET /network-orders/{networkRef}` | Open Host |
@@ -175,7 +175,9 @@ ship-to PII enters this context at all.
 | External network | Acknowledge / reject in full | Command | `ports.NetworkGateway.SubmitAcknowledgement(ref, accepted)` (stub) | Conformist |
 | External network | Transaction status | Query | `ports.NetworkGateway.SubmissionStatus(ref)` (stub) | Conformist |
 | External network | Shipment confirmation | Command | `ports.NetworkGateway.SubmitShipmentConfirmation(ref)` (stub) | Conformist |
-| External network | Availability, capability declaration, label | Command / Query | `SubmitAvailability`, `DeclareCapability`, `RequestLabel`: **on the port and in the stub, called by no use case** | Conformist (wired, unused) |
+| External network | Node operational profile | Command | `ports.NetworkGateway.DeclareNodeProfile(profile)` from `DeclareNodeProfiles` (live mode; ADR 0027 part 1; the stub records it and sends nothing) | Conformist |
+| External network | Inventory feed | Command | `ports.NetworkGateway.SubmitInventoryFeed(feed)` from `FeedInventory` (live mode; ADR 0027 part 2; replaces `SubmitAvailability`; the stub sends nothing) | Conformist |
+| External network | Label | Command / Query | `RequestLabel`, called by `ConfirmNetworkOrderShipment` | Conformist |
 | Any subscriber | `NetworkOrderReceived`, `NetworkOrderSubmitted`, `NetworkOrderAcknowledged` (v2, `.v2` type), `NetworkOrderRejected`, `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`, `OrphanedHoldCancelled` | Event | Kafka `warehouse.network-fulfillment.events`, type `com.warehouse.wes.network-fulfillment.networkorder.<Event>` (published through the outbox relay, always on) | Open Host / Published Language |
 | Analytics projector | The same 7 events (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | Event | Kafka `warehouse.network-fulfillment.analytics` | Internal |
 
@@ -256,14 +258,18 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 - `circuit_breaker_state` gauge for the `order-management` dependency.
 - `network_fulfillment.orphaned_holds.swept` by `outcome`, and any
   `OrphanedHoldCancelled` event: a hold that leaked and had to be swept.
+- `network_fulfillment.node_profile.declarations` by `outcome` and
+  `network_fulfillment.node_profile.revision` by `site` (live mode, ADR 0027): a
+  site stuck in a `skipped_*` or `failed` outcome has no current profile on the
+  network.
 - Engineering gates: arch-go hexagonal tests, 90% coverage, gremlins on
   `./internal/domain/networkorder`.
 
 ## Open Questions
 
-- **When does a live `retail-network` adapter land**, and when does
-  `CapabilityOffer` get submitted outward (`SubmitAvailability` has no
-  caller)?
+- **Decided 2026-10-25: `CapabilityOffer` is submitted outward by `FeedInventory`
+  (ADR 0027 part 2)**, in live mode only, as one feed per site built from the
+  persisted offers. The live `retail-network` adapter landed with ADR 0026.
 - **Decided 2026-10-06: Submitted at SUBMITTED, Acknowledged only on settle
   (ADR 0016).** `NetworkOrderSubmitted` is raised when the order goes
   `SUBMITTED`; `NetworkOrderAcknowledged` is raised only when
@@ -284,6 +290,9 @@ Full glossary: [ubiquitous-language.md](ubiquitous-language.md). Top terms:
 - **Decided 2026-10-06: cycle time gates eligibility (ADR 0017).** A path is
   eligible for a cutoff only if `CycleTimeP95 <= cutoff - now`; a missing or
   zero cycle time stays eligible (fail-open); capacity is not scaled.
+- **Decided 2026-10-30: the next feasible cutoff (ADR 0031).** When no path
+  can make the next cutoff, the offer is computed against the first one a
+  path can make, up to 7 days ahead; only none in that bound is a zero.
 - **Contract drift (fixed 2026-10-06, ADR 0015).** CORS now allows
   `GET/POST/OPTIONS`, `ErrConfirmBeforeAcknowledge` maps to a 409,
   `apis/openapi.yaml` documents `GET /capability-offers` and the

@@ -12,7 +12,7 @@ description: Write an Architecture Decision Record in this repo's numbering and 
 > (`id`, `slug`, `title`, `sidebar_label`, `description`, plus
 > `sidebar_position` as in ADR 0002 and 0008) so they can be aggregated
 > later. Two records are numbered 0002 (`0002-mcp-and-analytics-data-product.md`
-> and `0002-retail-network-not-amazon-counterpart.md`); do not reuse a
+> that pointed at ADR 0009); do not reuse a
 > number, take the next free one (0009).
 
 Use when a change is architecturally significant — a new bounded-context
@@ -89,7 +89,7 @@ Don't edit the old ADR's Decision section. Add a `## Status` line noting
 new ADR referencing it: `**Accepted.** <date>. Supersedes [NN. Old title](./NNNN-old-slug.md).`
 — for wording, see how ADR 0003 notes that its envelope description is
 superseded by ADR 0008 (`docs/adr/0003-transactional-outbox.md`, Status),
-and how `docs/adr/0009-retail-network-not-amazon-counterpart.md` amends
+and how `docs/adr/0009-retail-network-not-a-real-network-counterpart.md` amends
 ADR 0001.
 
 ## Cross-repo decisions: use a companion ADR, not one repo's private opinion

@@ -6,7 +6,7 @@ sidebar_label: Use cases
 
 # Application use cases
 
-The seven application services in `internal/application/usecases`, as they are
+The eight application services in `internal/application/usecases`, as they are
 on `develop`: what triggers each one, what it takes, which invariants it
 relies on, what it calls and which events it raises. The step-by-step
 sequence diagrams are in [sequence-diagrams.md](sequence-diagrams.md); the
@@ -29,9 +29,10 @@ tools read the repositories directly (`internal/adapters/inbound/http/server.go`
 | `SweepOrphanedHolds` | ticker | every `SWEEP_INTERVAL` (its own ticker, the same interval as the two passes above); not started when `ORPHAN_HOLD_SWEEP_ENABLED=false` | `cmd/netfulfil/workers.go` (`runSweepOrphanedHolds`), built in `cmd/netfulfil/wiring.go` (`wireOrphanHoldSweep`) |
 | `ConfirmNetworkOrderShipment` | REST | `POST /network-orders/{networkRef}/shipment-confirmation` | `internal/adapters/inbound/http/server.go` |
 | `RecomputeCapabilityOffers` | ticker | every `RECOMPUTE_INTERVAL`, always | `cmd/netfulfil/capability.go` |
+| `DeclareNodeProfiles` | worker | live mode only: once at start, then every `NETWORK_PROFILE_INTERVAL` (`0` disables) | `cmd/netfulfil/profile.go` (`wireNodeProfiles`, `startProfileWorker`) |
 
 No use case is driven by Kafka or by MCP. The two Kafka consumers in
-`netfulfil` only fill caches that `RecomputeCapabilityOffers` reads; the
+`netfulfil` only fill caches that `RecomputeCapabilityOffers` and `DeclareNodeProfiles` read; the
 projector's consumer feeds the analytics store, not a use case.
 
 ## How Save and Publish commit
@@ -253,19 +254,84 @@ context would advertise per SKU at `SITE_ID`. Always on.
 - **Per SKU**:
   - `physicalAvailable` = inventory-storage `GET /inventory/{sku}/usable`.
   - `throughputFeasible` = the sum of `RemainingCapacity(pathId, cutoffAt)`
-    over the paths eligible for the site's next cutoff
+    over the paths eligible for the site's next **feasible** cutoff
     (`ProcessPathCapability.NextCutoff`), counting only paths whose
     capacity is known. A path is eligible only if its `CycleTimeP95` fits
     the time left to the cutoff; unknown or zero cycle time stays eligible.
-    No schedule, or no known capacity, means "unknown". Every path ruled out
-    by cycle time is a proven zero.
+    No schedule, or no known capacity, means "unknown". When every path is
+    ruled out by cycle time for the next cutoff, the pass walks to the
+    following cutoff, and on, up to 7 days ahead (ADR 0031); only no
+    feasible cutoff inside that bound is a proven zero. Resolved once per
+    pass, not per SKU.
   - `capabilityoffer.Compute`: `advertisedQuantity = min(physical,
     throughputFeasible)` with basis `THROUGHPUT_CONSTRAINED` when throughput
     is known and lower, else `physical` with basis `PHYSICAL`.
   - `CapabilityOfferRepo.Save` (upsert per `(sku, siteId)`).
 - **Invariants** (`capability_offer.go`): SKU and site not empty, quantity
   not negative, advertised never above physical, basis one of the two.
-- **Events**: none. The offer is not sent to the network either
-  (`SubmitAvailability` is never called).
+- **Events**: none. The offer is not sent to the network by this use case: the
+  inventory feed ([FeedInventory](#feedinventory)) reads the persisted offers.
 - **Failure**: an inventory, compute or save error is logged and that SKU is
   skipped; the pass continues.
+
+## DeclareNodeProfiles
+
+`declare_node_profiles.go` and `profile_derivation.go` (ADR 0027 part 1). Declares,
+per site, how the building operates, so that the network can show it and judge our
+acknowledgement deadlines by it. Live mode only; the stub never starts the worker.
+
+- **Input**: none; the sites are the ones the live gateway converges onto nodes
+  (`SITE_ID` plus the node file's).
+- **Per site**: the whole weekly schedule from `ProcessPathCapability.Schedule`
+  (cutoffs that share a local time are one cutoff, with their days united);
+  `HandlingTime` = the longest known, positive `CycleTimeP95` among the paths
+  eligible for any cutoff that fits the longest gap of the schedule, rounded UP to
+  whole minutes; each cutoff's `MaxOrders` = the sum of `RemainingCapacity` over the
+  paths eligible for its next occurrence whose figure is known (0 = unknown), and
+  never below what was last declared for the same slot (`ProfileHistory`);
+  `ThroughputPerDay` = the sum of the known ceilings of the busiest weekday.
+- **Never guessed**: no schedule (`skipped_no_schedule`), no usable cycle time or no
+  capacity figure (`skipped_incomplete`) is a logged `WARN` and nothing is
+  declared. A site with no node yet (`contract.ErrSiteNotRegistered`) is a
+  `skipped_no_node`, not a failure.
+- **Calls**: `NetworkGateway.DeclareNodeProfile`, which owns the revision: it only
+  bumps it when the `Fingerprint` (a hash of the content, independent of the order
+  the caches list it in) changed, persists it before the HTTP call, and reconciles
+  the transaction by its persisted id.
+- **Events**: none. **Metrics**: `network_fulfillment.node_profile.declarations`
+  and `.revision` ([observability](../operations/observability.md#node-profile-metrics)).
+- **Failure**: one site's failure is logged and never stops the others; a
+  cancelled context stops the pass before the next site; a memory that cannot be
+  read (`LastDeclared`) means the site is left for the next pass rather than
+  declared with a ceiling that might be lowered.
+
+## FeedInventory
+
+`feed_inventory.go` and `feed_plan.go` (ADR 0027 part 2). Tells the network, per site,
+what the site claims it can ship. Live mode only; the stub never starts the worker.
+Reads local data only: the persisted `CapabilityOffer`s and the product dictionary.
+
+- **Input**: none; the sites are the ones the live gateway converges onto nodes
+  (`SITE_ID` plus the node file's).
+- **Per site** (`planInventoryFeeds`, pure): the site's *pass* is the set of its offers
+  sharing the newest `ComputedAt`, which is the feed's `AsOf`; an offer of an earlier
+  pass is not fresh and is not fed. Only a SKU the site has a listing for
+  (`FeedCatalogue.ListedSKUs`) is a line (`advertisedQuantity`, `basis`; an unknown
+  figure is never an offer). The feed is `Complete` only when every listed SKU has a
+  fresh offer and it fits in one part; above `contract.MaxFeedLines` (5000) it is
+  split into partial parts with the same `AsOf`. The fingerprint hashes the complete
+  flag and the lines, not the moment.
+- **Unlisted SKUs**: an offer for a SKU with no listing at the site is expected, not an
+  error: it is not fed and is logged once per process at `INFO`.
+- **Calls**: `NetworkGateway.SubmitInventoryFeed`, which owns delivery: it sends a feed
+  when its fingerprint changed, repeats an unchanged one at most hourly, keeps out of
+  the feed a listing the network refused as not on the node, and reconciles the
+  transaction by its persisted id.
+- **Outcomes** (`contract.FeedOutcome`): `sent`, `confirmed`, `pending`, `unchanged`,
+  `failed`, `skipped_no_node` (`contract.ErrSiteNotRegistered`), `skipped_no_offers`,
+  `skipped_no_listings`.
+- **Events**: none. **Metrics**: none; logs only
+  ([runbook](../operations/runbook.md#the-inventory-feed)).
+- **Failure**: one site's failure is logged and never stops the others; a cancelled
+  context stops the pass before the next site; offers that cannot be read fail every
+  site for this pass and the next one retries.

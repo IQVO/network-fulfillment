@@ -1,0 +1,26 @@
+# Chart lint / render values: EVERY optional component on at once (analytics
+# read side with projector + reports, the read-only MCP server, the read-only A2A agent, the frontend
+# remote, the api HPA, the gateway route and the ingress). Self-contained
+# dummy values, no password: Postgres and Kafka are mandatory, so the file
+# carries a dummy DSN and broker list the way ci/real-wiring-values.yaml does.
+database:
+  url: postgres://u@example.invalid:5432/db
+kafka:
+  brokers: kafka.invalid:9092
+analytics:
+  enabled: true
+  database:
+    url: postgres://a@example.invalid:5432/analytics
+mcp:
+  enabled: true
+a2a:
+  enabled: true
+frontend:
+  enabled: true
+autoscaling:
+  api:
+    enabled: true
+gatewayApi:
+  enabled: true
+ingress:
+  enabled: true

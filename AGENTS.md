@@ -8,12 +8,12 @@ downstream. Owns **NetworkOrder** and **CapabilityOffer** (both built).
 Study project, not production (see README.md banner).
 
 Read `docs/adr/0001-network-fulfillment-bounded-context.md` (companion of
-`order-management` ADR 0020) AND `docs/adr/0009-retail-network-not-amazon-counterpart.md`
+`order-management` ADR 0020) AND `docs/adr/0009-retail-network-not-a-real-network-counterpart.md`
 (Accepted, amends 0001: the counterpart is the fleet's own `retail-network`,
 not a real retailer's SP-API) before writing network-facing code. That ADR
 was renumbered from 0002 to 0009 on 2026-10-05 to resolve a duplicate
 ADR-0002 (`0002-mcp-and-analytics-data-product.md` keeps 0002); a stub at
-the old `0002-retail-network-not-amazon-counterpart.md` path redirects here.
+the old 0002 stub was deleted; ADR 0009 is the only home of that decision.
 ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/ddd/`.
 
 ## Current state
@@ -23,10 +23,12 @@ Built: `NetworkOrder` aggregate, ACL boundary, use cases
 `RejectOverdueOrders` / `ReconcileSubmittedOrders` (SUBMITTED state,
 ADR 0001 §5) / `ConfirmNetworkOrderShipment` (explicit endpoint, ADR 0014),
 in-memory and Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to
-boot, never a silent fallback), stub gateway (`NetworkGateway` port also
-declares the live-mode methods — `DeclareCapability`/`SubmitAvailability`/
-`RequestLabel`/`SubmissionStatus` — but no live HTTP adapter exists yet;
-`NETWORK_MODE=live` errors clearly until one is built), poller (inbound
+boot, never a silent fallback), stub gateway (the default) and the live
+demand-loop gateway for the retail network's Vendor API (ADR 0026:
+`NETWORK_MODE=live` with `NETWORK_BASE_URL` and `NETWORK_VENDOR_ID`; node map,
+submission ledger and labels in migration 0006;
+`DeclareCapability`/`SubmitAvailability` are logged no-ops until the supply
+loop, ADR 0027), poller (inbound
 leg), READ-ONLY REST plus the one explicit write endpoint above, CloudEvents
 Kafka publishers + outbox, analytics projector, MCP adapter, `web/` remote,
 Helm chart. Also built (ADR 0001 §8): the `CapabilityOffer` aggregate and
@@ -37,16 +39,17 @@ comment for why inventory is REST, not a cache), and the
 `GET /capability-offers` / `list_capability_offers` read surface, opt-in via
 `CAPABILITY_OFFER_ENABLED`. The offer is persisted, not yet submitted to
 the network (`SubmitAvailability` has no caller).
-Not built: a live `retail-network` HTTP adapter, and the
-`adapters/outbound/network/` -> `outbound/retailnetwork/` package rename
-(still deferred).
+Not built: the supply loop (ADR 0027, reserved: node profile, `DeclareCapability`,
+`SubmitAvailability`, inventory feed), a real package count (labels use one
+package), reconciling a shipment confirmation (a FAILURE is logged at ERROR only).
 Operations: `docs/operations/runbook.md` (plus configuration, observability,
 troubleshooting); CI jobs and gremlins thresholds: `docs/development/testing.md`;
 doc map: `docs/overview/introduction.md`.
 
 Core concept: **throughput-constrained advertised availability**
-= `min(physicalAvailable, throughputFeasibleBefore(nextCutoff))` (ADR 0001,
-implemented by `CapabilityOffer.Compute()`).
+= `min(physicalAvailable, throughputFeasibleBefore(nextFeasibleCutoff))` (ADR 0001;
+the first cutoff, in the site schedule's own time zone, that an eligible path can still
+make, ADR 0031; implemented by `CapabilityOffer.Compute()`).
 `.claude/rules/*.md` describe the code as it is; never write planned
 concepts into them as if they exist.
 
@@ -65,8 +68,8 @@ internal/adapters/outbound/{network,ordermanagement,inventoryclient,processpathc
 
 ## Hard rules
 
-1. **The network's vocabulary stops at `adapters/outbound/network/`**
-   (becomes `outbound/retailnetwork/` per ADR 0009). `purchaseOrderNumber`,
+1. **The network's vocabulary stops at `adapters/outbound/retailnetwork/`**
+   (ADR 0009/0026), plus migration 0006's tables. `purchaseOrderNumber`,
    `itemSequenceNumber`, `buyerProductIdentifier` (ASIN) and other
    real-retailer field names must never appear in `internal/domain` or
    anything published to the fleet; nor may `retail-network`'s (`poNumber`,
@@ -85,7 +88,9 @@ internal/adapters/outbound/{network,ordermanagement,inventoryclient,processpathc
    0017's per-shipment-group promising must not apply.
 6. **`NETWORK_MODE=live|stub`, default `stub`** (ADR 0009 removed
    `sandbox`). The kind cluster, `e2e-tests` and CI must never need a
-   credential. Log the chosen mode at startup.
+   credential. Log the chosen mode at startup. Live takes a base URL and a vendor
+   id, no credential; the chart renders exactly the env the binary reads
+   (`charts/network-fulfillment/tests/test_env_parity.py`). The cluster flip is infra.
 7. **A FirstOffset-replay Kafka cache needs a consumer group id unique per
    process instance** (hostname+PID+timestamp); a shared group resumes from
    an old offset and is marked ready with an empty cache.
@@ -143,3 +148,5 @@ Claude Code loads each rule below automatically when you touch the matching path
 
 Hooks (`scripts/harness/hook.py`, wired for Claude Code, Codex and OpenCode) block pushes to develop/main, `--no-verify`, bare `rm -rf`, and edits to generated files, and feed gofmt/vet findings back after each edit. Before saying "done" run `make check-fast`; the full gate is `make check-all`. `HARNESS_OFF=1` disables the hooks when debugging the harness itself.
 <!-- harness:scoped-rules:end -->
+
+A2A: `cmd/a2a` (port 8093) is this context's read-only Agent2Agent agent, skills `network_demand_status` (read), `advertised_availability` (read), decided in `docs/adr/0030-a2a-inbound-adapter.md`; delegation only (facts stay CloudEvents on Kafka), unauthenticated like REST and MCP; rules in `.claude/rules/fleet/a2a.md`.

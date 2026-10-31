@@ -23,16 +23,20 @@ func (nopGateway) PollDemand(context.Context, time.Time) ([]contract.InboundDema
 	return nil, nil
 }
 
-func (nopGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, bool) error { return nil }
-func (nopGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef) error  { return nil }
-func (nopGateway) DeclareCapability(context.Context, contract.CapabilityDeclaration) error {
+func (nopGateway) SubmitAcknowledgement(context.Context, shared.NetworkRef, contract.Acknowledgement) error {
 	return nil
 }
-func (nopGateway) SubmitAvailability(context.Context, contract.AvailabilityUpdate) error {
+func (nopGateway) SubmitShipmentConfirmation(context.Context, shared.NetworkRef, time.Time) error {
 	return nil
 }
-func (nopGateway) RequestLabel(context.Context, shared.NetworkRef) (contract.LabelResult, error) {
-	return contract.LabelResult{}, nil
+func (nopGateway) DeclareNodeProfile(context.Context, contract.NodeProfile) (contract.ProfileResult, error) {
+	return contract.ProfileResult{}, nil
+}
+func (nopGateway) SubmitInventoryFeed(context.Context, contract.InventoryFeed) (contract.FeedResult, error) {
+	return contract.FeedResult{}, nil
+}
+func (nopGateway) RequestLabel(context.Context, shared.NetworkRef, int) ([]contract.LabelResult, error) {
+	return nil, nil
 }
 func (nopGateway) SubmissionStatus(context.Context, shared.NetworkRef) (contract.SubmissionStatusValue, error) {
 	return contract.SubmissionSuccess, nil

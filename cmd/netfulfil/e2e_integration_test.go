@@ -42,7 +42,7 @@ import (
 
 const (
 	e2eNetworkRef = "po-e2e-1"
-	e2eSite       = "site-1"
+	e2eSite       = "SITE1"
 )
 
 type e2eEnv struct {
@@ -65,31 +65,7 @@ var consumedTopics = []string{processpathcache.Topic, pathcapacitycache.Topic}
 
 func startE2EInfra(t *testing.T, ctx context.Context) e2eEnv {
 	t.Helper()
-	pg, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("network_fulfillment"), tcpostgres.WithUsername("nf"), tcpostgres.WithPassword("nf"),
-		tcpostgres.BasicWaitStrategies())
-	if err != nil {
-		t.Fatalf("start postgres: %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(pg) })
-	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("postgres dsn: %v", err)
-	}
-
-	suffix := time.Now().UnixNano()
-	kc, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1", tckafka.WithClusterID(fmt.Sprintf("nf-e2e-%d", suffix)))
-	if err != nil {
-		t.Fatalf("start kafka: %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(kc) })
-	brokers, err := kc.Brokers(ctx)
-	if err != nil {
-		t.Fatalf("kafka brokers: %v", err)
-	}
-	for _, topic := range consumedTopics {
-		e2eCreateTopic(t, ctx, brokers[0], topic)
-	}
+	env := startE2EContainers(t, ctx)
 
 	// order-management stand-in: RaiseHeldOrder (POST /orders) answers a
 	// promise before the deadline; ReleaseHeldOrder (POST /orders/{id}/release)
@@ -121,7 +97,81 @@ func startE2EInfra(t *testing.T, ctx context.Context) e2eEnv {
 	if err := os.WriteFile(filepath.Join(dir, "products.json"), []byte(`{"products":[{"networkProductId":"NP-1","sku":"SKU-E2E"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return e2eEnv{dsn: dsn, brokers: brokers, addr: e2eFreeAddr(t), dir: dir, suffix: suffix, kafkaCont: kc, omURL: om.URL}
+	env.addr, env.dir, env.omURL = e2eFreeAddr(t), dir, om.URL
+	return env
+}
+
+// startE2EContainers starts the real Postgres and Kafka every end-to-end test
+// runs on and creates the topics the service consumes. Its result carries no
+// listen address, directory or order-management URL: the callers add theirs.
+func startE2EContainers(t *testing.T, ctx context.Context) e2eEnv {
+	t.Helper()
+	pg, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+		tcpostgres.WithDatabase("network_fulfillment"), tcpostgres.WithUsername("nf"), tcpostgres.WithPassword("nf"),
+		tcpostgres.BasicWaitStrategies())
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(pg) })
+	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("postgres dsn: %v", err)
+	}
+
+	suffix := time.Now().UnixNano()
+	kc, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1", tckafka.WithClusterID(fmt.Sprintf("nf-e2e-%d", suffix)))
+	if err != nil {
+		t.Fatalf("start kafka: %v", err)
+	}
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(kc) })
+	brokers, err := kc.Brokers(ctx)
+	if err != nil {
+		t.Fatalf("kafka brokers: %v", err)
+	}
+	for _, topic := range consumedTopics {
+		e2eCreateTopic(t, ctx, brokers[0], topic)
+	}
+	e2eWarmConsumerGroups(t, ctx, brokers)
+	return e2eEnv{dsn: dsn, brokers: brokers, suffix: suffix, kafkaCont: kc}
+}
+
+// e2eWarmConsumerGroups makes a freshly started broker answer consumer-group
+// requests before the service starts its capability-offer caches. The topics
+// exist and have leaders by now, but the broker creates its internal group
+// metadata (__consumer_offsets) and elects the coordinators lazily, on the first
+// group request: until then it answers "[15] Group Coordinator Not Available",
+// and the service treats a cache consumer that stops on its own as fatal (exit 1,
+// by design). So throwaway groups join first, on the topics the service
+// consumes, until one gets its generation: the coordinator, the join and the sync
+// all work. Each attempt is a new group; a failed one is only a cold broker.
+func e2eWarmConsumerGroups(t *testing.T, ctx context.Context, brokers []string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if lastErr = e2eJoinThrowawayGroup(ctx, brokers); lastErr == nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("the new broker never let a throwaway consumer group join: %v", lastErr)
+}
+
+func e2eJoinThrowawayGroup(ctx context.Context, brokers []string) error {
+	group, err := kafkago.NewConsumerGroup(kafkago.ConsumerGroupConfig{
+		ID:               fmt.Sprintf("nf-e2e-warmup-%d", time.Now().UnixNano()),
+		Brokers:          brokers,
+		Topics:           consumedTopics,
+		JoinGroupBackoff: 500 * time.Millisecond, // the default, 5s, outlasts a short test
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = group.Close() }()
+	joinCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	_, err = group.Next(joinCtx)
+	return err
 }
 
 func e2eFreeAddr(t *testing.T) string {
@@ -134,20 +184,43 @@ func e2eFreeAddr(t *testing.T) string {
 	return l.Addr().String()
 }
 
+// e2eCreateTopic creates topic and waits for its leader. The broker container
+// counts as ready once its start-up log line shows, which is before it
+// reliably answers admin requests: a CI run had the very first CreateTopics
+// reset by the peer ("connection reset by peer") and failed the test before the
+// service even started. So the whole exchange is retried until the broker
+// answers; a topic created by an attempt whose reply was lost is already there.
 func e2eCreateTopic(t *testing.T, ctx context.Context, broker, topic string) {
 	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var err error
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if err = e2eTryCreateTopic(ctx, broker, topic); err == nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("create topic %s: %v", topic, err)
+}
+
+func e2eTryCreateTopic(ctx context.Context, broker, topic string) error {
 	conn, err := kafkago.DialContext(ctx, "tcp", broker)
 	if err != nil {
-		t.Fatalf("dial kafka: %v", err)
+		return err
 	}
 	defer func() { _ = conn.Close() }()
-	if err := conn.CreateTopics(kafkago.TopicConfig{Topic: topic, NumPartitions: 1, ReplicationFactor: 1}); err != nil {
-		t.Fatalf("create topic %s: %v", topic, err)
+	err = conn.CreateTopics(kafkago.TopicConfig{Topic: topic, NumPartitions: 1, ReplicationFactor: 1})
+	if err != nil && !errors.Is(err, kafkago.TopicAlreadyExists) {
+		return err
 	}
-	e2eWaitFor(t, ctx, 30*time.Second, "topic "+topic+" has a leader", func() bool {
-		parts, err := conn.ReadPartitions(topic)
-		return err == nil && len(parts) == 1 && parts[0].Leader.Host != ""
-	})
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if parts, err := conn.ReadPartitions(topic); err == nil && len(parts) == 1 && parts[0].Leader.Host != "" {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("topic %s has no leader", topic)
 }
 
 func e2eWaitFor(t *testing.T, ctx context.Context, timeout time.Duration, what string, cond func() bool) {
@@ -165,6 +238,15 @@ func e2eWaitFor(t *testing.T, ctx context.Context, timeout time.Duration, what s
 // startE2EService runs the REAL entry point in-process and returns a stop func
 // that cancels it and returns run()'s exit code.
 func startE2EService(t *testing.T, ctx context.Context, env e2eEnv) func() (int, error) {
+	t.Helper()
+	return startE2EServiceWith(t, ctx, env, nil)
+}
+
+// startE2EServiceWith is startE2EService with extra environment applied after
+// the stub-mode defaults, so a test can switch the network to live, change the
+// intervals or blank a variable. The variables are set with t.Setenv, so they
+// are undone when the test ends.
+func startE2EServiceWith(t *testing.T, ctx context.Context, env e2eEnv, overrides map[string]string) func() (int, error) {
 	t.Helper()
 	_, port, err := net.SplitHostPort(env.addr)
 	if err != nil {
@@ -194,6 +276,9 @@ func startE2EService(t *testing.T, ctx context.Context, env e2eEnv) func() (int,
 	t.Setenv("OTEL_SDK_DISABLED", "true")
 	t.Setenv("OTEL_TRACES_EXPORTER", "none")
 	t.Setenv("OTEL_METRICS_EXPORTER", "none")
+	for k, v := range overrides {
+		t.Setenv(k, v)
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan int, 1)

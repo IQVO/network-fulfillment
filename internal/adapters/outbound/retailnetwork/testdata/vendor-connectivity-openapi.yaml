@@ -1,0 +1,1731 @@
+openapi: 3.0.3
+info:
+  title: Vendor Connectivity API
+  version: 1.0.0
+  description: |
+    This is the **Vendor API**: the Open Host Service of the `vendor-connectivity`
+    bounded context. Its JSON schemas are the **Published Language** that every
+    vendor conforms to. The warehouse-systems fleet (vendor `V-WS`) reaches the
+    retail network only through this contract, from its `network-fulfillment`
+    context (Conformist + Anti-Corruption Layer). It is the only channel between
+    the two organizations.
+
+    Protocol rules (from the model's `business_decisions` and the Gap Register):
+
+    - Poll purchase orders with `GET /vendor/purchase-orders`, paging with `nextToken`.
+      A purchase order may be delivered more than once (simulation knob
+      `PO_REDELIVERY_RATE`); be idempotent on `poNumber`.
+    - Acknowledge once, in full, before `ackBy`. Fill-or-kill: one decision covers
+      every line. `ackBy = min(issuedAt + vendor ackWindow, requiredShipBy - node handlingTime)`.
+    - Every asynchronous vendor write returns `202` with a `transactionId`. The write
+      takes effect only when `GET /vendor/transactions/{transactionId}` reports
+      `SUCCESS`. Processing waits at least `TX_PROCESSING_DELAY`; a share of
+      transactions fails on purpose (`TX_FAILURE_RATE`). The processed
+      `NODE_REGISTRATION` transaction carries the new `nodeId` (G30).
+    - A label is issued only for an `ACCEPTED` purchase order. A shipment is
+      confirmed only with a label for every package. The label request is the one
+      synchronous write: `200` with the labels, never `202` (G31).
+    - Vendor identity under no authentication (G32): `vendorId` is in every write
+      body and a required query parameter on every read. Ownership is checked
+      against it (`ErrNodeNotOwnedByVendor`); this is a consistency check, not security.
+      A suspended vendor's writes are refused (`ErrVendorSuspended`, `vendor-suspended`).
+    - Rate limits are part of the contract: `429` with `Retry-After` (`RATE_LIMIT_RPS`).
+    - Every state-changing `POST`/`PUT` takes `Idempotency-Key`; a repeat replays the first response.
+    - Errors are RFC 9457 `application/problem+json`; the shared problem types are
+      `not-found` 404, `illegal-transition` 409, `concurrent-update` 409 and
+      `validation-failed` 422, plus one slug per model `Err...` name.
+    - No ship-to PII anywhere. A label is `labelRef + trackingNumber + carrier`, never
+      an address.
+    - No authentication (consistent with the fleet).
+  contact:
+    name: vendor-connectivity maintainers
+    url: https://github.com/IQVO/vendor-connectivity
+  license:
+    name: UNLICENSED
+servers:
+- url: http://localhost:8000/api/retail-network/vendor-connectivity
+tags:
+- name: Purchase Orders
+  description: Poll and read purchase orders issued to the vendor's nodes.
+- name: Acknowledgements
+  description: The single, whole-order accept or reject (asynchronous).
+- name: Inventory
+  description: Inventory feeds per node (asynchronous, relayed to offer-availability).
+- name: Nodes
+  description: Register vendor nodes, declare their operational profile, read them and their scorecard.
+- name: Shipping Labels
+  description: Labels for the packages of an ACCEPTED purchase order.
+- name: Shipment Confirmations
+  description: Confirm that a purchase order shipped (asynchronous).
+- name: Inbound Shipments
+  description: Poll and read the SHIPPED inbound shipments bound for the vendor's nodes (seller cartons with SSCC and GTIN).
+- name: Inbound Receipts
+  description: Report what the dock received against an inbound shipment (asynchronous).
+- name: Transactions
+  description: Reconcile every asynchronous write by its transactionId.
+- name: Vendors
+  description: Vendor onboarding, suspension and reinstatement, used by network partner managers (not part of the vendor-facing protocol).
+paths:
+  /vendor/purchase-orders:
+    get:
+      tags:
+      - Purchase Orders
+      operationId: pollPurchaseOrders
+      summary: Poll purchase orders (PollPurchaseOrders)
+      description: |
+        Returns purchase orders issued to the vendor's nodes after `createdAfter`,
+        oldest first, in pages. Pass the returned `nextToken` to fetch the next
+        page; an absent `nextToken` means the last page. A purchase order can be
+        returned again (`PO_REDELIVERY_RATE`); the vendor deduplicates on `poNumber`.
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - name: createdAfter
+        in: query
+        required: false
+        description: Only purchase orders with `issuedAt` strictly after this instant.
+        schema:
+          type: string
+          format: date-time
+      - name: nodeId
+        in: query
+        required: false
+        description: Only purchase orders for this node.
+        schema:
+          type: string
+      - name: nextToken
+        in: query
+        required: false
+        description: Opaque continuation token from the previous page. When present, the other filters are ignored.
+        schema:
+          type: string
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page of purchase orders.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseOrderPage'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/purchase-orders/{poNumber}:
+    get:
+      tags:
+      - Purchase Orders
+      operationId: getPurchaseOrder
+      summary: Get one purchase order (GetPurchaseOrder)
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - $ref: '#/components/parameters/PoNumber'
+      responses:
+        '200':
+          description: The purchase order, its acknowledgement, labels and shipment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseOrder'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      description: One purchase order of the calling vendor, with its acknowledgement (once its transaction succeeded), labels and shipment. A
+        purchase order of another vendor is `node-not-owned-by-vendor`.
+  /vendor/acknowledgements:
+    post:
+      tags:
+      - Acknowledgements
+      operationId: submitAcknowledgement
+      summary: Acknowledge a purchase order in full (SubmitAcknowledgement)
+      description: |
+        Accepts or rejects the whole purchase order with one decision. The request
+        must echo every line with its ordered quantity; anything else is a partial
+        acknowledgement and is refused (`ErrPartialAcknowledgement`). A purchase
+        order is acknowledged at most once (`ErrAlreadyAcknowledged`, which also
+        covers an acknowledgement still processing) and never after `ackBy`
+        (`ErrAckWindowClosed`, judged on the receipt instant). On `202` the order
+        moves to `ACK_PROCESSING`; it becomes `ACCEPTED` or `REJECTED` when the
+        transaction succeeds, and returns to `ISSUED` if it fails.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcknowledgementRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/inventory:
+    post:
+      tags:
+      - Inventory
+      operationId: submitInventory
+      summary: Submit an inventory feed for one node (SubmitInventory)
+      description: |
+        Asynchronous (`SubmissionKind` `INVENTORY`). On processing, the feed is
+        relayed to offer-availability (`POST /inventory-feeds`, `ApplyInventoryFeed`).
+        A full feed zeroes every listing of the node it omits. Downstream refusals
+        (for example `ErrListingNotOnNode`, `ErrFeedAlreadyApplied`) appear as
+        `errors` on the transaction.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryFeedRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/nodes:
+    get:
+      tags:
+      - Nodes
+      operationId: listVendorNodes
+      summary: List the vendor's nodes (ListVendorNodes)
+      description: Served from the local VendorNodeView, fed by node-topology events. Returns the nodes whose owner is `vendorId`, ordered by
+        `nodeId` (G30).
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      responses:
+        '200':
+          description: The vendor's nodes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VendorNodeList'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    post:
+      tags:
+      - Nodes
+      operationId: registerVendorNode
+      summary: Register a vendor node (RegisterVendorNode)
+      description: |
+        Asynchronous (`SubmissionKind` `NODE_REGISTRATION`). On processing, the node
+        is registered with node-topology (`POST /nodes`, `RegisterNode`, operator `VENDOR`). A vendor
+        may register only `FULFILLMENT_CENTER`, `INBOUND_CROSS_DOCK` or
+        `RETURNS_CENTER` nodes. The processed transaction carries the new `nodeId` (G30).
+        Downstream refusals (for example `ErrOperatorNotAllowedForNodeType`,
+        `ErrVendorNodeCodeTaken`) appear as `errors` on the transaction.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeRegistrationRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/nodes/{nodeId}:
+    get:
+      tags:
+      - Nodes
+      operationId: getNode
+      summary: Get one of the vendor's nodes (GetNode)
+      description: Served from the local VendorNodeView, fed by node-topology events.
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - $ref: '#/components/parameters/NodeId'
+      responses:
+        '200':
+          description: The node as the network knows it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VendorNode'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/nodes/{nodeId}/profile:
+    put:
+      tags:
+      - Nodes
+      operationId: declareNodeProfile
+      summary: Declare the node's operational profile (DeclareNodeProfile)
+      description: |
+        Asynchronous (`SubmissionKind` `NODE_PROFILE`). On processing, the profile is
+        relayed to node-topology (`PUT /nodes/{nodeId}/operational-profile`,
+        `DeclareOperationalProfile`). A profile is versioned: `profileRevision` must
+        strictly increase. Downstream refusals (`ErrStaleProfileRevision`,
+        `ErrIncompleteOperationalProfile`, `ErrCutoffOutsideOperatingHours`) appear
+        as `errors` on the transaction.
+      parameters:
+      - $ref: '#/components/parameters/NodeId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeProfileRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/nodes/{nodeId}/scorecard:
+    get:
+      tags:
+      - Nodes
+      operationId: getScorecard
+      summary: Get the node's measured scorecard (GetScorecard)
+      description: 'Relayed synchronously from node-performance (`GET /scorecards/{nodeId}`). A node without observations has no scorecard: `404`
+        `not-found`.'
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - $ref: '#/components/parameters/NodeId'
+      responses:
+        '200':
+          description: The node's rolling-window scorecards.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scorecard'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+  /vendor/shipping-labels:
+    post:
+      tags:
+      - Shipping Labels
+      operationId: requestLabel
+      summary: Request labels for an accepted purchase order (RequestLabel)
+      description: |
+        Synchronous (the documented exception to the `202` rule, G31): labels are issued by
+        shipping-and-tracking (`POST /labels`, `IssueLabel`, called with `poNumber`,
+        `packageNo`, `assignmentId`, `orderId` and `tier` that this context holds from
+        the release) inside this request and returned in the response. Allowed only
+        once the purchase order is `ACCEPTED` (`ErrLabelBeforeAcceptance`). A label
+        never carries the ship-to address. Re-requesting a label for the same
+        `(poNumber, packageNo)` returns the label already issued. When
+        shipping-and-tracking cannot answer, the answer is `503` `upstream-unavailable`;
+        labels already issued stay stored and a retry returns them.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LabelRequest'
+      responses:
+        '200':
+          description: One label per requested package.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabelResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+  /vendor/shipment-confirmations:
+    post:
+      tags:
+      - Shipment Confirmations
+      operationId: submitShipmentConfirmation
+      summary: Confirm that a purchase order shipped (SubmitShipmentConfirmation)
+      description: |
+        Asynchronous (`SubmissionKind` `SHIPMENT_CONFIRMATION`). Allowed only for an
+        `ACCEPTED` purchase order with a label for every package
+        (`ErrConfirmWithoutLabel`). On `202` the order moves to `SHIPMENT_PROCESSING`;
+        it becomes `SHIPPED` when the transaction succeeds and returns to `ACCEPTED`
+        if it fails.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShipmentConfirmationRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/inbound-shipments:
+    get:
+      tags:
+      - Inbound Shipments
+      operationId: pollInboundShipments
+      summary: Poll inbound shipments (PollInboundShipments)
+      description: |
+        Returns the `SHIPPED` inbound shipments bound for the vendor's nodes after
+        `createdAfter`, oldest first, in pages. Every shipment is the pallet-and-carton
+        tree shipment > pallet > carton > item. `createdAfter` compares with `shippedAt`,
+        the instant the seller handed the shipment over. Pass the returned `nextToken`
+        for the next page; an absent `nextToken` means the last page. A shipment
+        leaves the poll once the network records its receipt.
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - name: createdAfter
+        in: query
+        required: false
+        description: Only shipments with `shippedAt` strictly after this instant.
+        schema:
+          type: string
+          format: date-time
+      - name: nodeId
+        in: query
+        required: false
+        description: Only shipments bound for this node.
+        schema:
+          type: string
+      - name: nextToken
+        in: query
+        required: false
+        description: Opaque continuation token from the previous page. When present, the other filters are ignored.
+        schema:
+          type: string
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page of inbound shipments.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboundShipmentPage'
+              example:
+                inboundShipments:
+                - shipmentId: SHP-1001
+                  sellerId: S-100
+                  nodeId: n-1
+                  shippedAt: '2026-10-24T13:00:00Z'
+                  status: SHIPPED
+                  pallets:
+                  - sscc: '006141410000000036'
+                    cartons:
+                    - sscc: '006141410000000012'
+                      parentSscc: '006141410000000036'
+                      kind: HOMOGENEOUS_CASE
+                      contents:
+                      - gtin: '00614141000036'
+                        qtyEaches: 12
+                        lot: L-77
+                        expiry: '2027-03-01'
+                      grossWeightG: 4200
+                      dimsMm:
+                        l: 400
+                        w: 300
+                        h: 200
+                  cartons:
+                  - sscc: '006141410000000029'
+                    kind: MIXED
+                    contents:
+                    - gtin: '00614141000036'
+                      qtyEaches: 6
+                    grossWeightG: 2100
+                nextToken: eyJ0IjoiMjAyNi0xMC0yNFQxMzowMDowMFoiLCJzIjoiU0hQLTEwMDEiLCJ2IjoiVi1XUyJ9
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/inbound-shipments/{shipmentId}:
+    get:
+      tags:
+      - Inbound Shipments
+      operationId: getInboundShipment
+      summary: Get one inbound shipment (GetInboundShipment)
+      description: |
+        One inbound shipment as the pallet-and-carton tree. A shipment that has not shipped
+        yet, or that is bound for another vendor's node, is `not-found`. Unlike the
+        poll, this read also answers for a shipment that was already received
+        (`status` `CLOSED` or `CLOSED_WITH_DISCREPANCY`).
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - $ref: '#/components/parameters/ShipmentId'
+      responses:
+        '200':
+          description: The inbound shipment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboundShipment'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/inbound-receipts:
+    post:
+      tags:
+      - Inbound Receipts
+      operationId: submitInboundReceipt
+      summary: Report an inbound receipt (SubmitInboundReceipt)
+      description: |
+        Asynchronous (`SubmissionKind` `INBOUND_RECEIPT`). The shipment must be known
+        and `SHIPPED`, `nodeId` must be its destination and belong to the vendor, and
+        every carton `sscc` must be on the shipment, except a carton reported
+        `UNEXPECTED`. A `MISSING` carton has no items; the GTINs counted in a
+        carton must be GTINs of that carton on the manifest. Counting more or fewer
+        eaches than the manifest says is a discrepancy to report, never a refusal.
+        On `202` the network publishes `InboundReceiptSubmitted`.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InboundReceiptRequest'
+            example:
+              vendorId: V-WS
+              shipmentId: SHP-1001
+              nodeId: n-1
+              receivedAt: '2026-10-25T09:30:00Z'
+              cartons:
+              - sscc: '006141410000000012'
+                status: RECEIVED
+                items:
+                - gtin: '00614141000036'
+                  qtyEaches: 12
+                complianceCodes: []
+              - sscc: '006141410000000029'
+                status: DAMAGED
+                items:
+                - gtin: '00614141000036'
+                  qtyEaches: 5
+                complianceCodes:
+                - CARTON_CRUSHED
+      responses:
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/transactions/{transactionId}:
+    get:
+      tags:
+      - Transactions
+      operationId: getTransaction
+      summary: Get the outcome of an asynchronous write (GetTransaction)
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - $ref: '#/components/parameters/TransactionId'
+      responses:
+        '200':
+          description: The transaction and, once processed, its outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      description: The outcome of any asynchronous write of the calling vendor. A transaction of another vendor is `not-found`. A processed `NODE_REGISTRATION`
+        transaction carries the new `nodeId`.
+  /vendors:
+    post:
+      tags:
+      - Vendors
+      operationId: onboardVendor
+      summary: Onboard a vendor (OnboardVendor)
+      description: Used by network partner managers. Publishes `VendorOnboarded`. Onboarding an existing `vendorId` with a new Idempotency-Key
+        returns the existing account unchanged with `200` (assumption A8).
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardVendorRequest'
+      responses:
+        '200':
+          description: The vendor account already existed; returned unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VendorAccount'
+        '201':
+          description: The vendor account, ACTIVE.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VendorAccount'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+  /vendors/{vendorId}:
+    get:
+      tags:
+      - Vendors
+      operationId: getVendor
+      summary: Get a vendor account (GetVendor)
+      description: Used by network partner managers.
+      parameters:
+      - $ref: '#/components/parameters/VendorIdPath'
+      responses:
+        '200':
+          description: The vendor account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VendorAccount'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /vendors/{vendorId}:suspend:
+    post:
+      tags:
+      - Vendors
+      operationId: suspendVendor
+      summary: Suspend a vendor (SuspendVendor)
+      description: Used by network partner managers. Moves the account `ACTIVE` to `SUSPENDED` and publishes `VendorSuspended` (G30). A vendor
+        already `SUSPENDED` gets the account back unchanged with `200` and no event (assumption A8). While suspended, every write of the vendor
+        is refused with `vendor-suspended`; reads and the polling of purchase orders continue.
+      parameters:
+      - $ref: '#/components/parameters/VendorIdPath'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: The vendor account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VendorAccount'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuspendVendorRequest'
+  /vendors/{vendorId}:reinstate:
+    post:
+      tags:
+      - Vendors
+      operationId: reinstateVendor
+      summary: Reinstate a vendor (ReinstateVendor)
+      description: 'Used by network partner managers. Moves the account `SUSPENDED` to `ACTIVE` and publishes `VendorReinstated` (G30). A vendor
+        already `ACTIVE` gets the account back unchanged with `200` and no event (assumption A8). '
+      parameters:
+      - $ref: '#/components/parameters/VendorIdPath'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: The vendor account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VendorAccount'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+components:
+  parameters:
+    PoNumber:
+      name: poNumber
+      in: path
+      required: true
+      description: The purchase order number. Idempotent on the release it was issued for.
+      schema:
+        type: string
+    ShipmentId:
+      name: shipmentId
+      in: path
+      required: true
+      description: The seller-inbound shipment id.
+      schema:
+        type: string
+    NodeId:
+      name: nodeId
+      in: path
+      required: true
+      description: The network's id of the vendor node.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-chosen key. A retry with the same key returns the first response (for an asynchronous write, the same `transactionId`).
+      schema:
+        type: string
+        maxLength: 128
+    VendorId:
+      name: vendorId
+      in: query
+      required: true
+      description: The calling vendor (G32). Ownership of the addressed resource is checked against it.
+      schema:
+        type: string
+        example: V-WS
+    VendorIdPath:
+      name: vendorId
+      in: path
+      required: true
+      description: The vendor account id.
+      schema:
+        type: string
+    TransactionId:
+      name: transactionId
+      in: path
+      required: true
+      description: The id returned by the `202` of the write.
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size, 1 to 200 (default 50).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+  headers:
+    RetryAfter:
+      description: Seconds to wait before the next call.
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    Accepted:
+      description: Accepted for processing. Reconcile with `GET /vendor/transactions/{transactionId}`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TransactionAccepted'
+    NotFound:
+      description: |
+        The resource does not exist (`not-found`), or it belongs to another vendor
+        (`ErrNodeNotOwnedByVendor`, problem type `node-not-owned-by-vendor`, 404 so a vendor cannot probe another vendor's nodes).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    StateConflict:
+      description: |
+        The write conflicts with the state of the purchase order, the vendor or the aggregate version. Problem types:
+        `already-acknowledged` (`ErrAlreadyAcknowledged`), `ack-window-closed`
+        (`ErrAckWindowClosed`), `label-before-acceptance` (`ErrLabelBeforeAcceptance`),
+        `confirm-without-label` (`ErrConfirmWithoutLabel`), `vendor-suspended`
+        (`ErrVendorSuspended`), `illegal-transition` (a write against a state the model
+        gives no `Err...` for) and `concurrent-update` (optimistic-concurrency
+        conflict; the caller re-reads and retries).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ValidationProblem:
+      description: |
+        The request is malformed or breaks a validation rule. Problem types:
+        `validation-failed`, `partial-acknowledgement` (`ErrPartialAcknowledgement`) and
+        `ack-window-out-of-range` (`ErrAckWindowOutOfRange`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RateLimited:
+      description: Rate limit exceeded (`RATE_LIMIT_RPS`). Problem type `rate-limited`.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UpstreamUnavailable:
+      description: A neighbouring context did not answer. Problem type `upstream-unavailable`; retry.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required:
+      - type
+      - title
+      - status
+      properties:
+        type:
+          type: string
+          description: 'Problem type slug: the shared `not-found`, `illegal-transition`, `concurrent-update` and `validation-failed`, or one slug
+            per `Err...` name of this context, for example `ack-window-closed`.'
+          example: ack-window-closed
+        title:
+          type: string
+          example: Acknowledgement window closed
+        status:
+          type: integer
+          example: 409
+        detail:
+          type: string
+          example: poNumber PO-7f3c was due by 2026-10-22T14:00:00Z
+        instance:
+          type: string
+    TransactionAccepted:
+      type: object
+      required:
+      - transactionId
+      properties:
+        transactionId:
+          type: string
+          example: tx-01J9Z6K4M2
+    SubmissionKind:
+      type: string
+      enum:
+      - ACKNOWLEDGEMENT
+      - INVENTORY
+      - NODE_REGISTRATION
+      - NODE_PROFILE
+      - SHIPMENT_CONFIRMATION
+      - INBOUND_RECEIPT
+    SubmissionStatus:
+      type: string
+      enum:
+      - PROCESSING
+      - SUCCESS
+      - FAILURE
+    SubmissionError:
+      type: object
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: string
+          description: Error code. For a downstream refusal, the owning context's `Err...` identifier.
+          example: ErrStaleProfileRevision
+        message:
+          type: string
+        path:
+          type: string
+          description: JSON path of the offending request field, when known.
+          example: $.profileRevision
+    Transaction:
+      type: object
+      required:
+      - transactionId
+      - vendorId
+      - kind
+      - status
+      - receivedAt
+      properties:
+        transactionId:
+          type: string
+        vendorId:
+          type: string
+        kind:
+          $ref: '#/components/schemas/SubmissionKind'
+        status:
+          $ref: '#/components/schemas/SubmissionStatus'
+        receivedAt:
+          type: string
+          format: date-time
+        processedAt:
+          type: string
+          format: date-time
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubmissionError'
+          description: Always present on a processed transaction (empty on `SUCCESS`).
+        nodeId:
+          type: string
+          description: 'Set on a `SUCCESS` `NODE_REGISTRATION` transaction: the id node-topology gave the node (G30).'
+        poNumber:
+          type: string
+          description: 'Set on `ACKNOWLEDGEMENT` and `SHIPMENT_CONFIRMATION` transactions: the purchase order they concern.'
+    PurchaseOrderState:
+      type: string
+      enum:
+      - ISSUED
+      - ACK_PROCESSING
+      - ACCEPTED
+      - REJECTED
+      - EXPIRED
+      - SHIPMENT_PROCESSING
+      - SHIPPED
+      - CANCELLED
+    RejectReason:
+      type: string
+      enum:
+      - OUT_OF_STOCK
+      - UNKNOWN_LISTING
+      - CANNOT_MEET_SHIP_BY
+      - DISCONTINUED
+    PoLine:
+      type: object
+      required:
+      - lineNo
+      - listingId
+      - quantity
+      properties:
+        lineNo:
+          type: integer
+          minimum: 1
+        listingId:
+          type: string
+          description: The network's listing (one catalogue item offered from one node).
+        quantity:
+          type: integer
+          minimum: 1
+        packaging:
+          type: array
+          description: The active packaging levels of the listing's catalogue item, from the network's catalogue (empty when none was declared).
+          items:
+            $ref: '#/components/schemas/Packaging'
+    Packaging:
+      type: object
+      required:
+      - level
+      - gtin
+      - unitsPerPack
+      properties:
+        level:
+          type: string
+          enum:
+          - EACH
+          - INNER
+          - CASE
+          - PALLET
+        gtin:
+          type: string
+          description: The 14-digit GTIN of the level.
+          example: '10614141000019'
+        childGtin:
+          type: string
+          description: The GTIN of the next lower level; absent for EACH.
+          example: '00614141000036'
+        unitsPerPack:
+          type: integer
+          minimum: 1
+          description: Eaches in one unit of this level (1 for EACH).
+          example: 12
+    Label:
+      type: object
+      required:
+      - labelRef
+      - trackingNumber
+      - carrier
+      description: A shipping label reference. Never carries the ship-to address.
+      properties:
+        packageNo:
+          type: integer
+          minimum: 1
+        labelRef:
+          type: string
+        trackingNumber:
+          type: string
+        carrier:
+          type: string
+    Acknowledgement:
+      type: object
+      required:
+      - decision
+      - transactionId
+      properties:
+        decision:
+          type: string
+          enum:
+          - ACCEPT
+          - REJECT
+        reasonCode:
+          $ref: '#/components/schemas/RejectReason'
+        transactionId:
+          type: string
+    PurchaseOrder:
+      type: object
+      description: |
+        The network's instruction to one vendor node to ship one shipment group in
+        full by `requiredShipBy`. Carries no ship-to PII.
+      required:
+      - poNumber
+      - vendorId
+      - nodeId
+      - state
+      - issuedAt
+      - requiredShipBy
+      - ackBy
+      - lines
+      - labels
+      - trackingNumbers
+      properties:
+        poNumber:
+          type: string
+          example: PO-7f3c
+        vendorId:
+          type: string
+          example: V-WS
+        nodeId:
+          type: string
+        state:
+          $ref: '#/components/schemas/PurchaseOrderState'
+        issuedAt:
+          type: string
+          format: date-time
+        requiredShipBy:
+          type: string
+          format: date-time
+          description: The pickup cutoff the order must be ready for (the fleet calls it the CPT).
+        ackBy:
+          type: string
+          format: date-time
+          description: min(issuedAt + vendor ackWindow, requiredShipBy - node handlingTime).
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/PoLine'
+        acknowledgement:
+          description: Absent until the vendor's acknowledgement transaction succeeds.
+          allOf:
+          - $ref: '#/components/schemas/Acknowledgement'
+        labels:
+          type: array
+          items:
+            $ref: '#/components/schemas/Label'
+          description: The labels issued so far; `[]` when none.
+        trackingNumbers:
+          type: array
+          description: The tracking numbers confirmed shipped; `[]` until the shipment confirmation succeeds.
+          items:
+            type: string
+        shippedAt:
+          type: string
+          format: date-time
+    PurchaseOrderPage:
+      type: object
+      required:
+      - purchaseOrders
+      properties:
+        purchaseOrders:
+          type: array
+          items:
+            $ref: '#/components/schemas/PurchaseOrder'
+        nextToken:
+          type: string
+          description: Absent on the last page.
+    AckLine:
+      type: object
+      required:
+      - lineNo
+      - quantity
+      properties:
+        lineNo:
+          type: integer
+          minimum: 1
+        quantity:
+          type: integer
+          minimum: 1
+          description: Must equal the ordered quantity (fill-or-kill).
+    AcknowledgementRequest:
+      type: object
+      required:
+      - vendorId
+      - poNumber
+      - decision
+      - lines
+      properties:
+        vendorId:
+          type: string
+        poNumber:
+          type: string
+        decision:
+          type: string
+          enum:
+          - ACCEPT
+          - REJECT
+        reasonCode:
+          allOf:
+          - $ref: '#/components/schemas/RejectReason'
+          description: Required when `decision` is `REJECT`.
+        lines:
+          type: array
+          minItems: 1
+          description: Every line of the purchase order, once, with its ordered quantity.
+          items:
+            $ref: '#/components/schemas/AckLine'
+    InventoryLine:
+      type: object
+      required:
+      - listingId
+      - availableQty
+      - basis
+      properties:
+        listingId:
+          type: string
+        availableQty:
+          type: integer
+          minimum: 0
+        basis:
+          type: string
+          enum:
+          - PHYSICAL
+          - THROUGHPUT_CONSTRAINED
+          - UNKNOWN
+    InventoryFeedRequest:
+      type: object
+      required:
+      - vendorId
+      - nodeId
+      - fullUpdate
+      - asOf
+      - lines
+      properties:
+        vendorId:
+          type: string
+        nodeId:
+          type: string
+        fullUpdate:
+          type: boolean
+          description: When true, every listing of the node omitted here becomes zero.
+        asOf:
+          type: string
+          format: date-time
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/InventoryLine'
+          description: At most 5000 lines.
+          maxItems: 5000
+    NodeType:
+      type: string
+      description: Node types a vendor may register. Parcel nodes are network-operated.
+      enum:
+      - FULFILLMENT_CENTER
+      - INBOUND_CROSS_DOCK
+      - RETURNS_CENTER
+    NodeSubtype:
+      type: string
+      enum:
+      - SORTABLE
+      - NON_SORTABLE
+      - XL
+      - SOFT_LINES
+      - SUB_SAME_DAY
+      - FRESH
+      - MICRO
+    NodeRegistrationRequest:
+      type: object
+      required:
+      - vendorId
+      - vendorNodeCode
+      - nodeType
+      - regionId
+      - timezone
+      - postalCode
+      - countryCode
+      properties:
+        vendorId:
+          type: string
+        vendorNodeCode:
+          type: string
+          description: The vendor's own code for the node, unique per vendor.
+        nodeType:
+          $ref: '#/components/schemas/NodeType'
+        subtype:
+          $ref: '#/components/schemas/NodeSubtype'
+        regionId:
+          type: string
+        timezone:
+          type: string
+          example: America/Sao_Paulo
+        postalCode:
+          type: string
+          description: The node's own location (a building), not a customer address.
+        countryCode:
+          type: string
+        lat:
+          type: number
+        lon:
+          type: number
+    CutoffSlot:
+      type: object
+      required:
+      - localTime
+      properties:
+        localTime:
+          type: string
+          example: '18:00'
+          description: Local time of day, HH:mm.
+        maxOrders:
+          type: integer
+          minimum: 1
+        days:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: The weekdays the cutoff applies to. Absent means every operating day.
+          items:
+            $ref: '#/components/schemas/Weekday'
+    ThroughputCap:
+      type: object
+      required:
+      - value
+      - timeUnit
+      - unit
+      properties:
+        value:
+          type: integer
+          minimum: 1
+        timeUnit:
+          type: string
+          enum:
+          - HOUR
+          - DAY
+          example: HOUR
+        unit:
+          type: string
+          enum:
+          - ORDER
+    NodeProfileRequest:
+      type: object
+      required:
+      - vendorId
+      - profileRevision
+      - timezone
+      - operatingHoursByDay
+      - handlingTimeMinutes
+      - cutoffs
+      - throughputCap
+      properties:
+        vendorId:
+          type: string
+        profileRevision:
+          type: integer
+          minimum: 1
+          description: Strictly increases per node.
+        timezone:
+          type: string
+        operatingHoursByDay:
+          $ref: '#/components/schemas/OperatingHoursByDay'
+        holidays:
+          type: array
+          items:
+            type: string
+            format: date
+          description: ISO dates on which the node is closed all day.
+        handlingTimeMinutes:
+          type: integer
+          minimum: 1
+        cutoffs:
+          type: array
+          items:
+            $ref: '#/components/schemas/CutoffSlot'
+        throughputCap:
+          $ref: '#/components/schemas/ThroughputCap'
+        sortDwellMinutes:
+          type: integer
+          minimum: 0
+    VendorNode:
+      type: object
+      required:
+      - nodeId
+      - vendorId
+      - vendorNodeCode
+      - nodeType
+      - status
+      properties:
+        nodeId:
+          type: string
+        vendorId:
+          type: string
+        vendorNodeCode:
+          type: string
+        nodeType:
+          $ref: '#/components/schemas/NodeType'
+        subtype:
+          $ref: '#/components/schemas/NodeSubtype'
+        status:
+          type: string
+          enum:
+          - PROPOSED
+          - ACTIVE
+          - SUSPENDED
+          - RETIRED
+          description: The status node-topology last announced.
+        regionId:
+          type: string
+        timezone:
+          type: string
+        handlingTimeMinutes:
+          type: integer
+          description: From the latest operational profile the network knows; absent before the first one.
+        profileRevision:
+          type: integer
+          description: Revision of that profile; absent before the first one.
+    ScorecardWindow:
+      type: object
+      required:
+      - window
+      - grade
+      - observations
+      - computedAt
+      properties:
+        window:
+          type: string
+          description: Rolling window (7-day or 30-day).
+          example: 7d
+        grade:
+          type: string
+          enum:
+          - A
+          - B
+          - C
+          - D
+          - PROVISIONAL
+        onTimeHandoverRate:
+          type: number
+          minimum: 0
+          maximum: 1
+        lateAckRate:
+          type: number
+          minimum: 0
+          maximum: 1
+        rejectRate:
+          type: number
+          minimum: 0
+          maximum: 1
+        expiryRate:
+          type: number
+          minimum: 0
+          maximum: 1
+        promiseKeptRate:
+          type: number
+          minimum: 0
+          maximum: 1
+        feedFreshnessP95Minutes:
+          type: number
+          minimum: 0
+        observations:
+          type: integer
+          minimum: 0
+        computedAt:
+          type: string
+          format: date-time
+    Scorecard:
+      type: object
+      required:
+      - nodeId
+      - windows
+      description: node-performance's scorecards of the node, one entry per rolling window (7d feeds alerts; 30d is the grade consumers use).
+      properties:
+        nodeId:
+          type: string
+        windows:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScorecardWindow'
+    LabelPackage:
+      type: object
+      required:
+      - packageNo
+      properties:
+        packageNo:
+          type: integer
+          minimum: 1
+    LabelRequest:
+      type: object
+      required:
+      - vendorId
+      - poNumber
+      - packages
+      properties:
+        vendorId:
+          type: string
+        poNumber:
+          type: string
+        packages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/LabelPackage'
+          description: The packages to label, each `packageNo` once.
+    LabelResponse:
+      type: object
+      required:
+      - poNumber
+      - labels
+      properties:
+        poNumber:
+          type: string
+        labels:
+          type: array
+          items:
+            $ref: '#/components/schemas/Label'
+          description: One label per requested package, ordered by `packageNo`.
+    Dims:
+      type: object
+      required:
+      - l
+      - w
+      - h
+      properties:
+        l:
+          type: integer
+          minimum: 0
+        w:
+          type: integer
+          minimum: 0
+        h:
+          type: integer
+          minimum: 0
+    ShipmentItem:
+      type: object
+      required:
+      - gtin
+      - qtyEaches
+      properties:
+        gtin:
+          type: string
+          description: 14-digit GTIN with a valid check digit.
+          example: '00614141000036'
+        sku:
+          type: string
+          description: The seller's SKU, when known.
+        qtyEaches:
+          type: integer
+          minimum: 1
+          description: Quantity in eaches.
+        lot:
+          type: string
+          maxLength: 20
+        expiry:
+          type: string
+          format: date
+    ShipmentCarton:
+      type: object
+      required:
+      - sscc
+      - kind
+      - contents
+      properties:
+        sscc:
+          type: string
+          description: 18-digit SSCC (AI 00) with a valid check digit.
+          example: '006141410000000012'
+        parentSscc:
+          type: string
+          description: The SSCC of the pallet the carton is on; absent for a carton that is not on a pallet.
+        kind:
+          type: string
+          description: HOMOGENEOUS_CASE (one GTIN) or MIXED (a logistic unit with no pack GTIN).
+          example: HOMOGENEOUS_CASE
+        contents:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShipmentItem'
+        grossWeightG:
+          type: integer
+          minimum: 0
+        dimsMm:
+          $ref: '#/components/schemas/Dims'
+    ShipmentPallet:
+      type: object
+      required:
+      - sscc
+      - cartons
+      properties:
+        sscc:
+          type: string
+          description: 18-digit SSCC of the pallet.
+          example: '006141410000000036'
+        cartons:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShipmentCarton'
+    InboundShipment:
+      type: object
+      description: |
+        The pallet-and-carton tree of one inbound shipment: shipment > pallet > carton > item.
+        Cartons that are not on a pallet are top-level; a pallet SSCC is the `parentSscc` of its cartons.
+      required:
+      - shipmentId
+      - nodeId
+      - shippedAt
+      - status
+      - pallets
+      - cartons
+      properties:
+        shipmentId:
+          type: string
+          example: SHP-1001
+        sellerId:
+          type: string
+          description: The owner of the goods (`ownerRef` of the stock).
+          example: S-100
+        nodeId:
+          type: string
+          example: n-1
+        shippedAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+          - SHIPPED
+          - CLOSED
+          - CLOSED_WITH_DISCREPANCY
+        pallets:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShipmentPallet'
+        cartons:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShipmentCarton'
+    InboundShipmentPage:
+      type: object
+      required:
+      - inboundShipments
+      properties:
+        inboundShipments:
+          type: array
+          items:
+            $ref: '#/components/schemas/InboundShipment'
+        nextToken:
+          type: string
+          description: Absent on the last page.
+    InboundReceiptItem:
+      type: object
+      required:
+      - gtin
+      - qtyEaches
+      properties:
+        gtin:
+          type: string
+          description: GTIN (8, 12, 13 or 14 digits, valid check digit); stored as 14 digits.
+          example: '00614141000036'
+        qtyEaches:
+          type: integer
+          minimum: 0
+          description: Eaches counted.
+    InboundReceiptCarton:
+      type: object
+      required:
+      - sscc
+      - status
+      properties:
+        sscc:
+          type: string
+          description: 18-digit SSCC with a valid check digit.
+          example: '006141410000000012'
+        status:
+          type: string
+          enum:
+          - RECEIVED
+          - MISSING
+          - UNEXPECTED
+          - DAMAGED
+        items:
+          type: array
+          description: Per-GTIN counts. Empty for a `MISSING` carton.
+          items:
+            $ref: '#/components/schemas/InboundReceiptItem'
+        complianceCodes:
+          type: array
+          description: UPPER_SNAKE compliance findings, for example `LABEL_UNREADABLE`.
+          maxItems: 20
+          items:
+            type: string
+            pattern: ^[A-Z][A-Z0-9_]{0,63}$
+    InboundReceiptRequest:
+      type: object
+      required:
+      - vendorId
+      - shipmentId
+      - nodeId
+      - receivedAt
+      - cartons
+      properties:
+        vendorId:
+          type: string
+        shipmentId:
+          type: string
+        nodeId:
+          type: string
+          description: The destination node of the shipment.
+        receivedAt:
+          type: string
+          format: date-time
+        cartons:
+          type: array
+          minItems: 1
+          maxItems: 5000
+          items:
+            $ref: '#/components/schemas/InboundReceiptCarton'
+    ShipmentConfirmationRequest:
+      type: object
+      required:
+      - vendorId
+      - poNumber
+      - shippedAt
+      - trackingNumbers
+      properties:
+        vendorId:
+          type: string
+        poNumber:
+          type: string
+        shippedAt:
+          type: string
+          format: date-time
+        trackingNumbers:
+          type: array
+          minItems: 1
+          description: One per package; each must belong to a label issued for this purchase order.
+          items:
+            type: string
+    OnboardVendorRequest:
+      type: object
+      required:
+      - vendorId
+      - name
+      - ackWindowMinutes
+      properties:
+        vendorId:
+          type: string
+          example: V-WS
+        name:
+          type: string
+        ackWindowMinutes:
+          type: integer
+          minimum: 60
+          maximum: 1440
+          description: Between 1h and 24h (`ErrAckWindowOutOfRange`).
+    VendorAccount:
+      type: object
+      required:
+      - vendorId
+      - name
+      - ackWindowMinutes
+      - state
+      properties:
+        vendorId:
+          type: string
+        name:
+          type: string
+        ackWindowMinutes:
+          type: integer
+        state:
+          type: string
+          enum:
+          - ACTIVE
+          - SUSPENDED
+    Weekday:
+      type: string
+      enum:
+      - monday
+      - tuesday
+      - wednesday
+      - thursday
+      - friday
+      - saturday
+      - sunday
+    DayHours:
+      type: object
+      required:
+      - start
+      - end
+      properties:
+        start:
+          type: string
+          description: Local opening time, HH:mm.
+          example: 06:00
+        end:
+          type: string
+          description: Local closing time, HH:mm.
+          example: '22:00'
+    OperatingHoursByDay:
+      type: object
+      description: Per weekday, the local opening hours. A missing weekday is closed.
+      additionalProperties: false
+      properties:
+        monday:
+          $ref: '#/components/schemas/DayHours'
+        tuesday:
+          $ref: '#/components/schemas/DayHours'
+        wednesday:
+          $ref: '#/components/schemas/DayHours'
+        thursday:
+          $ref: '#/components/schemas/DayHours'
+        friday:
+          $ref: '#/components/schemas/DayHours'
+        saturday:
+          $ref: '#/components/schemas/DayHours'
+        sunday:
+          $ref: '#/components/schemas/DayHours'
+    VendorNodeList:
+      type: object
+      required:
+      - nodes
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/VendorNode'
+    SuspendVendorRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Why the partner manager suspended the vendor.

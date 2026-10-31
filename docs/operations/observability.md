@@ -101,6 +101,22 @@ No business metric is defined for orders received, acknowledged or rejected:
 those numbers come from the analytics report and from `GET /inbound-status`
 (below). The one business counter is the orphaned-hold sweep's.
 
+### Node profile metrics
+
+`internal/adapters/outbound/telemetry/node_profile_metrics.go` (ADR 0027 §8, same
+convention and transport as the sweep metric below: the global `MeterProvider`,
+OTLP, not on `GET /metrics`). Live mode only; a stub deployment emits nothing.
+
+| Instrument | Type | Unit | Attributes |
+| --- | --- | --- | --- |
+| `network_fulfillment.node_profile.declarations` | counter | `{declaration}` | `outcome` = `declared`, `confirmed`, `pending`, `unchanged`, `failed`, `skipped_no_node`, `skipped_no_schedule` or `skipped_incomplete` |
+| `network_fulfillment.node_profile.revision` | gauge | `{revision}` | `site`; the revision last declared or settled, only recorded when an attempt concerned one |
+
+One data point per site per pass (`DeclareNodeProfiles` through
+`ports.ProfileMetrics`). A healthy steady state is `unchanged` on every pass; a
+stuck `skipped_*` or `failed` is the signal (see
+[the node profile](./runbook.md#the-node-profile)).
+
 ### Orphaned-hold sweep metric
 
 `internal/adapters/outbound/telemetry/orphan_hold_metrics.go` (ADR 0024 §7,
@@ -251,3 +267,5 @@ None of these exist yet; they follow from the code above.
 | Orphaned holds failing | `network_fulfillment.orphaned_holds.swept{outcome="failed"}` increasing, or WARN `orphaned holds swept` with `failed > 0` on consecutive passes, or a row of the runbook's open-holds query older than `ORPHAN_HOLD_GRACE + SWEEP_INTERVAL` | a hold nobody decided cannot be freed (order-management down, breaker open, an unexpected status); stock stays reserved ([runbook](./runbook.md#a-held-order-is-stuck-in-order-management)) |
 | A hold had leaked | any `OrphanedHoldCancelled` event, or `network_fulfillment.orphaned_holds.swept{outcome="cancelled"}` increasing | the normal cancel path failed first; worth finding out why |
 | Sweep switched off | WARN `orphaned-hold sweep disabled by ORPHAN_HOLD_SWEEP_ENABLED` at boot | nothing frees a hold that `RejectOverdueOrders` missed |
+| Node profile not declared (live) | `network_fulfillment.node_profile.declarations{outcome=~"skipped_.*\|failed"}` on every pass, or ERROR `the network failed a node profile declaration`, or WARN `node profile declaration disabled by NETWORK_PROFILE_INTERVAL=0` at boot | the network keeps an old (or no) handling time and cutoffs, and judges our acknowledgement deadlines by them ([runbook](./runbook.md#the-node-profile)) |
+| Inventory not fed (live) | ERROR `the network failed an inventory feed`, `refused an inventory feed` or `refused a listing as not on the node`, WARN `inventory feed disabled by NETWORK_INVENTORY_INTERVAL=0` at boot, or no `inventory fed` line while `capability_offers` change (the feed has no metric: logs and the `INVENTORY` rows of `network_submissions` are the signal) | the network keeps selling against the stock it was last told ([runbook](./runbook.md#the-inventory-feed)) |

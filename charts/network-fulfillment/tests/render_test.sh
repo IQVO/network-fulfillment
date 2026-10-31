@@ -20,7 +20,8 @@ base=(--set database.url=postgres://u@example.invalid:5432/db
   --set kafka.brokers=kafka.invalid:9092)
 everything=(--set analytics.enabled=true
   --set analytics.database.url=postgres://a@example.invalid:5432/analytics
-  --set mcp.enabled=true)
+  --set mcp.enabled=true
+  --set a2a.enabled=true)
 
 fail() {
   echo "FAIL: $*" >&2
@@ -49,6 +50,32 @@ if grep -qi 'in-memory' <<<"$all_docs"; then fail "the render mentions an in-mem
 # Every optional component renders its mandatory variable.
 mcp_doc="$(render "${everything[@]}" --show-only templates/mcp-deployment.yaml)"
 grep -A4 'name: DATABASE_URL$' <<<"$mcp_doc" | grep -q 'secretKeyRef:' || fail "mcp must render DATABASE_URL from a Secret"
+# The A2A agent (ADR 0030) is READ-ONLY like mcp: real Postgres, no Kafka, no publisher.
+a2a_doc="$(render "${everything[@]}" --show-only templates/a2a-deployment.yaml)"
+grep -A4 'name: DATABASE_URL$' <<<"$a2a_doc" | grep -q 'secretKeyRef:' || fail "a2a must render DATABASE_URL from a Secret"
+[[ "$(env_value "$a2a_doc" A2A_ADDR)" == ":8093" ]] || fail "the a2a agent must listen on :8093 (8090 is mcp, 8091 the projector admin, 8092 the reports API)"
+grep -q 'command: \["/app/a2a"\]' <<<"$a2a_doc" || fail "the a2a Deployment must run /app/a2a"
+if grep -qE 'name: (KAFKA_BROKERS|EVENT_PUBLISHER)$' <<<"$a2a_doc"; then fail "the a2a Deployment is read-only: it must not render KAFKA_BROKERS or EVENT_PUBLISHER (no publisher, outbox or relay runs there)"; fi
+if grep -q 'REPORTS_BASE_URL' <<<"$a2a_doc"; then fail "the a2a agent has no reports client; REPORTS_BASE_URL must not be rendered"; fi
+# The Agent Card must advertise a dialable absolute URL: it defaults to the
+# release's in-cluster Service DNS (namespace-derived, so pattern-match) and
+# stays overridable.
+a2a_url="$(env_value "$a2a_doc" A2A_AGENT_URL || true)" # a missing var must reach the fail message below, not abort under set -e
+[[ "$a2a_url" =~ ^http://[a-z0-9.-]+-a2a\.[a-z0-9-]+\.svc\.cluster\.local:8093/$ ]] || fail "A2A_AGENT_URL default is not the in-cluster Service DNS: $a2a_url"
+a2a_override="$(render --set a2a.enabled=true --set a2a.agentUrl=http://gw.example/api/a2a/network-fulfillment/ --show-only templates/a2a-deployment.yaml)"
+[[ "$(env_value "$a2a_override" A2A_AGENT_URL || true)" == "http://gw.example/api/a2a/network-fulfillment/" ]] || fail "a2a.agentUrl does not override A2A_AGENT_URL"
+# A2A is off by default: no a2a resource renders unless asked for.
+if render --show-only templates/a2a-deployment.yaml 2>/dev/null | grep -q 'kind: Deployment'; then fail "the a2a Deployment rendered with default values"; fi
+# Every variable cmd/a2a's boot config names as REQUIRED is rendered, derived
+# from the Go source so a new mandatory variable fails until the chart has it.
+repo_dir="$(cd "$chart_dir/../.." && pwd)"
+a2a_sources=()
+while IFS= read -r f; do a2a_sources+=("$f"); done < <(find "$repo_dir/cmd/a2a" -name '*.go' ! -name '*_test.go')
+a2a_vars="$(grep -ho '[A-Z][A-Z0-9_]\{2,\} is required' "${a2a_sources[@]}" | sed -E 's/ is required//' | sort -u)"
+[[ -n "$a2a_vars" ]] || fail "found no mandatory variables for cmd/a2a; the scan is looking in the wrong place"
+for var in $a2a_vars; do
+  grep -q "name: $var\$" <<<"$a2a_doc" || fail "the a2a Deployment does not render $var, which cmd/a2a requires"
+done
 proj_doc="$(render "${everything[@]}" --show-only templates/projector-deployment.yaml)"
 grep -q 'name: ANALYTICS_DATABASE_URL$' <<<"$proj_doc" || fail "projector must render ANALYTICS_DATABASE_URL"
 [[ "$(env_value "$proj_doc" KAFKA_BROKERS)" == "kafka.invalid:9092" ]] || fail "projector must render KAFKA_BROKERS"
@@ -69,6 +96,7 @@ db=(--set database.url=postgres://u@example.invalid:5432/db)
 kafka=(--set kafka.brokers=kafka.invalid:9092)
 expect_refusal "no database source" "database.url or database.existingSecret" "${kafka[@]}"
 expect_refusal "mcp without a database" "database.url or database.existingSecret" "${kafka[@]}" --set mcp.enabled=true
+expect_refusal "a2a without a database" "database.url or database.existingSecret" "${kafka[@]}" --set a2a.enabled=true
 expect_refusal "no kafka brokers" "kafka.brokers is required" "${db[@]}"
 expect_refusal "empty kafka.brokers" "kafka.brokers is required" "${db[@]}" --set kafka.brokers=
 expect_refusal "kafka.enabled=false" "kafka.enabled=false is not supported" "${base[@]}" --set kafka.enabled=false
@@ -81,9 +109,59 @@ expect_refusal "EVENT_PUBLISHER=log in mcp.extraEnv" "mcp.extraEnv" "${base[@]}"
   --set 'mcp.extraEnv[0].name=EVENT_PUBLISHER' --set 'mcp.extraEnv[0].value=log'
 expect_refusal "CAPABILITY_OFFER_ENABLED=false in mcp.extraEnv" "CAPABILITY_OFFER_ENABLED" "${base[@]}" \
   --set 'mcp.extraEnv[0].name=CAPABILITY_OFFER_ENABLED' --set 'mcp.extraEnv[0].value=false'
+expect_refusal "EVENT_PUBLISHER=log in a2a.extraEnv" "a2a.extraEnv" "${base[@]}" \
+  --set 'a2a.extraEnv[0].name=EVENT_PUBLISHER' --set 'a2a.extraEnv[0].value=log'
+expect_refusal "CAPABILITY_OFFER_ENABLED=false in a2a.extraEnv" "a2a.extraEnv" "${base[@]}" \
+  --set 'a2a.extraEnv[0].name=CAPABILITY_OFFER_ENABLED' --set 'a2a.extraEnv[0].value=false'
 expect_refusal "grace period under 20" "terminationGracePeriodSeconds" "${base[@]}" --set terminationGracePeriodSeconds=10
 expect_refusal "analytics without a DSN source" "analytics.database.url or analytics.database.existingSecret" \
   "${base[@]}" --set analytics.enabled=true
+
+# --- NETWORK_MODE=live (ADR 0026) ------------------------------------------
+# Live takes a base URL and a vendor id and no credential; the chart refuses what
+# the binary refuses at boot, and nothing else (tests/test_env_parity.py owns the
+# exact variable list, tests/test_credential_wiring.py the Secret wiring).
+live=(--set config.networkMode=live
+  --set config.networkBaseUrl=https://vendor.invalid
+  --set config.networkVendorId=V-1
+  --set config.inboundReceivingUrl=http://inbound-receiving.invalid
+  --set config.productMasterUrl=http://product-master.invalid
+  --set config.inboundReceiptConsumerGroup=network-fulfillment-inbound-receipts)
+expect_refusal "live without a base URL and a vendor id" "config.networkBaseUrl" "${base[@]}" --set config.networkMode=live
+expect_refusal "live without a vendor id" "config.networkVendorId" "${base[@]}" \
+  --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid
+expect_refusal "live without a database" "database.url or database.existingSecret" "${kafka[@]}" "${live[@]}"
+expect_refusal "an unsupported network mode" "config.networkMode" "${base[@]}" --set config.networkMode=sandbox
+
+live_cm="$(render "${live[@]}" --show-only templates/configmap.yaml)" || fail "live mode with its values must render"
+grep -q 'NETWORK_BASE_URL: "https://vendor.invalid"' <<<"$live_cm" || fail "live: NETWORK_BASE_URL is not rendered"
+grep -q 'NETWORK_VENDOR_ID: "V-1"' <<<"$live_cm" || fail "live: NETWORK_VENDOR_ID is not rendered"
+grep -q 'NETWORK_PROFILE_INTERVAL: "5m"' <<<"$live_cm" || fail "live: NETWORK_PROFILE_INTERVAL must default to 5m (ADR 0027)"
+# "0" switches the declaration off, so it must reach the process rather than be dropped as empty.
+zero_cm="$(render "${live[@]}" --set config.networkProfileInterval=0 --show-only templates/configmap.yaml)" || fail "live: networkProfileInterval=0 must render"
+grep -q 'NETWORK_PROFILE_INTERVAL: "0"' <<<"$zero_cm" || fail "live: NETWORK_PROFILE_INTERVAL=0 was not rendered"
+grep -q 'NETWORK_INVENTORY_INTERVAL: "5m"' <<<"$live_cm" || fail "live: NETWORK_INVENTORY_INTERVAL must default to 5m (ADR 0027 part 2)"
+# Same for the inventory feed: "0" switches it off and has to reach the process, and it is its own knob.
+inv_cm="$(render "${live[@]}" --set config.networkInventoryInterval=0 --show-only templates/configmap.yaml)" || fail "live: networkInventoryInterval=0 must render"
+grep -q 'NETWORK_INVENTORY_INTERVAL: "0"' <<<"$inv_cm" || fail "live: NETWORK_INVENTORY_INTERVAL=0 was not rendered"
+grep -q 'NETWORK_PROFILE_INTERVAL: "5m"' <<<"$inv_cm" || fail "live: switching the inventory feed off must not touch NETWORK_PROFILE_INTERVAL"
+grep -q 'INBOUND_RECEIVING_URL: "http://inbound-receiving.invalid"' <<<"$live_cm" || fail "live: INBOUND_RECEIVING_URL is not rendered"
+grep -q 'PRODUCT_MASTER_URL: "http://product-master.invalid"' <<<"$live_cm" || fail "live: PRODUCT_MASTER_URL is not rendered"
+grep -q 'INBOUND_INTAKE_INTERVAL: "30s"' <<<"$live_cm" || fail "live: INBOUND_INTAKE_INTERVAL is not rendered"
+grep -q 'INBOUND_RECEIPT_CONSUMER_GROUP: "network-fulfillment-inbound-receipts"' <<<"$live_cm" || fail "live: INBOUND_RECEIPT_CONSUMER_GROUP is not rendered"
+expect_refusal "live without the receipt consumer group" "config.inboundReceiptConsumerGroup" "${base[@]}" \
+  --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid --set config.networkVendorId=V-1 \
+  --set config.inboundReceivingUrl=http://inbound-receiving.invalid --set config.productMasterUrl=http://product-master.invalid
+expect_refusal "live without the inbound loop's sibling URLs" "config.inboundReceivingUrl" "${base[@]}" \
+  --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid --set config.networkVendorId=V-1
+expect_refusal "live without product-master" "config.productMasterUrl" "${base[@]}" \
+  --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid --set config.networkVendorId=V-1 \
+  --set config.inboundReceivingUrl=http://inbound-receiving.invalid
+live_api="$(render "${live[@]}" --show-only templates/deployment.yaml)"
+[[ "$(env_value "$live_api" NETWORK_MODE)" == "live" ]] || fail "live: NETWORK_MODE must reach the api Deployment"
+if grep -qE '(^  |- name: )NETWORK_(CLIENT|REFRESH)' <<<"$(render "${live[@]}")"; then fail "live mode renders a credential variable that no code reads"; fi
+stub_cm="$(render --show-only templates/configmap.yaml)"
+if grep -qE '^  (NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE|PROFILE_INTERVAL|INVENTORY_INTERVAL)|INBOUND_RECEIVING_URL|PRODUCT_MASTER_URL|INBOUND_INTAKE_INTERVAL|INBOUND_RECEIPT_CONSUMER_GROUP):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
 
 # Tolerated: a legacy kafka.enabled: true, and the explicit real values.
 render --set kafka.enabled=true >/dev/null || fail "kafka.enabled=true (legacy) must still render"
@@ -108,10 +186,13 @@ dups="$(grep -E '^ {12}- name: ' <<<"$infra_api" | sort | uniq -d)"
 [[ -z "$dups" ]] || fail "infra values: duplicate env entries in the api Deployment: $dups"
 infra_mcp="$(helm template "$release" "$chart_dir" "${infra[@]}" --show-only templates/mcp-deployment.yaml)"
 grep -A4 'name: DATABASE_URL$' <<<"$infra_mcp" | grep -q 'network-fulfillment-db' || fail "infra values: mcp DATABASE_URL"
+infra_a2a="$(helm template "$release" "$chart_dir" "${infra[@]}" --show-only templates/a2a-deployment.yaml)" || fail "infra values: a2a"
+grep -A4 'name: DATABASE_URL$' <<<"$infra_a2a" | grep -q 'network-fulfillment-db' || fail "infra values: a2a DATABASE_URL"
+helm template "$release" "$chart_dir" "${infra[@]}" --show-only templates/a2a-route.yaml | grep -q "replacePrefixMatch: /$" || fail "infra values: the a2a route must rewrite to /"
 infra_proj="$(helm template "$release" "$chart_dir" "${infra[@]}" --show-only templates/projector-deployment.yaml)"
 grep -A4 'name: ANALYTICS_DATABASE_URL$' <<<"$infra_proj" | grep -q 'network-fulfillment-analytics-db' || fail "infra values: projector ANALYTICS_DATABASE_URL"
 [[ "$(env_value "$infra_proj" KAFKA_BROKERS)" == "kafka.warehouse-systems.svc.cluster.local:9092" ]] || fail "infra values: projector KAFKA_BROKERS"
-for component in api mcp analytics-projector analytics-reports frontend; do
+for component in api mcp a2a analytics-projector analytics-reports frontend; do
   grep -q "app.kubernetes.io/component: $component" <<<"$infra_all" || fail "infra values: component $component not rendered"
 done
 

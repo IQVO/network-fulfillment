@@ -1,0 +1,97 @@
+package retailnetwork
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/claudioed/network-fulfillment/internal/application/contract"
+	"github.com/claudioed/network-fulfillment/internal/domain/shared"
+)
+
+func TestParseMode_FailsClosedToStub(t *testing.T) {
+	cases := map[string]Mode{
+		"stub":       ModeStub,
+		"sandbox":    ModeStub, // retired by ADR 0009 §4; falls back to stub like any other typo
+		"live":       ModeLive,
+		"LIVE":       ModeLive,
+		"  live  ":   ModeLive,
+		"":           ModeStub,
+		"lives":      ModeStub,
+		"production": ModeStub,
+		"true":       ModeStub,
+	}
+	for in, want := range cases {
+		t.Run(in, func(t *testing.T) {
+			// Failing CLOSED matters more than failing loudly: a typo in
+			// a deployment manifest must never be the reason this
+			// service starts submitting real acknowledgements to a real
+			// retailer.
+			if got := ParseMode(in); got != want {
+				t.Fatalf("ParseMode(%q) = %v, want %v", in, got, want)
+			}
+		})
+	}
+}
+
+func TestStubGateway_PollDemandRePresentsUnacknowledgedUnits(t *testing.T) {
+	g := NewStubGateway(nil)
+	g.Seed(contract.InboundDemand{NetworkRef: "po-1"})
+
+	first, err := g.PollDemand(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("PollDemand: %v", err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("first poll = %d demands, want 1", len(first))
+	}
+
+	// A real network's cursor only advances once WE have acknowledged
+	// an order (poller.go's own contract: a failed Execute must be
+	// re-fetched on the next pass, not lost). Nothing has been
+	// acknowledged yet, so the same unit must still be there.
+	second, err := g.PollDemand(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("PollDemand: %v", err)
+	}
+	if len(second) != 1 {
+		t.Fatalf("second poll (before ack) = %d demands, want 1", len(second))
+	}
+
+	if err := g.SubmitAcknowledgement(context.Background(), "po-1", contract.Acknowledgement{Accepted: true}); err != nil {
+		t.Fatalf("SubmitAcknowledgement: %v", err)
+	}
+
+	// Acknowledging the order is what retires it: the next poll must
+	// not hand it back again.
+	third, err := g.PollDemand(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("PollDemand: %v", err)
+	}
+	if len(third) != 0 {
+		t.Fatalf("third poll (after ack) = %d demands, want 0", len(third))
+	}
+}
+
+func TestStubGateway_RecordsAcknowledgements(t *testing.T) {
+	g := NewStubGateway(nil)
+
+	if _, submitted := g.Acknowledgement("po-1"); submitted {
+		t.Fatal("nothing submitted yet")
+	}
+	if err := g.SubmitAcknowledgement(context.Background(), "po-1", contract.Acknowledgement{Accepted: true}); err != nil {
+		t.Fatalf("SubmitAcknowledgement: %v", err)
+	}
+	accepted, submitted := g.Acknowledgement("po-1")
+	if !submitted || !accepted {
+		t.Fatalf("submitted=%v accepted=%v, want true/true", submitted, accepted)
+	}
+
+	if err := g.SubmitAcknowledgement(context.Background(), "po-2", contract.Acknowledgement{Reason: shared.RejectionReasonInfeasibleDeadline}); err != nil {
+		t.Fatalf("SubmitAcknowledgement: %v", err)
+	}
+	accepted, submitted = g.Acknowledgement("po-2")
+	if !submitted || accepted {
+		t.Fatalf("submitted=%v accepted=%v, want true/false", submitted, accepted)
+	}
+}

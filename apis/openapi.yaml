@@ -4,8 +4,7 @@ info:
   version: "1.0.0"
   description: >
     The Anti-Corruption Layer between this platform and an external retail
-    fulfillment network (Amazon's Selling Partner API, Vendor Direct
-    Fulfillment). It owns **NetworkOrder**: demand that arrived from
+    fulfillment network (a vendor direct-fulfillment program). It owns **NetworkOrder**: demand that arrived from
     outside carrying a deadline we did not choose, and the answer we owe
     the network by a deadline the network set.
 
@@ -495,7 +494,8 @@ components:
             Which rule produced `advertisedQuantity`. `PHYSICAL` means
             physical stock on hand was the binding constraint (or
             throughput was unknown). `THROUGHPUT_CONSTRAINED` means the
-            eligible paths' remaining capacity before the next cutoff was.
+            eligible paths' remaining capacity before the next cutoff some
+            path can still make (ADR 0031) was.
           enum: [PHYSICAL, THROUGHPUT_CONSTRAINED]
         computedAt:
           type: string

@@ -11,7 +11,7 @@ import (
 
 	inboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/inbound/kafka"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
-	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/network"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
@@ -119,7 +119,7 @@ var errNetworkRefused = errors.New("the network refused the shipment confirmatio
 // adapter) and records what this context told the network, so scenarios can
 // assert on the outbound leg without reaching into adapter internals.
 type recordingGateway struct {
-	*network.StubGateway
+	*retailnetwork.StubGateway
 
 	mu               sync.Mutex
 	acks             map[shared.NetworkRef][]bool
@@ -130,7 +130,7 @@ type recordingGateway struct {
 	unsettled        map[shared.NetworkRef]bool
 }
 
-func newRecordingGateway(stub *network.StubGateway) *recordingGateway {
+func newRecordingGateway(stub *retailnetwork.StubGateway) *recordingGateway {
 	return &recordingGateway{
 		StubGateway:      stub,
 		acks:             map[shared.NetworkRef][]bool{},
@@ -141,14 +141,14 @@ func newRecordingGateway(stub *network.StubGateway) *recordingGateway {
 	}
 }
 
-func (g *recordingGateway) SubmitAcknowledgement(ctx context.Context, ref shared.NetworkRef, accepted bool) error {
+func (g *recordingGateway) SubmitAcknowledgement(ctx context.Context, ref shared.NetworkRef, answer contract.Acknowledgement) error {
 	g.mu.Lock()
-	g.acks[ref] = append(g.acks[ref], accepted)
+	g.acks[ref] = append(g.acks[ref], answer.Accepted)
 	g.mu.Unlock()
-	return g.StubGateway.SubmitAcknowledgement(ctx, ref, accepted)
+	return g.StubGateway.SubmitAcknowledgement(ctx, ref, answer)
 }
 
-func (g *recordingGateway) SubmitShipmentConfirmation(ctx context.Context, ref shared.NetworkRef) error {
+func (g *recordingGateway) SubmitShipmentConfirmation(ctx context.Context, ref shared.NetworkRef, shippedAt time.Time) error {
 	g.mu.Lock()
 	g.shipmentAttempts[ref]++
 	fail := g.failShipment
@@ -159,7 +159,7 @@ func (g *recordingGateway) SubmitShipmentConfirmation(ctx context.Context, ref s
 	if fail {
 		return errNetworkRefused
 	}
-	return g.StubGateway.SubmitShipmentConfirmation(ctx, ref)
+	return g.StubGateway.SubmitShipmentConfirmation(ctx, ref, shippedAt)
 }
 
 // SubmissionStatus is the network's transaction-status record. By default the
@@ -201,18 +201,26 @@ func (i *fakeInventory) UsableQuantity(_ context.Context, sku shared.SKU) (int, 
 }
 
 // fakePathCap is process-path-management's fulfillment-capability cache: the
-// next CPT cutoff and the paths eligible for it.
+// site's CPT cutoffs (ascending instants) and the paths eligible for each. Like
+// the real cache it answers the first cutoff on or after `after`; past the last
+// cutoff the scenario declared it answers found=false.
 type fakePathCap struct {
-	scheduled bool
-	cutoffIn  time.Duration
-	paths     []contract.EligiblePath
+	cutoffs []time.Time
+	paths   []contract.EligiblePath
 }
 
 func (p *fakePathCap) NextCutoff(_ shared.SiteId, after time.Time) (contract.NextCutoff, bool) {
-	if !p.scheduled {
-		return contract.NextCutoff{}, false
+	for _, at := range p.cutoffs {
+		if !at.Before(after) {
+			return contract.NextCutoff{CutoffAt: at, Paths: p.paths}, true
+		}
 	}
-	return contract.NextCutoff{CutoffAt: after.Add(p.cutoffIn), Paths: p.paths}, true
+	return contract.NextCutoff{}, false
+}
+
+// Schedule: these scenarios never declare a node profile.
+func (p *fakePathCap) Schedule(shared.SiteId, time.Time) (contract.CutoffSchedule, bool) {
+	return contract.CutoffSchedule{}, false
 }
 
 // fakeCapacity is wes-work-planning's remaining-admission-capacity figure per

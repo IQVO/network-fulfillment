@@ -43,7 +43,7 @@ flowchart LR
     MCP -->|"GET /reports/..."| REP
 ```
 
-Source: `internal/adapters/outbound/network/gateway.go`,
+Source: `internal/adapters/outbound/retailnetwork/mode.go`,
 `internal/adapters/outbound/ordermanagement/planner.go`,
 `internal/adapters/outbound/inventoryclient/client.go`,
 `internal/adapters/outbound/processpathcache/consumer.go`,
@@ -58,7 +58,7 @@ inside the diagram for `{id}` / `{sku}`.
 
 | Peer | Direction | Protocol | Contract | Default | On failure |
 | --- | --- | --- | --- | --- | --- |
-| retail network (`retail-network` plays the role, ADR 0009) | upstream | in-process port `ports.NetworkGateway` | poll demand, submit acknowledgement, submission status, shipment confirmation | stub only | see [The network](#the-network) |
+| retail network (`retail-network` plays the role, ADR 0009) | upstream | in-process port `ports.NetworkGateway` | poll demand, submit acknowledgement (with a reason), submission status, request label, shipment confirmation | `stub` (`live` is ADR 0026, opt-in) | see [The network](#the-network) |
 | `order-management` | downstream of our call (we are its Customer) | REST, synchronous | `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` | always on | error propagates, one circuit breaker, no retry |
 | `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | always on | SKU skipped for that recompute pass |
 | `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | always on | bad message logged and skipped, no DLQ |
@@ -67,8 +67,9 @@ inside the diagram for `{id}` / `{sku}`.
 | own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | always on | retry 3 times, then `.dlq` |
 | `warehouse-console` (via `web/` remote) | downstream | REST | `GET /network-orders`, `GET /inbound-status` | on | n/a |
 | MCP clients | downstream | MCP, Streamable HTTP | 4 read-only tools | `mcp.enabled` | n/a |
+| A2A agents | downstream | A2A, JSON-RPC over HTTP | 2 read-only skills (ADR 0030) | `a2a.enabled` | n/a |
 
-REST and MCP are unauthenticated, like every context in the fleet. Through
+REST, MCP and A2A are unauthenticated, like every context in the fleet. Through
 Kong the REST API is at `/api/network-fulfillment` and the reports API at
 `/api/network-fulfillment/reports`.
 
@@ -76,26 +77,40 @@ Kong the REST API is at `/api/network-fulfillment` and the reports API at
 
 `ports.NetworkGateway` (`internal/application/ports/ports.go`) is the only
 route to the external network, and `NETWORK_MODE` picks its implementation
-(`internal/adapters/outbound/network/gateway.go`):
+(`internal/adapters/outbound/retailnetwork/mode.go`):
 
 - `stub` (default, and any unrecognised value): `StubGateway`, in process
   memory, no network call at all.
-- `live`: boot fails. With `NETWORK_BASE_URL` empty the error is
-  `NETWORK_MODE=live requires NETWORK_BASE_URL to be set`, otherwise
-  `NETWORK_MODE=live is not implemented yet`. There is no live adapter on
-  `develop`.
+- `live` ([ADR 0026](../adr/0026-live-retail-network-adapter-demand-loop.md)):
+  `LiveGateway`, the demand loop against the retail network's Vendor API at
+  `NETWORK_BASE_URL` as `NETWORK_VENDOR_ID`. It polls purchase orders, answers
+  each once (accept, or reject with a reason mapped inside the adapter),
+  reconciles by a persisted transaction id, requests labels and confirms
+  shipments. Every write carries a deterministic `Idempotency-Key`; calls are
+  retried with backoff behind one circuit breaker. The network's identifiers
+  (purchase order number, listing, node, transaction) live only in the
+  adapter's tables (migration 0006). A background use case, `DeclareNodeProfiles`
+  ([ADR 0027](../adr/0027-supply-loop-node-profile-and-inventory-feed.md) part 1),
+  derives each site's operational profile (cutoffs, handling time, throughput)
+  from the local CPT schedule, cycle-time and capacity caches and declares it with
+  `PUT /vendor/nodes/{nodeId}/profile` under a revision this service persists
+  (migration 0010) and never lowers. A second worker, `FeedInventory`
+  (ADR 0027 part 2), feeds each site's capability offers with
+  `POST /vendor/inventory` (migration 0011) under the listings of the product
+  dictionary. Without `NETWORK_BASE_URL`
+  or `NETWORK_VENDOR_ID` the boot fails, naming each missing one.
 
-What the stub does for each port method:
+What the stub does for each port method (the live behaviour is in ADR 0026):
 
 | Port method | Called by | Stub behaviour |
 | --- | --- | --- |
 | `PollDemand(since)` | poller, every `POLL_INTERVAL` | returns every seeded unit still pending; ignores `since` |
-| `SubmitAcknowledgement(ref, accepted)` | `ReceiveNetworkDemand` | records the answer and removes the unit from the pending list |
+| `SubmitAcknowledgement(ref, {accepted, reason})` | `ReceiveNetworkDemand`, `ReconcileSubmittedOrders` (resend) | records the answer and removes the unit from the pending list |
 | `SubmissionStatus(ref)` | `ReconcileSubmittedOrders` | `SUCCESS` for a ref this process submitted, `PENDING` otherwise (so after a restart every earlier submission is `PENDING`) |
-| `SubmitShipmentConfirmation(ref)` | `ConfirmNetworkOrderShipment` | records it |
-| `SubmitAvailability(update)` | nobody yet | records it |
-| `DeclareCapability(offer)` | nobody | documented no-op: the real API has no such operation |
-| `RequestLabel(ref)` | nobody yet | deterministic fake `{labelRef, trackingNumber, carrier}` |
+| `SubmitShipmentConfirmation(ref, shippedAt)` | `ConfirmNetworkOrderShipment` | records it |
+| `SubmitInventoryFeed(feed)` | `FeedInventory`, live mode only (the stub never starts the worker) | logs it and sends nothing; replaces the old `SubmitAvailability` |
+| `DeclareNodeProfile(profile)` | `DeclareNodeProfiles`, live mode only (the stub never starts the worker) | records the last profile per site and sends nothing; replaces the old `DeclareCapability`, which the real API never had |
+| `RequestLabel(ref, packageCount)` | `ConfirmNetworkOrderShipment` (one package), before it records `CONFIRMED` | deterministic fake `{labelRef, trackingNumber, carrier}` per package |
 
 Demand gets into the stub only from `NETWORK_SEED_FILE` (ADR 0012); the
 chart renders it from `stubDemand.demands`. No ship-to PII exists anywhere in
@@ -185,8 +200,11 @@ at boot, always on.
 
 - Any other type is ignored. A message that is not a CloudEvent is logged
   (`skipping non-CloudEvents message`) and skipped. No DLQ.
-- Simplification in the code: a cutoff's `local_time` is treated as UTC; the
-  schedule `timezone` is not applied.
+- A cutoff's `local_time` and `days_of_week` are read in the schedule's IANA
+  `timezone` (days on the local calendar, DST-correct) and resolved to UTC
+  instants (ADR 0031 §2). An unknown or missing zone is read as UTC with one
+  WARN (`the CPT schedule's timezone is unknown or missing`) per schedule
+  received; `cmd/netfulfil` embeds the zone database.
 - Boot waits up to 60 s for the cache to catch up with the topic's end
   offset (read from the first broker in `KAFKA_BROKERS`), inside one shared
   120 s budget with the capacity cache. A timeout exits the process.
@@ -294,6 +312,16 @@ Streamable HTTP: `get_network_order`, `list_network_orders`,
 `REPORTS_BASE_URL` is set). There is no write tool. Inputs, outputs and
 annotations: [mcp/tools.md](../mcp/tools.md).
 
+## A2A skills
+
+`cmd/a2a` serves an Agent2Agent agent (JSON-RPC over HTTP at `/` and `/a2a`, Agent Card
+at `/.well-known/agent-card.json`) with two read-only, goal-shaped skills over the same
+read ports as REST and MCP: `network_demand_status` (one order by `networkRef`, or the
+orders in a `state`) and `advertised_availability` (the stored capability offers). A2A
+carries delegation only: it is not a data-sync channel, and there is no write skill
+because the MCP charter is read-only (shipment confirmation stays REST only). See
+[ADR 0030](../adr/0030-a2a-inbound-adapter.md).
+
 ## Edges that do not exist
 
 - **No live network.** Only the stub gateway exists; `NETWORK_MODE=live`
@@ -301,6 +329,6 @@ annotations: [mcp/tools.md](../mcp/tools.md).
 - **No `PackageManifested` consumer** from `fulfillment-execution`. Shipment
   confirmation is an explicit REST call (ADR 0014) because there is no
   persisted `WorkUnitId -> NetworkRef` mapping.
-- **Capability offers are not sent to the network.** `SubmitAvailability`
-  exists on the port, but no use case calls it.
+- **Capability offers reach the network only in live mode.** `FeedInventory` feeds them
+  (ADR 0027 part 2); in stub mode no worker runs and nothing is sent.
 - **No call to `product-master`** or any other context not listed above.
