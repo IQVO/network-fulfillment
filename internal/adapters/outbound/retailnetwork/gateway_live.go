@@ -591,7 +591,7 @@ func (g *LiveGateway) recordConfirmationOutcome(ctx context.Context, ref shared.
 	}
 	status, err := g.reconcile(ctx, row)
 	if err != nil {
-		g.logger.Warn("retail-network: could not read the outcome of a shipment confirmation", "networkRef", ref, "err", err)
+		g.logger.Warn("retail-network: could not read the outcome of a shipment confirmation", "networkRef", sanitizeLog(string(ref)), "err", err)
 		return
 	}
 	if status != contract.SubmissionFailure {
@@ -599,5 +599,5 @@ func (g *LiveGateway) recordConfirmationOutcome(ctx context.Context, ref shared.
 	}
 	failed, _, _ := g.store.Submission(ctx, row.Kind, row.Subject)
 	g.logger.Error("retail-network: the network failed a shipment confirmation; the order stays accepted there until an operator acts",
-		"networkRef", ref, "errors", failed.Errors)
+		"networkRef", sanitizeLog(string(ref)), "errors", failed.Errors)
 }
