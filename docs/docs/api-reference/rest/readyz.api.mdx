@@ -1,0 +1,63 @@
+---
+id: readyz
+title: "Readiness probe"
+description: "Readiness, separate from liveness (`/healthz`, above): reports `ready` until graceful shutdown begins, at which point it flips to `not_ready` as the FIRST step of the shutdown sequence (ADR 0004) -- before the HTTP server stops accepting connections -- so a Kubernetes `readinessProbe` pointed here gets a window to stop routing new traffic before the drain that follows. `/healthz` stays a pure liveness signal and is never flipped by this."
+sidebar_label: "Readiness probe"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/network-fulfillment-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Readiness probe"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/readyz"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Readiness, separate from liveness (`/healthz`, above): reports `ready` until graceful shutdown begins, at which point it flips to `not_ready` as the FIRST step of the shutdown sequence (ADR 0004) -- before the HTTP server stops accepting connections -- so a Kubernetes `readinessProbe` pointed here gets a window to stop routing new traffic before the drain that follows. `/healthz` stays a pure liveness signal and is never flipped by this.
+
+Readiness also reflects the two runtime dependencies (ADR 0025): Postgres (a ping) and Kafka (broker metadata reachable). Topics are never checked. While either is unreachable the answer is a 503 `dependency-unavailable` problem naming the failing dependency, and `/healthz` stays 200.
+
+
+<ParamsDetails>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./readyz.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./readyz.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

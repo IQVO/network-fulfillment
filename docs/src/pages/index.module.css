@@ -1,0 +1,76 @@
+.heroBanner {
+  padding: 5rem 0 4rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(160deg, #4338ca 0%, #3730a3 55%, #312e81 100%);
+  color: #eef2ff;
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.75rem;
+  font-weight: 600;
+  opacity: 0.8;
+  margin-bottom: 0.75rem;
+}
+
+.heroTitle {
+  font-size: 3rem;
+  margin-bottom: 0.5rem;
+}
+
+.heroSubtitle {
+  font-size: 1.25rem;
+  font-weight: 500;
+  margin-bottom: 1rem;
+  opacity: 0.95;
+}
+
+.heroLead {
+  max-width: 46rem;
+  margin: 0 auto 2rem;
+  font-size: 1rem;
+  line-height: 1.6;
+  opacity: 0.85;
+}
+
+.buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.invariant {
+  padding: 0 0 4rem;
+  text-align: center;
+}
+
+.invariantQuote {
+  border-left: none;
+  border-top: 3px solid var(--ifm-color-primary);
+  max-width: 44rem;
+  margin: 0 auto 1rem;
+  padding: 1.75rem 1rem 0;
+  font-size: 1.35rem;
+  line-height: 1.5;
+  background: none;
+}
+
+.invariantCaption {
+  font-size: 0.9rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+@media screen and (max-width: 996px) {
+  .heroBanner {
+    padding: 3rem 1rem;
+  }
+
+  .heroTitle {
+    font-size: 2.1rem;
+  }
+}

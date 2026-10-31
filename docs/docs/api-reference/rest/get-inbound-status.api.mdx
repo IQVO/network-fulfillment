@@ -1,0 +1,65 @@
+---
+id: get-inbound-status
+title: "Is the inbound polling leg alive?"
+description: "Counters for the poller plus the size of the unanswered working set. This exists because a stalled poller is SILENT: no orders, no errors, a healthy liveness probe, and an acknowledgement window closing regardless."
+sidebar_label: "Is the inbound polling leg alive?"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/network-fulfillment-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Is the inbound polling leg alive?"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/inbound-status"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Counters for the poller plus the size of the unanswered working set. This exists because a stalled poller is SILENT: no orders, no errors, a healthy liveness probe, and an acknowledgement window closing regardless.
+
+`polls` climbing with `since` advancing means the leg is working and the network simply has nothing for us. `polls` climbing while `since` stays put means every pass is failing. `since` absent after real uptime means no pass has ever succeeded.
+
+`overdue` above zero is the fact worth alerting on: demand whose 24-hour window has already closed unanswered.
+
+
+<ParamsDetails>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./get-inbound-status.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./get-inbound-status.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

@@ -1,0 +1,71 @@
+{
+  "name": "network-fulfillment-docs",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "docusaurus": "docusaurus",
+    "start": "docusaurus start",
+    "build": "docusaurus build",
+    "swizzle": "docusaurus swizzle",
+    "deploy": "docusaurus deploy",
+    "clear": "docusaurus clear",
+    "serve": "docusaurus serve",
+    "write-translations": "docusaurus write-translations",
+    "write-heading-ids": "docusaurus write-heading-ids",
+    "typecheck": "tsc",
+    "gen-api-docs": "docusaurus gen-api-docs network-fulfillment",
+    "clean-api-docs": "docusaurus clean-api-docs network-fulfillment"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/faster": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "@docusaurus/theme-mermaid": "^3.10.2",
+    "@mdx-js/react": "^3.0.0",
+    "clsx": "^2.0.0",
+    "docusaurus-plugin-openapi-docs": "^5.2.0",
+    "docusaurus-plugin-sass": "^0.2.7",
+    "docusaurus-theme-openapi-docs": "^5.2.0",
+    "prism-react-renderer": "^2.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sass": "^1.105.0"
+  },
+  "devDependencies": {
+    "@docusaurus/module-type-aliases": "3.10.2",
+    "@docusaurus/tsconfig": "3.10.2",
+    "@docusaurus/types": "3.10.2",
+    "@types/react": "^19.0.0",
+    "typescript": "~7.0.2"
+  },
+  "browserslist": {
+    "production": [
+      ">0.5%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 3 chrome version",
+      "last 3 firefox version",
+      "last 5 safari version"
+    ]
+  },
+  "engines": {
+    "node": ">=20.0"
+  },
+  "description": "Documentation site for the Network Fulfillment application (warehouse-systems).",
+  "overrides": {
+    "openapi-to-postmanv2": {
+      "js-yaml": "^4.3.1"
+    },
+    "yaml": "^1.10.3",
+    "uuid": "^11.1.1",
+    "serialize-javascript": "^7.1.0",
+    "webpack-dev-server": "^5.2.6",
+    "sockjs": "^0.3.24",
+    "qs": "^6.16.0",
+    "image-size": "2.0.3",
+    "lodash-es": "^4.18.0",
+    "http-cache-semantics": "^4.3.0"
+  }
+}

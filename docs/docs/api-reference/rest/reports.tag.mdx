@@ -1,0 +1,21 @@
+---
+id: reports
+title: "reports"
+description: "reports"
+custom_edit_url: null
+---
+
+
+
+The "Network Order Acknowledgement & Translation" analytics data product: read-only, derived entirely from this context's own domain events, and served by a SEPARATE deployable (`netfulfil-reports`) from the OLTP API documented above. It never shares a process, a database, or a request path with `/healthz`, `/network-orders`, or `/inbound-status`.
+
+
+
+
+```mdx-code-block
+import DocCardList from '@theme/DocCardList';
+import {useCurrentSidebarCategory} from '@docusaurus/theme-common';
+
+<DocCardList items={useCurrentSidebarCategory().items}/>
+```
+      

@@ -1,0 +1,61 @@
+---
+id: healthz
+title: "Liveness probe"
+description: "Liveness only. It deliberately does NOT consult the database or the poller: a probe that fails when a dependency is slow turns one degraded dependency into a restart loop, and this service's whole job is to keep a 24-hour clock running."
+sidebar_label: "Liveness probe"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/network-fulfillment-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Liveness probe"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/healthz"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Liveness only. It deliberately does NOT consult the database or the poller: a probe that fails when a dependency is slow turns one degraded dependency into a restart loop, and this service's whole job is to keep a 24-hour clock running.
+
+
+<ParamsDetails>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./healthz.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./healthz.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

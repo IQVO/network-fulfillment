@@ -1,0 +1,66 @@
+---
+id: network-fulfillment-api
+title: "Network Fulfillment API"
+description: "The Anti-Corruption Layer between this platform and an external retail fulfillment network (a vendor direct-fulfillment program). It owns **NetworkOrder**: demand that arrived from outside carrying a deadline we did not choose, and the answer we owe the network by a deadline the network set."
+sidebar_label: Introduction
+sidebar_position: 0
+hide_title: true
+custom_edit_url: null
+---
+
+import ApiLogo from "@theme/ApiLogo";
+import Heading from "@theme/Heading";
+import SchemaTabs from "@theme/SchemaTabs";
+import TabItem from "@theme/TabItem";
+import Export from "@theme/ApiExplorer/Export";
+
+<span
+  className={"theme-doc-version-badge badge badge--secondary"}
+  children={"Version: 1.0.0"}
+>
+</span>
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Network Fulfillment API"}
+>
+</Heading>
+
+
+
+The Anti-Corruption Layer between this platform and an external retail fulfillment network (a vendor direct-fulfillment program). It owns **NetworkOrder**: demand that arrived from outside carrying a deadline we did not choose, and the answer we owe the network by a deadline the network set.
+
+**This surface is READ-ONLY apart from ONE explicit write endpoint, and that is a design decision rather than an omission.** Demand enters this context by POLLING the network and by nothing else: the network offers us no push, so an HTTP intake endpoint would be a second, fictional inbound path with no counterpart in production. The only thing such an endpoint could honestly be used for is injecting test demand, and the stub gateway's file-seeded mode (`NETWORK_SEED_FILE`) already does that without pretending to be a protocol. The one write is `POST /network-orders/{networkRef}/shipment-confirmation` (ADR 0014): a fact this context is TOLD (an order shipped), not demand it decides on.
+
+So what is exposed here is OBSERVATION, answering the two questions an operator actually has during an incident: *what did we tell the network about purchase order X*, and *is the inbound leg alive*. The second matters because the poller's failure mode is silence — a poller that stops fetching produces no orders, no errors and a perfectly healthy `/healthz`, while the 24-hour acknowledgement clock keeps running against wall time. A poller outage is an SLA breach, not a delayed batch.
+
+**Customer PII stops in this context.** Ship-to name, address and phone live here and nowhere else in this platform, and no response in this document carries them. The network's own *references* (its purchase-order number, its line references, its product identifiers) ARE exposed, because the questions above are unanswerable without them — those identify the order, not the person.
+
+Feasibility is never computed here. Whether a deadline can be met is asked of order-management's promise policy, which owns that arithmetic for the whole platform; this context asks, records the verdict, and answers the network accordingly.
+
+
+<div
+  style={{"display":"flex","flexDirection":"column","marginBottom":"var(--ifm-paragraph-margin-bottom)"}}
+>
+  <h3
+    style={{"marginBottom":"0.25rem"}}
+  >
+    Contact
+  </h3><span>
+    Network Fulfillment (Supporting Bounded Context, ACL to an external retail network): 
+  </span>
+</div><div
+  style={{"marginBottom":"var(--ifm-paragraph-margin-bottom)"}}
+>
+  <h3
+    style={{"marginBottom":"0.25rem"}}
+  >
+    License
+  </h3><a
+    href={"https://opensource.org/licenses/MIT"}
+  >
+    MIT
+  </a>
+</div>
+      
