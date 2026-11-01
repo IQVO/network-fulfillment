@@ -45,3 +45,4 @@ immutable; a changed decision gets a new ADR that supersedes the old one. The
 | [0029](/docs/adr/0029-fulfillment-site-on-the-held-order) | The fulfilling site rides on the held order | **Accepted** (2026-10-25). Builds on [ADR 0026](./0026-live-retail-network-adapter-demand-loop.md) |
 | [0030](/docs/adr/0030-a2a-inbound-adapter) | A2A inbound adapter (a read-only third driving adapter) | **Accepted** (2026-10-29). Mirrors the reference rollout in |
 | [0031](/docs/adr/0031-advertise-against-the-next-feasible-cutoff) | Advertise against the next feasible cutoff, read in the site's timezone | **Accepted** (2026-10-30). Two root causes of the same live symptom, decided |
+| [0032](/docs/adr/0032-adopt-the-fleet-rest-api-guideline) | Adopt the fleet REST API guideline | **Accepted** (2026-11-01). Keyed POST, paged lists, order-management releases |

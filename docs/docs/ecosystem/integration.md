@@ -59,7 +59,7 @@ inside the diagram for `{id}` / `{sku}`.
 | Peer | Direction | Protocol | Contract | Default | On failure |
 | --- | --- | --- | --- | --- | --- |
 | retail network (`retail-network` plays the role, ADR 0009) | upstream | in-process port `ports.NetworkGateway` | poll demand, submit acknowledgement (with a reason), submission status, request label, shipment confirmation | `stub` (`live` is ADR 0026, opt-in) | see [The network](#the-network) |
-| `order-management` | downstream of our call (we are its Customer) | REST, synchronous | `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` | always on | error propagates, one circuit breaker, no retry |
+| `order-management` | downstream of our call (we are its Customer) | REST, synchronous | `POST /orders`, `POST /orders/{id}/releases`, `DELETE /orders/{id}` | always on | error propagates, one circuit breaker, no retry |
 | `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | always on | SKU skipped for that recompute pass |
 | `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | always on | bad message logged and skipped, no DLQ |
 | `wes-work-planning` | upstream | Kafka, CloudEvents | `PathCapacityChanged` on `warehouse.work-planning.events` | always on | bad message logged and skipped, no DLQ |
@@ -132,7 +132,7 @@ Client: `internal/adapters/outbound/ordermanagement/planner.go`, wrapped by
 | --- | --- | --- |
 | `POST /orders` | `ReceiveNetworkDemand`, after the order is saved `NEW` | `{"lines":[{"sku","quantity"}],"releaseOnAllocation":false,"allowPartialShipment":false,"requiredShipBy":"<RFC 3339>"}` with header `Idempotency-Key: netful-raise-<networkRef>`. A response with `promiseDate` means feasible; `promiseDate: null` means the deadline cannot be met (a verdict, not an error). The response `id` is recorded on the order as its hold (`local_order_id`) as soon as the call returns, before the verdict is acted on (ADR 0024); REST and MCP show it as `localOrderId` from `SUBMITTED` on. |
 | `DELETE /orders/{id}` | rejecting an infeasible order, `SUBMISSION_FAILED`, `RejectOverdueOrders`, and `SweepOrphanedHolds` for a hold nobody decided | cancels the hold and frees the reservations. order-management's cancel is idempotent (a second cancel of a cancelled order is a 204). The sweep reads the answer as: 2xx or `404` = the hold is gone (outcome `CANCELLED`, event `OrphanedHoldCancelled`), `409` or `422` = already released (outcome `ALREADY_RELEASED`, no event, not retried), anything else = failure, retried on the next pass. |
-| `POST /orders/{id}/release` | `ReconcileSubmittedOrders`, when the network confirms | puts the held order on the floor |
+| `POST /orders/{id}/releases` | `ReconcileSubmittedOrders`, when the network confirms | puts the held order on the floor |
 
 Feasibility is asked, never computed here (ADR 0001 §7). The contract is the
 Supplier half in order-management's ADR 0020.

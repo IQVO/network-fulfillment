@@ -133,7 +133,7 @@ answered order.
 - **Per order**: `NetworkGateway.SubmissionStatus(ref)`:
   - `SUCCESS`: `ConfirmAcknowledgement` (to `ACKNOWLEDGED`), save and publish
     `NetworkOrderAcknowledged` (v2) in one scope, then
-    `POST /orders/{localOrderId}/release`.
+    `POST /orders/{localOrderId}/releases`.
   - `FAILURE`: `freeHold` first (`DELETE /orders/{localOrderId}`, then the hold
     outcome `CANCELLED` is recorded), then `Reject`, save and publish
     `NetworkOrderRejected` (`SUBMISSION_FAILED`). The outcome is saved in the
