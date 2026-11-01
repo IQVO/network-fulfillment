@@ -35,7 +35,11 @@ function HomepageHeader() {
           {siteConfig.title}
         </Heading>
         <p className={styles.heroSubtitle}>{siteConfig.tagline}</p>
-        <p className={styles.heroLead}>TODO-LEAD</p>
+        <p className={styles.heroLead}>
+          The anti-corruption layer between an external retail fulfillment network and the warehouse
+          fleet. Network orders become SKUs, quantities, a site and a deadline; each is acknowledged
+          or rejected in full within 24 hours, and the network's vocabulary stops here.
+        </p>
         <div className={styles.buttons}>
           <Link className="button button--primary button--lg" to="/docs/overview/introduction">
             Read the docs
