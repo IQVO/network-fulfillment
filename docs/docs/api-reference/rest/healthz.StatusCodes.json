@@ -1,0 +1,1 @@
+{"responses":{"200":{"description":"The process is alive.","content":{"application/json":{"schema":{"type":"object","required":["status"],"properties":{"status":{"type":"string","example":"ok"}}}}}}}}

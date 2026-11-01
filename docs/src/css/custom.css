@@ -1,0 +1,50 @@
+/**
+ * Network Fulfillment documentation theme.
+ * Indigo primary — same layout family as the other warehouse-systems sites.
+ */
+
+:root {
+  --ifm-color-primary: #4338ca;
+  --ifm-color-primary-dark: #3c32b6;
+  --ifm-color-primary-darker: #392fac;
+  --ifm-color-primary-darkest: #2f278e;
+  --ifm-color-primary-light: #5148d2;
+  --ifm-color-primary-lighter: #5850d4;
+  --ifm-color-primary-lightest: #6f68da;
+  --ifm-code-font-size: 92%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.08);
+  --ifm-heading-font-weight: 650;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #a5b4fc;
+  --ifm-color-primary-dark: #8a9cfb;
+  --ifm-color-primary-darker: #7c90fb;
+  --ifm-color-primary-darkest: #526cf9;
+  --ifm-color-primary-light: #c0ccfd;
+  --ifm-color-primary-lighter: #ced8fd;
+  --ifm-color-primary-lightest: #f7f8ff;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+.navbar__logo {
+  color: var(--ifm-color-primary);
+}
+
+/* Tables carry a lot of this site's content — make them breathe. */
+.markdown table {
+  display: table;
+  width: 100%;
+}
+
+.markdown table th,
+.markdown table td {
+  vertical-align: top;
+  line-height: 1.5;
+}
+
+/* Mermaid diagrams sit better centred with a little air around them. */
+.docusaurus-mermaid-container {
+  margin: 1.75rem 0;
+  text-align: center;
+}

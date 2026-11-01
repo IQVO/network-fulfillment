@@ -1,0 +1,61 @@
+---
+id: get-acknowledgement-report-freshness
+title: "How far the report lags real time"
+description: "Seconds between now and the `occurredAt` of the most recently projected domain event. Matches every sibling data product's `/freshness` convention exactly: it is how an operator tells 'the report is caught up' from 'the projector is stuck or the topic is stalled' without reading projector logs."
+sidebar_label: "How far the report lags real time"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/network-fulfillment-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"How far the report lags real time"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/reports/acknowledgement/freshness"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Seconds between now and the `occurredAt` of the most recently projected domain event. Matches every sibling data product's `/freshness` convention exactly: it is how an operator tells "the report is caught up" from "the projector is stuck or the topic is stalled" without reading projector logs.
+
+
+<ParamsDetails>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./get-acknowledgement-report-freshness.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./get-acknowledgement-report-freshness.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

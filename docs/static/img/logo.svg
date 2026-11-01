@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Network Fulfillment">
+  <path d="M6 22 L32 8 L58 22 L58 56 L6 56 Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/>
+  <rect x="18" y="32" width="28" height="24" fill="none" stroke="currentColor" stroke-width="3" opacity="0.7"/>
+  <path d="M24 42 L32 50 L40 42 M32 50 L32 28" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

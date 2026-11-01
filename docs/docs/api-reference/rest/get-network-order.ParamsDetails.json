@@ -1,0 +1,1 @@
+{"parameters":[{"name":"networkRef","in":"path","required":true,"description":"The network's own reference for the demand (for Vendor Direct Fulfillment, its purchase-order number). Treated as an opaque string: this context is Conformist upstream, so the network owns the format and we never parse it.\n","schema":{"type":"string"},"example":"po-4711"}]}
