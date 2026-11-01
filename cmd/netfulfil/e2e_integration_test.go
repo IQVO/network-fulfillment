@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -306,10 +307,15 @@ func startE2EServiceWith(t *testing.T, ctx context.Context, env e2eEnv, override
 	return stop
 }
 
+// e2eKeys numbers the fresh Idempotency-Key of every POST e2eDo sends.
+var e2eKeys atomic.Int64
+
 func (e e2eEnv) url(path string) string { return "http://" + e.addr + path }
 
 // e2eDo issues a REST call and returns status and body. A transport error
-// returns 0 (the service may still be starting).
+// returns 0 (the service may still be starting). Every POST is a new
+// logical submit and carries a fresh Idempotency-Key (fleet REST guideline
+// section 2).
 func e2eDo(t *testing.T, ctx context.Context, method, url, body string) (int, string) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(body))
@@ -317,6 +323,9 @@ func e2eDo(t *testing.T, ctx context.Context, method, url, body string) (int, st
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if method == http.MethodPost {
+		req.Header.Set("Idempotency-Key", fmt.Sprintf("e2e-key-%d", e2eKeys.Add(1)))
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, ""
@@ -454,8 +463,8 @@ func e2eShipmentFlow(t *testing.T, ctx context.Context, env e2eEnv, pool *pgxpoo
 		t.Fatalf("GET network order = %d %s", code, body)
 	}
 
-	// The write is guarded by the domain, not by an Idempotency-Key header
-	// (this service has no such middleware): an unknown order is a 404 problem.
+	// Each call is a new submit (a fresh Idempotency-Key); the write is
+	// still guarded by the domain: an unknown order is a 404 problem.
 	if code, body := e2eDo(t, ctx, http.MethodPost, env.url("/network-orders/po-unknown/shipment-confirmation"), ""); code != http.StatusNotFound || !strings.Contains(body, "network-order-not-found") {
 		t.Fatalf("confirm unknown order = %d %s, want 404 network-order-not-found", code, body)
 	}

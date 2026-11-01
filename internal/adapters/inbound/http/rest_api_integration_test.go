@@ -277,6 +277,7 @@ func newRESTAPI(t *testing.T, feasible bool) *restAPI {
 		Clock:           clock,
 		NetworkMode:     string(retailnetwork.ModeStub),
 		ConfirmShipment: confirm,
+		Idempotency:     postgres.NewIdempotencyStore(pool),
 	}
 	hs := httptest.NewServer(api.Routes())
 	t.Cleanup(hs.Close)
@@ -311,12 +312,29 @@ func seededDemand(ref string, products ...string) contract.InboundDemand {
 }
 
 // do runs one request against the API and returns the status, headers and
-// decoded JSON body.
+// decoded JSON body. Every POST is a new logical submit, so it carries a
+// fresh Idempotency-Key (fleet REST guideline section 2).
 func (a *restAPI) do(t *testing.T, method, path string) (int, http.Header, map[string]any) {
+	t.Helper()
+	key := ""
+	if method == http.MethodPost {
+		key = fmt.Sprintf("itest-key-%d", restKeys.Add(1))
+	}
+	return a.doKeyed(t, method, path, key)
+}
+
+// restKeys numbers the fresh Idempotency-Key of every POST do sends.
+var restKeys atomic.Int64
+
+// doKeyed is do with an explicit Idempotency-Key ("" sends none).
+func (a *restAPI) doKeyed(t *testing.T, method, path, key string) (int, http.Header, map[string]any) {
 	t.Helper()
 	req, err := http.NewRequest(method, a.server.URL+path, nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
+	}
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
 	}
 	resp, err := a.server.Client().Do(req)
 	if err != nil {
