@@ -139,3 +139,5 @@ func ledgerToPort(status SubmissionStatus) contract.SubmissionStatusValue {
 	}
 	return contract.SubmissionPending
 }
+
+// ---- RequestLabel and SubmitShipmentConfirmation (Decision 4) ----

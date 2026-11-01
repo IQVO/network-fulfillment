@@ -9,11 +9,6 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-// PollDemand returns the network's ISSUED purchase orders as demand in our
-// vocabulary. Re-delivery is normal: a purchase order seen again yields the same
-// NetworkRef, and one repeated inside this poll is returned once. A purchase
-// order on a node this service has no map for is skipped with a warning, never
-// a crash; the next poll lists the nodes again.
 func (g *LiveGateway) PollDemand(ctx context.Context, since time.Time) ([]contract.InboundDemand, error) {
 	g.convergeNodes(ctx)
 	pos, err := g.client.pollAll(ctx, pollWindowStart(since))
@@ -90,3 +85,5 @@ func inboundLines(lines []PurchaseOrderLine) []contract.InboundLine {
 	}
 	return out
 }
+
+// ---- SubmitAcknowledgement and SubmissionStatus (Decisions 3, 4, 6) ----
