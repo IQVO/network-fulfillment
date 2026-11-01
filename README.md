@@ -637,7 +637,7 @@ CI (`.github/workflows/ci.yml`) runs `lint`, `guide-lint`, `complexity`,
 only) and `web` on every PR into `develop`/`main`; `drift` and the
 exhaustive `mutation` run on schedule/manual dispatch only;
 `docker-publish` and `release` on push to `main`. See
-[docs/development/testing.md](docs/docs/development/testing.md#ci).
+[docs/docs/development/testing.md](docs/docs/development/testing.md#ci).
 
 ## Architecture Decision Records
 
