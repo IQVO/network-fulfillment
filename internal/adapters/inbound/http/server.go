@@ -73,6 +73,10 @@ type Server struct {
 	// ConfirmShipment backs the one write endpoint this adapter has
 	// (ADR 0014). A nil value means that route is not registered.
 	ConfirmShipment *usecases.ConfirmNetworkOrderShipment
+	// Idempotency backs the Idempotency-Key middleware every POST route
+	// sits behind (fleet REST guideline section 2). Required whenever
+	// ConfirmShipment is set.
+	Idempotency ports.IdempotencyStore
 	// Logger backs the request logger (ADR 0013 Tier 1 item 2). A nil
 	// Logger (every pre-existing caller/test) falls back to
 	// slog.Default(), matching NewReportsRouter's own convention.
@@ -135,7 +139,10 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/capability-offers", s.handleListCapabilityOffers)
 	}
 	if s.ConfirmShipment != nil {
-		r.Post("/network-orders/{networkRef}/shipment-confirmation", s.handleConfirmShipment)
+		if s.Idempotency == nil {
+			panic("inbound http: ConfirmShipment is wired without an Idempotency store")
+		}
+		r.With(Idempotent(s.Idempotency)).Post("/network-orders/{networkRef}/shipment-confirmation", s.handleConfirmShipment)
 	}
 	return r
 }
@@ -156,7 +163,8 @@ func corsMiddleware() func(http.Handler) http.Handler {
 	return cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions},
-		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", idempotencyKeyHeader},
+		ExposedHeaders:   []string{idempotencyReplayedHeader},
 		AllowCredentials: false,
 		MaxAge:           300,
 	})

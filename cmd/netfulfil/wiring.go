@@ -290,5 +290,6 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 		Clock:      system.Clock{},
 		UnitOfWork: postgres.NewUnitOfWork(d.pool),
 	}
+	api.Idempotency = postgres.NewIdempotencyStore(d.pool)
 	return api
 }

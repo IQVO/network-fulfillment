@@ -137,10 +137,12 @@ func TestHandleConfirmShipment_SuccessReturns204(t *testing.T) {
 		Poller:          fakeStats{},
 		Clock:           fixedClock{t: now},
 		ConfirmShipment: confirm,
+		Idempotency:     memory.NewIdempotencyStore(),
 	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/network-orders/po-1/shipment-confirmation", nil)
+	req.Header.Set("Idempotency-Key", "k-success")
 	srv.Routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNoContent {
@@ -169,9 +171,11 @@ func TestHandleConfirmShipment_UnknownRefReturns404(t *testing.T) {
 		Poller:          fakeStats{},
 		Clock:           fixedClock{t: now()},
 		ConfirmShipment: confirm,
+		Idempotency:     memory.NewIdempotencyStore(),
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/network-orders/po-missing/shipment-confirmation", nil)
+	req.Header.Set("Idempotency-Key", "k-missing")
 	srv.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
