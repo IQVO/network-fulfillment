@@ -20,14 +20,19 @@ import { Card, StatusPill, DataTable, useFetch } from "@warehouse/ui-kit";
  * Verified against the real response shapes documented in
  * apis/openapi.yaml (NetworkOrder, NetworkOrderLine, InboundStatus).
  */
+/** The guideline's maximum page size: the unanswered working set is read in
+ *  one call, and a nextCursor beyond it is reported (REST guideline 5.2). */
+export const UNANSWERED_PAGE_LIMIT = 500;
+
 export function NetworkFulfillmentScreen() {
   const {
     data: ordersData,
     loading: ordersLoading,
     error: ordersError,
-  } = useFetch<ListNetworkOrdersResponse>(`${NETWORK_FULFILLMENT_API_BASE}/network-orders`, {
-    pollMs: 30_000,
-  });
+  } = useFetch<ListNetworkOrdersResponse>(
+    `${NETWORK_FULFILLMENT_API_BASE}/network-orders?limit=${UNANSWERED_PAGE_LIMIT}`,
+    { pollMs: 30_000 },
+  );
 
   const {
     data: inboundStatus,
@@ -37,7 +42,13 @@ export function NetworkFulfillmentScreen() {
     pollMs: 30_000,
   });
 
-  const orders = ordersData?.networkOrders ?? [];
+  const orders = ordersData?.items ?? [];
+  // REST guideline 5.2: one page with an explicit limit; a returned
+  // nextCursor means the working set outgrew it, which is logged and shown.
+  const ordersTruncated = Boolean(ordersData?.nextCursor);
+  if (ordersTruncated) {
+    console.warn(`network-fulfillment: more than ${UNANSWERED_PAGE_LIMIT} unanswered orders; showing the first page`);
+  }
 
   // A poller with no successful pass ever has no `since` -- distinct from
   // "working but nothing to fetch". overdue > 0 is the fact worth alerting
@@ -114,6 +125,11 @@ export function NetworkFulfillmentScreen() {
         {ordersError && (
           <div style={{ color: "var(--wh-color-status-danger)", marginBottom: "var(--wh-space-3)" }}>
             {ordersError.message}
+          </div>
+        )}
+        {ordersTruncated && (
+          <div style={{ color: "var(--wh-color-status-warning)", marginBottom: "var(--wh-space-3)" }}>
+            More than {UNANSWERED_PAGE_LIMIT} unanswered orders: showing the first {UNANSWERED_PAGE_LIMIT}.
           </div>
         )}
 

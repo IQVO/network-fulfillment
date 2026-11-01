@@ -69,10 +69,14 @@ type Server struct {
 	// Offers backs GET /capability-offers (ADR 0001 §8). A nil Offers
 	// means that route is simply not registered, matching every other
 	// optional dependency in this Server.
-	Offers ports.CapabilityOfferRepo
+	Offers ports.CapabilityOfferPager
 	// ConfirmShipment backs the one write endpoint this adapter has
 	// (ADR 0014). A nil value means that route is not registered.
 	ConfirmShipment *usecases.ConfirmNetworkOrderShipment
+	// Idempotency backs the Idempotency-Key middleware every POST route
+	// sits behind (fleet REST guideline section 2). Required whenever
+	// ConfirmShipment is set.
+	Idempotency ports.IdempotencyStore
 	// Logger backs the request logger (ADR 0013 Tier 1 item 2). A nil
 	// Logger (every pre-existing caller/test) falls back to
 	// slog.Default(), matching NewReportsRouter's own convention.
@@ -135,7 +139,10 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/capability-offers", s.handleListCapabilityOffers)
 	}
 	if s.ConfirmShipment != nil {
-		r.Post("/network-orders/{networkRef}/shipment-confirmation", s.handleConfirmShipment)
+		if s.Idempotency == nil {
+			panic("inbound http: ConfirmShipment is wired without an Idempotency store")
+		}
+		r.With(Idempotent(s.Idempotency)).Post("/network-orders/{networkRef}/shipment-confirmation", s.handleConfirmShipment)
 	}
 	return r
 }
@@ -156,7 +163,8 @@ func corsMiddleware() func(http.Handler) http.Handler {
 	return cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions},
-		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", idempotencyKeyHeader},
+		ExposedHeaders:   []string{idempotencyReplayedHeader},
 		AllowCredentials: false,
 		MaxAge:           300,
 	})
@@ -192,27 +200,6 @@ func (s *Server) handleGetNetworkOrder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toNetworkOrderResponse(o, s.Clock.Now()))
 }
 
-// handleListUnanswered lists orders still awaiting an answer.
-//
-// Unanswered is the only list worth exposing: it is the working set the
-// sweep acts on and the only one whose size is an operational signal. A
-// general "all orders" listing would need paging and would answer no
-// question anybody has during an incident.
-func (s *Server) handleListUnanswered(w http.ResponseWriter, r *http.Request) {
-	orders, err := s.Orders.ListUnanswered(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-
-	now := s.Clock.Now()
-	out := make([]networkOrderResponse, 0, len(orders))
-	for _, o := range orders {
-		out = append(out, toNetworkOrderResponse(o, now))
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"networkOrders": out})
-}
-
 func (s *Server) handleInboundStatus(w http.ResponseWriter, r *http.Request) {
 	unanswered, overdue, err := s.countUnanswered(r.Context())
 	if err != nil {
@@ -221,22 +208,6 @@ func (s *Server) handleInboundStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK,
 		toInboundStatusResponse(s.NetworkMode, s.Poller.Stats(), unanswered, overdue))
-}
-
-// handleListCapabilityOffers lists every currently-advertised
-// CapabilityOffer (ADR 0001 §8): the figure this context would tell the
-// network it can ship for each (SKU, site) it knows about.
-func (s *Server) handleListCapabilityOffers(w http.ResponseWriter, r *http.Request) {
-	offers, err := s.Offers.ListAll(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	out := make([]capabilityOfferResponse, 0, len(offers))
-	for _, o := range offers {
-		out = append(out, toCapabilityOfferResponse(o))
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"capabilityOffers": out})
 }
 
 // handleConfirmShipment is this adapter's one write endpoint (ADR 0014):

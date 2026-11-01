@@ -23,7 +23,7 @@ order-management's cancel"*. Migration `0005` and one additive event
 A network-originated order reaches `order-management` as a HELD order
 (`POST /orders`, `releaseOnAllocation=false`, a `requiredShipBy`). That call
 makes real inventory reservations. If nobody ever decides (release with
-`POST /orders/{id}/release`, or cancel with `DELETE /orders/{id}`) the hold
+`POST /orders/{id}/releases`, or cancel with `DELETE /orders/{id}`) the hold
 keeps its reservations forever. `order-management` deliberately does not sweep
 them: a hold's lifetime is bounded by the acknowledgement clock this context
 owns, so the trigger and the timeout belong here and a second TTL there would

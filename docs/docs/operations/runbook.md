@@ -344,7 +344,7 @@ the first clean pass; `overdue` should be 0. See
 ### Confirm a shipment
 
 ```bash
-curl -i -X POST http://localhost:8000/api/network-fulfillment/network-orders/po-local-1/shipment-confirmation
+curl -i -X POST -H "Idempotency-Key: $(uuidgen)" http://localhost:8000/api/network-fulfillment/network-orders/po-local-1/shipment-confirmation
 ```
 
 `204` on success or when the order is already `CONFIRMED`; `409
@@ -413,7 +413,7 @@ whose rejection never freed its stock.
 Why it happens: `ReceiveNetworkDemand` raises the order as a **held** order
 (`releaseOnAllocation: false`), which reserves real inventory, and
 order-management has no timeout of its own (its ADR 0020). Only this context
-decides the hold, by release (`POST /orders/{id}/release`) or cancel
+decides the hold, by release (`POST /orders/{id}/releases`) or cancel
 (`DELETE /orders/{id}`). If neither happens, for example because the cancel
 failed while order-management was down, the reservation would last forever.
 [ADR 0024](/docs/adr/0024-orphaned-order-management-hold-sweep) records the
@@ -534,7 +534,7 @@ the delay, set `ORPHAN_HOLD_GRACE` (a Go duration, `0` = none).
    `SUCCESS`. List them with `list_network_orders` `state=SUBMITTED`.
 2. `ACKNOWLEDGED` order whose release call failed (the failure is not logged
    and nothing retries it): release it in order-management with
-   `POST /orders/{localOrderId}/release`. Never cancel it: the network was told
+   `POST /orders/{localOrderId}/releases`. Never cancel it: the network was told
    we will ship.
 3. A hold raised before this context could record its id (a crash between
    order-management's commit and this context's write) and not re-delivered

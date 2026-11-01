@@ -21,7 +21,7 @@ type offerBody struct {
 
 func (w *world) offerList() ([]offerBody, error) {
 	var list struct {
-		CapabilityOffers []offerBody `json:"capabilityOffers"`
+		CapabilityOffers []offerBody `json:"items"`
 	}
 	if err := w.decode(&list); err != nil {
 		return nil, err

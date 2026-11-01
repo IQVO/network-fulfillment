@@ -101,7 +101,7 @@ curl -s localhost:8088/healthz
 curl -s localhost:8088/inbound-status
 curl -s localhost:8088/network-orders
 curl -s localhost:8088/network-orders/po-local-2
-curl -si -X POST localhost:8088/network-orders/po-local-2/shipment-confirmation
+curl -si -X POST -H "Idempotency-Key: $(uuidgen)" localhost:8088/network-orders/po-local-2/shipment-confirmation
 ```
 
 What you should see (observed on the in-memory build before ADR 0025; not re-checked on the real runtime):
