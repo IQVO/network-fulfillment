@@ -69,7 +69,7 @@ func startE2EInfra(t *testing.T, ctx context.Context) e2eEnv {
 	env := startE2EContainers(t, ctx)
 
 	// order-management stand-in: RaiseHeldOrder (POST /orders) answers a
-	// promise before the deadline; ReleaseHeldOrder (POST /orders/{id}/release)
+	// promise before the deadline; ReleaseHeldOrder (POST /orders/{id}/releases)
 	// answers 200. Anything else is a test failure the service would see as a
 	// 404.
 	om := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +82,7 @@ func startE2EInfra(t *testing.T, ctx context.Context) e2eEnv {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, `{"id":"om-e2e-1","promiseDate":%q,"lines":[{"status":"HELD"}]}`, time.Now().Add(12*time.Hour).UTC().Format(time.RFC3339))
-		case r.Method == http.MethodPost && r.URL.Path == "/orders/om-e2e-1/release":
+		case r.Method == http.MethodPost && r.URL.Path == "/orders/om-e2e-1/releases":
 			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, r)

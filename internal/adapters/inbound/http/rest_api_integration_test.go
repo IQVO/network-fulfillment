@@ -193,7 +193,7 @@ func newPlannerStub(t *testing.T, feasible bool) *plannerStub {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(resp)
 	})
-	mux.HandleFunc("POST /orders/{id}/release", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /orders/{id}/releases", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("DELETE /orders/{id}", func(w http.ResponseWriter, _ *http.Request) {

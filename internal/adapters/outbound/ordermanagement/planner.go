@@ -135,7 +135,7 @@ func (p *Planner) RaiseHeldOrder(ctx context.Context, req contract.HeldOrderRequ
 	}
 	// Map iteration order is random, and order-management's idempotency
 	// middleware hashes the request BODY: the same demand retried with its
-	// lines in a different order would be refused 422 idempotency-key-reused
+	// lines in a different order would be refused 409 idempotency-key-reused
 	// instead of replaying the first answer. Sort so a retry is byte-identical.
 	sort.Slice(lines, func(i, j int) bool { return lines[i].SKU < lines[j].SKU })
 
@@ -176,8 +176,13 @@ func (p *Planner) RaiseHeldOrder(ctx context.Context, req contract.HeldOrderRequ
 	}, nil
 }
 
+// ReleaseHeldOrder creates the release transition resource
+// (POST /orders/{id}/releases, fleet REST guideline 1.4). Every POST to
+// order-management carries an Idempotency-Key; it is derived from the local
+// order id so a retried release replays the first answer.
 func (p *Planner) ReleaseHeldOrder(ctx context.Context, id shared.LocalOrderId) error {
-	return p.do(ctx, http.MethodPost, fmt.Sprintf("/orders/%s/release", id), nil, nil)
+	headers := map[string]string{idempotencyKeyHeader: releaseIdempotencyKey(id)}
+	return p.doWithHeaders(ctx, http.MethodPost, fmt.Sprintf("/orders/%s/releases", id), headers, nil, nil)
 }
 
 // CancelHeldOrder frees the hold. order-management exposes cancellation
@@ -218,14 +223,19 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("order-management %s %s: status %d", e.method, e.path, e.code)
 }
 
-// idempotencyKeyHeader is the request header order-management's create
-// endpoint requires.
+// idempotencyKeyHeader is the request header every order-management POST
+// requires (fleet REST guideline section 2).
 const idempotencyKeyHeader = "Idempotency-Key"
 
 // raiseIdempotencyKey is the stable key for raising the hold of one network
 // order: the same network order always maps to the same key.
 func raiseIdempotencyKey(ref shared.NetworkRef) string {
 	return "netful-raise-" + string(ref)
+}
+
+// releaseIdempotencyKey is the stable key for releasing one held order.
+func releaseIdempotencyKey(id shared.LocalOrderId) string {
+	return "netful-release-" + string(id)
 }
 
 func (p *Planner) do(ctx context.Context, method, path string, in, out any) error {
