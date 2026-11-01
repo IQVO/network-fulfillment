@@ -112,7 +112,7 @@ func (g *StubGateway) SubmitShipmentConfirmation(_ context.Context, ref shared.N
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.confirmed[ref] = true
-	g.logger.Info("stub network shipment confirmation", "networkRef", ref, "shippedAt", shippedAt)
+	g.logger.Info("stub network shipment confirmation", "networkRef", sanitizeLog(string(ref)), "shippedAt", shippedAt)
 	return nil
 }
 
