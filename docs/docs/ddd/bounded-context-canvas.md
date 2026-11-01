@@ -64,6 +64,10 @@ flowchart LR
     class BC bc
 ```
 
+Source: `internal/adapters/inbound/http/server.go`, `internal/adapters/inbound/mcp/`,
+`internal/adapters/inbound/kafka/` and `internal/adapters/inbound/poller/poller.go`
+(the Inbound Communication table below maps each arrow to its route, tool or topic).
+
 ### Outbound
 
 ```mermaid

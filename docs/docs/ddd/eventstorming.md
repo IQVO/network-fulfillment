@@ -26,6 +26,9 @@ flowchart LR
     classDef hotspot fill:#e74c3c,stroke:#922b21,color:#fff
 ```
 
+Source: the ddd-crew EventStorming notation only; the legend has no code behind
+it. The code files behind every sticky are named under each section's diagram.
+
 ## 1. Demand intake and answer
 
 ```mermaid
