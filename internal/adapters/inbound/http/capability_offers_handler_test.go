@@ -84,7 +84,7 @@ func TestHandleListCapabilityOffers_ReturnsEveryOffer(t *testing.T) {
 			SKU                string `json:"sku"`
 			AdvertisedQuantity int    `json:"advertisedQuantity"`
 			Basis              string `json:"basis"`
-		} `json:"capabilityOffers"`
+		} `json:"items"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)

@@ -262,7 +262,7 @@ type apiDeps struct {
 	poller      *poller.Poller
 	readiness   *inboundhttp.Readiness
 	metrics     *telemetry.CircuitBreakerMetrics
-	offers      ports.CapabilityOfferRepo
+	offers      *postgres.CapabilityOfferRepo
 	events      ports.EventPublisher
 	pool        *pgxpool.Pool
 	logger      *slog.Logger

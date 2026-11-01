@@ -43,7 +43,7 @@ func wireCapabilityOffer(
 	brokers []string,
 	translation ports.ProductTranslation,
 	logger *slog.Logger,
-) (ports.CapabilityOfferRepo, *usecases.RecomputeCapabilityOffers, []chan struct{}, func(), error) {
+) (*postgres.CapabilityOfferRepo, *usecases.RecomputeCapabilityOffers, []chan struct{}, func(), error) {
 	pathCap, capacity, runDone, err := startCapabilityOfferCaches(ctx, brokers, logger)
 	if err != nil {
 		return nil, nil, nil, func() {}, err

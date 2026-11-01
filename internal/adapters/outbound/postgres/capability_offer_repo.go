@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/domain/capabilityoffer"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
@@ -38,11 +39,35 @@ func (r *CapabilityOfferRepo) Save(ctx context.Context, o capabilityoffer.Capabi
 
 // ListAll returns every currently-stored offer.
 func (r *CapabilityOfferRepo) ListAll(ctx context.Context) ([]capabilityoffer.CapabilityOffer, error) {
-	rows, err := r.pool.Query(ctx, `
+	return r.queryOffers(ctx, `
 		SELECT sku, site_id, advertised_quantity, basis, computed_at
 		FROM capability_offers
 		ORDER BY sku, site_id
 	`)
+}
+
+// ListPage returns one keyset page ordered by (sku, site_id): the rows
+// strictly after `after` (Sort = sku, ID = site_id), at most limit rows.
+func (r *CapabilityOfferRepo) ListPage(ctx context.Context, after *contract.Keyset, limit int) ([]capabilityoffer.CapabilityOffer, error) {
+	if after == nil {
+		return r.queryOffers(ctx, `
+			SELECT sku, site_id, advertised_quantity, basis, computed_at
+			FROM capability_offers
+			ORDER BY sku, site_id
+			LIMIT $1
+		`, limit)
+	}
+	return r.queryOffers(ctx, `
+		SELECT sku, site_id, advertised_quantity, basis, computed_at
+		FROM capability_offers
+		WHERE (sku, site_id) > ($1, $2)
+		ORDER BY sku, site_id
+		LIMIT $3
+	`, after.Sort, after.ID, limit)
+}
+
+func (r *CapabilityOfferRepo) queryOffers(ctx context.Context, sql string, args ...any) ([]capabilityoffer.CapabilityOffer, error) {
+	rows, err := r.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -438,8 +438,8 @@ func TestHTTP_PollerToReadSurfaceLifecycle(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("GET /network-orders: status %d", status)
 	}
-	if items, _ := list["networkOrders"].([]any); len(items) != 0 {
-		t.Fatalf("unanswered working set = %v, want empty", list["networkOrders"])
+	if items, ok := list["items"].([]any); !ok || len(items) != 0 {
+		t.Fatalf("unanswered working set = %v, want an empty items page", list)
 	}
 
 	// The inbound status reports the real poller's counters: one clean

@@ -24,7 +24,7 @@ Feature: Capability offers
     When I list the capability offers
     Then the response status is 200
     And the capability offers list has 0 offers
-    And the response body contains "capabilityOffers":[]
+    And the response body contains "items":[]
 
   @bdd
   Scenario Outline: The advertised quantity is the lesser of physical stock and path capacity

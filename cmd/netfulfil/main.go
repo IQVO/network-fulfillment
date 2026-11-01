@@ -27,6 +27,7 @@ import (
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	outboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/outbound/kafka"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/system"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/telemetry"
@@ -49,7 +50,7 @@ type infra struct {
 	catalogue   ports.FeedCatalogue
 	orders      ports.NetworkOrderRepo
 	pool        *pgxpool.Pool
-	offers      ports.CapabilityOfferRepo
+	offers      *postgres.CapabilityOfferRepo
 	recompute   *usecases.RecomputeCapabilityOffers
 	capDone     []chan struct{}
 	sites       []shared.SiteId

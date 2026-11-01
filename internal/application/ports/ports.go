@@ -41,6 +41,10 @@ type NetworkOrderRepo interface {
 	// rule: the use case still asks the domain (NetworkOrder.HoldOrphaned)
 	// whether acknowledgeBy plus the grace has passed.
 	ListOpenHolds(ctx context.Context) ([]*networkorder.NetworkOrder, error)
+	// ListUnansweredPage is one keyset page of ListUnanswered for the REST
+	// surface: ordered by (acknowledgeBy, networkRef), rows strictly after
+	// `after` (nil = first page), at most limit rows.
+	ListUnansweredPage(ctx context.Context, after *contract.Keyset, limit int) ([]*networkorder.NetworkOrder, error)
 }
 
 // NetworkGateway is the ONLY route to the external network. Every call
@@ -247,6 +251,14 @@ type CapabilityOfferRepo interface {
 	// ListAll returns every currently-stored offer, for the read-only
 	// REST/MCP surface. Iteration order is deliberately not specified.
 	ListAll(ctx context.Context) ([]capabilityoffer.CapabilityOffer, error)
+}
+
+// CapabilityOfferPager serves the REST collection GET /capability-offers.
+type CapabilityOfferPager interface {
+	// ListPage is one keyset page: ordered by (sku, siteId), rows strictly
+	// after `after` (Sort = sku, ID = siteId; nil = first page), at most
+	// limit rows.
+	ListPage(ctx context.Context, after *contract.Keyset, limit int) ([]capabilityoffer.CapabilityOffer, error)
 }
 
 // EventPublisher publishes this context's integration events.
