@@ -9,7 +9,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-var pathAcknowledgements = []string{"vendor", "acknowledgements"}
+var pathAcknowledgements = []string{segVendor, "acknowledgements"}
 
 func (g *LiveGateway) orderFor(ctx context.Context, ref shared.NetworkRef) (PurchaseOrder, error) {
 	po, ok, err := g.store.PurchaseOrder(ctx, ref)

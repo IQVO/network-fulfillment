@@ -78,13 +78,13 @@ func WithMaxAttempts(n int) RelayOption {
 // MaxAttempts reports the configured attempt cap (0 = unlimited).
 func (r *OutboxRelay) MaxAttempts() int { return r.maxAttempts }
 
-// sendFailure is the error RelayOnce returns when the sink rejected a row
+// sendError is the error RelayOnce returns when the sink rejected a row
 // and the attempt was recorded. The relay has already logged it (WARN, or
 // ERROR when the row reached the attempt cap), so Run does not log it again.
-type sendFailure struct{ err error }
+type sendError struct{ err error }
 
-func (e *sendFailure) Error() string { return e.err.Error() }
-func (e *sendFailure) Unwrap() error { return e.err }
+func (e *sendError) Error() string { return e.err.Error() }
+func (e *sendError) Unwrap() error { return e.err }
 
 // NewOutboxRelay constructs a relay draining pool into sink.
 func NewOutboxRelay(pool *pgxpool.Pool, sink Sink, logger *slog.Logger, opts ...RelayOption) *OutboxRelay {
@@ -108,7 +108,7 @@ func NewOutboxRelay(pool *pgxpool.Pool, sink Sink, logger *slog.Logger, opts ...
 func (r *OutboxRelay) Run(ctx context.Context) error {
 	for {
 		n, err := r.RelayOnce(ctx)
-		var sf *sendFailure
+		var sf *sendError
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.As(err, &sf) {
 			r.logger.ErrorContext(ctx, "outbox relay pass failed", "error", err)
 		}
@@ -242,7 +242,7 @@ func (r *OutboxRelay) recordSendFailure(ctx context.Context, tx pgx.Tx, p pendin
 		return wrap(errors.Join(err, fmt.Errorf("postgres: commit relay pass: %w", cerr)))
 	}
 	r.logSendFailure(ctx, p, attempts, err)
-	return &sendFailure{err: wrap(err)}
+	return &sendError{err: wrap(err)}
 }
 
 // logSendFailure logs a failed send at WARN while the row will be retried,

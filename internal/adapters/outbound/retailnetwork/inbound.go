@@ -19,8 +19,8 @@ import (
 // shapes below are the network's Published Language and stay in this package.
 
 var (
-	pathInboundShipments = []string{"vendor", "inbound-shipments"}
-	pathInboundReceipts  = []string{"vendor", "inbound-receipts"}
+	pathInboundShipments = []string{segVendor, "inbound-shipments"}
+	pathInboundReceipts  = []string{segVendor, "inbound-receipts"}
 )
 
 // ---- wire shapes (apis/openapi.yaml of vendor-connectivity) ----
@@ -104,7 +104,7 @@ func (c *apiClient) inboundPage(ctx context.Context, nodeID string, createdAfter
 		}
 	}
 	var page inboundShipmentPageDTO
-	_, err := c.call(ctx, request{op: "pollInboundShipments", method: http.MethodGet, path: pathInboundShipments, query: q}, &page)
+	err := c.call(ctx, request{op: "pollInboundShipments", method: http.MethodGet, path: pathInboundShipments, query: q}, &page)
 	return page, err
 }
 

@@ -182,7 +182,7 @@ func asnOf(key, fromData string) string {
 func (c *ReceiptConsumer) carton(ctx context.Context, key string, env ce.Event) error {
 	var d cartonReceivedData
 	if err := env.DataAs(&d); err != nil {
-		return fmt.Errorf("%w: ReceiptCartonReceived: %v", errBadReceiptEvent, err)
+		return fmt.Errorf("%w: ReceiptCartonReceived: %w", errBadReceiptEvent, err)
 	}
 	asn := asnOf(key, d.AsnNumber)
 	if asn == "" || (d.SSCC == "" && d.LPN == "") {
@@ -198,7 +198,7 @@ func (c *ReceiptConsumer) carton(ctx context.Context, key string, env ce.Event) 
 func (c *ReceiptConsumer) finding(ctx context.Context, key string, env ce.Event) error {
 	var d discrepancyData
 	if err := env.DataAs(&d); err != nil {
-		return fmt.Errorf("%w: CartonDiscrepancyRaised: %v", errBadReceiptEvent, err)
+		return fmt.Errorf("%w: CartonDiscrepancyRaised: %w", errBadReceiptEvent, err)
 	}
 	if key == "" || d.Kind == "" {
 		return fmt.Errorf("%w: CartonDiscrepancyRaised names no ASN (the Kafka key) or no kind", errBadReceiptEvent)
@@ -211,7 +211,7 @@ func (c *ReceiptConsumer) finding(ctx context.Context, key string, env ce.Event)
 func (c *ReceiptConsumer) closed(ctx context.Context, key string, env ce.Event) error {
 	var d receiptClosedData
 	if err := env.DataAs(&d); err != nil {
-		return fmt.Errorf("%w: ReceiptClosed: %v", errBadReceiptEvent, err)
+		return fmt.Errorf("%w: ReceiptClosed: %w", errBadReceiptEvent, err)
 	}
 	asn := asnOf(key, d.AsnNumber)
 	if asn == "" {

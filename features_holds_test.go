@@ -46,7 +46,7 @@ func (w *world) theOrphanedHoldSweepRuns(ctx context.Context) error {
 func (w *world) theHoldIsOpen(ctx context.Context, ref string) error {
 	o, err := w.orders.FindByRef(ctx, shared.NetworkRef(ref))
 	if err != nil || o == nil {
-		return fmt.Errorf("network order %q not found (%v)", ref, err)
+		return fmt.Errorf("network order %q not found (%w)", ref, err)
 	}
 	if !o.HoldOpen() {
 		return fmt.Errorf("expected the hold of %q to be open, it is settled as %q", ref, o.HoldOutcome())
@@ -57,7 +57,7 @@ func (w *world) theHoldIsOpen(ctx context.Context, ref string) error {
 func (w *world) theHoldIsSettledAs(ctx context.Context, ref, outcome string) error {
 	o, err := w.orders.FindByRef(ctx, shared.NetworkRef(ref))
 	if err != nil || o == nil {
-		return fmt.Errorf("network order %q not found (%v)", ref, err)
+		return fmt.Errorf("network order %q not found (%w)", ref, err)
 	}
 	if string(o.HoldOutcome()) != outcome {
 		return fmt.Errorf("expected the hold of %q settled as %q, got %q", ref, outcome, o.HoldOutcome())

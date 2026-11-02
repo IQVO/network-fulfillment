@@ -46,7 +46,7 @@ func Idempotent(store ports.IdempotencyStore) func(http.Handler) http.Handler {
 			}
 			body, err := io.ReadAll(io.LimitReader(r.Body, maxIdempotentBody))
 			if err != nil {
-				writeProblem(w, http.StatusBadRequest, problemInfo{"malformed-request-body", "Request body could not be read"}, err.Error(), r.URL.Path)
+				writeProblem(w, http.StatusBadRequest, problemInfo{problemMalformedBody, "Request body could not be read"}, err.Error(), r.URL.Path)
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))

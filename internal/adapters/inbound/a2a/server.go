@@ -67,9 +67,17 @@ type Deps struct {
 // schemes on purpose: this surface is unauthenticated by the same fleet-wide
 // decision as REST and MCP; schemes are added here, not in a redesign, if that
 // decision is ever reversed.
+// agentName is this agent's card name and its skill tag; mediaTypeJSON is
+// the one content type every skill accepts (plain text listed alongside it
+// where the card advertises both).
+const (
+	agentName     = "network-fulfillment"
+	mediaTypeJSON = "application/json"
+)
+
 func Card(cfg Config) *a2a.AgentCard {
 	return &a2a.AgentCard{
-		Name:        "network-fulfillment",
+		Name:        agentName,
 		Description: "Network Fulfillment agent for the Warehouse Execution System: the anti-corruption layer between the fleet and the external retail fulfillment network. Read-only. Answers where the network's demand stands (one order by its network reference, or the orders in a state, with both vocabularies per line and whether the acknowledgement deadline has passed unanswered) and what availability this context would advertise to the network (the throughput-constrained advertised quantity per SKU and site). It never changes state: shipment confirmation is REST only and demand enters only by polling the network. No customer PII exists in any answer.",
 		Version:     cfg.Version,
 		Provider: &a2a.AgentProvider{
@@ -79,16 +87,16 @@ func Card(cfg Config) *a2a.AgentCard {
 		SupportedInterfaces: []*a2a.AgentInterface{
 			a2a.NewAgentInterface(cfg.AgentURL, a2a.TransportProtocolJSONRPC),
 		},
-		DefaultInputModes:  []string{"application/json", "text/plain"},
-		DefaultOutputModes: []string{"application/json", "text/plain"},
+		DefaultInputModes:  []string{mediaTypeJSON, "text/plain"},
+		DefaultOutputModes: []string{mediaTypeJSON, "text/plain"},
 		Capabilities:       a2a.AgentCapabilities{Streaming: false},
 		Skills: []a2a.AgentSkill{
 			{
 				ID:          skillNetworkDemandStatus,
 				Name:        "Where the network's demand stands",
 				Description: "Read network orders. With networkRef (the network's own purchase-order reference, e.g. po-4711): that one order, or a not-found problem. With state (NEW, SUBMITTED, ACKNOWLEDGED, REJECTED or CONFIRMED): every order in that state; with neither: every order. NEW is the unanswered working set the acknowledgement sweep acts on, SUBMITTED an acknowledgement told to the network but not yet reconciled. networkRef and state are mutually exclusive. Each order carries both vocabularies per line (the network's product id and the resolved SKU), its state, the acknowledgement deadline and whether that deadline has passed unanswered. Never carries ship-to PII.",
-				Tags:        []string{"network-fulfillment", "orders", "read"},
-				InputModes:  []string{"application/json"},
+				Tags:        []string{agentName, "orders", "read"},
+				InputModes:  []string{mediaTypeJSON},
 				Examples: []string{
 					`{"skill":"network_demand_status","arguments":{"networkRef":"po-4711"}}`,
 					`{"skill":"network_demand_status","arguments":{"state":"NEW"}}`,
@@ -98,8 +106,8 @@ func Card(cfg Config) *a2a.AgentCard {
 				ID:          skillAdvertisedAvailability,
 				Name:        "Availability this context advertises to the network",
 				Description: "Read the currently stored CapabilityOffers: the throughput-constrained advertised quantity this context would tell the network it can ship, per SKU and site, and whether that figure is limited by physical stock (PHYSICAL) or by the process path's remaining admission capacity before its next cutoff (THROUGHPUT_CONSTRAINED). Optionally narrow by sku and/or siteId. The offer is persisted and recomputed by the OLTP service; this skill reads the latest snapshot and computes nothing.",
-				Tags:        []string{"network-fulfillment", "capability", "read"},
-				InputModes:  []string{"application/json"},
+				Tags:        []string{agentName, "capability", "read"},
+				InputModes:  []string{mediaTypeJSON},
 				Examples: []string{
 					`{"skill":"advertised_availability","arguments":{}}`,
 					`{"skill":"advertised_availability","arguments":{"sku":"sku-1","siteId":"site-1"}}`,
