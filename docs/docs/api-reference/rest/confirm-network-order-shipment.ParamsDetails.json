@@ -1,0 +1,1 @@
+{"parameters":[{"name":"networkRef","in":"path","required":true,"description":"The network's own reference for the demand.","schema":{"type":"string"},"example":"po-4711"}]}

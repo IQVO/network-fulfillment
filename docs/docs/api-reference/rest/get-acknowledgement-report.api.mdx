@@ -1,0 +1,73 @@
+---
+id: get-acknowledgement-report
+title: "Network Order Acknowledgement & Translation report"
+description: "Bucketed by day: how much demand arrived, how it was answered, and how fast. `ordersRejected` is split by cause — `ordersRejectedUntranslatableSku` (a catalogue gap: the Anti- Corruption Layer had no SKU mapping) is a different operational signal from `ordersRejectedDomain` (order-management's promise policy could not meet the deadline) or `acknowledgementDeadlinesMissed` (the 24-hour window closed with no answer ever sent — an operational failure, not a business decision)."
+sidebar_label: "Network Order Acknowledgement & Translation report"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/network-fulfillment-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Network Order Acknowledgement & Translation report"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/reports/acknowledgement"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Bucketed by day: how much demand arrived, how it was answered, and how fast. `ordersRejected` is split by cause — `ordersRejectedUntranslatableSku` (a catalogue gap: the Anti- Corruption Layer had no SKU mapping) is a different operational signal from `ordersRejectedDomain` (order-management's promise policy could not meet the deadline) or `acknowledgementDeadlinesMissed` (the 24-hour window closed with no answer ever sent — an operational failure, not a business decision).
+
+Served by the `netfulfil-reports` deployable, reading a Postgres read model that `netfulfil-projector` maintains from this context's own domain events. Never the OLTP database.
+
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./get-acknowledgement-report.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./get-acknowledgement-report.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./get-acknowledgement-report.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

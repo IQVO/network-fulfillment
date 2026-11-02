@@ -6,7 +6,7 @@ import (
 )
 
 // ADR 0024 §1 records the OM hold on a NEW order and a REJECTED order keeps the
-// id of the hold it freed. The read surface (docs/mcp/tools.md: localOrderId is
+// id of the hold it freed. The read surface (docs/docs/mcp/tools.md: localOrderId is
 // "set from SUBMITTED on") must not change: the MCP tool exposes the id only for
 // an order NF has committed to.
 func TestGetNetworkOrder_DoesNotExposeAHoldForAnOrderNotCommittedTo(t *testing.T) {

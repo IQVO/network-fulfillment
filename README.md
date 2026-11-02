@@ -17,25 +17,25 @@ This project is a domain-driven design study. It is not associated with, endorse
 
 ## Documentation
 
-Plain markdown under `docs/` (rendered by GitHub; there is no docs site in
-this repo). The fleet-wide site is `https://iqvo.github.io/warehouse-docs/`;
-this context's pages there live under
-<https://iqvo.github.io/warehouse-docs/contexts/network-fulfillment>
-(business context, use cases, DDD canvases, domain events, async API,
-configuration, observability, runbook, testing, troubleshooting). This
-repo's own Pages URL would be `https://iqvo.github.io/network-fulfillment/`,
-but nothing publishes to it today.
+The full documentation site is **<https://iqvo.github.io/network-fulfillment/>**. It is built from
+`docs/` in this repository (Docusaurus; `cd docs && npm ci && npm run build`) and written from the
+code, the two API contracts and the migrations. The aggregator's pack for this context, with the
+fleet-wide network pages, is on
+[warehouse-docs](https://iqvo.github.io/warehouse-docs/contexts/network-fulfillment); where the two
+differ, this site and the code win.
 
-In-repo page map:
+| Area | Pages |
+|---|---|
+| Overview | [Introduction](https://iqvo.github.io/network-fulfillment/docs/overview/introduction), [Architecture](https://iqvo.github.io/network-fulfillment/docs/overview/architecture), [Quickstart](https://iqvo.github.io/network-fulfillment/docs/overview/quickstart) |
+| Operations | [Configuration](https://iqvo.github.io/network-fulfillment/docs/operations/configuration), [Runbook](https://iqvo.github.io/network-fulfillment/docs/operations/runbook), [Observability](https://iqvo.github.io/network-fulfillment/docs/operations/observability), [Troubleshooting](https://iqvo.github.io/network-fulfillment/docs/operations/troubleshooting) |
+| Development | [Testing and CI](https://iqvo.github.io/network-fulfillment/docs/development/testing) |
+| Domain-driven design | [Use cases](https://iqvo.github.io/network-fulfillment/docs/ddd/use-cases), [Subdomain classification](https://iqvo.github.io/network-fulfillment/docs/ddd/subdomain-classification), [Ubiquitous language](https://iqvo.github.io/network-fulfillment/docs/ddd/ubiquitous-language), [DDD artifacts index](https://iqvo.github.io/network-fulfillment/docs/ddd/ddd-artifacts) |
+| API reference | [Overview](https://iqvo.github.io/network-fulfillment/docs/api-reference/overview) (REST, events, MCP, A2A), [Event catalogue](https://iqvo.github.io/network-fulfillment/docs/api-reference/events) |
+| Ecosystem | [Integration](https://iqvo.github.io/network-fulfillment/docs/ecosystem/integration), [MCP tools](https://iqvo.github.io/network-fulfillment/docs/mcp/tools) |
+| Decisions | [ADR index](https://iqvo.github.io/network-fulfillment/docs/adr), in this repository [`docs/adr/`](docs/adr/index.md) |
 
-| Area | Page |
-| --- | --- |
-| Overview | [Introduction](docs/overview/introduction.md), [Architecture](docs/overview/architecture.md), [Quickstart](docs/overview/quickstart.md) |
-| Operations | [Configuration](docs/operations/configuration.md), [Runbook](docs/operations/runbook.md), [Observability](docs/operations/observability.md), [Troubleshooting](docs/operations/troubleshooting.md) |
-| Development | [Testing and CI](docs/development/testing.md) |
-| Interfaces | [Integration](docs/ecosystem/integration.md), [MCP tools](docs/mcp/tools.md), [A2A inbound adapter (ADR 0030)](docs/adr/0030-a2a-inbound-adapter.md), `apis/openapi.yaml`, `apis/asyncapi.yaml` |
-| Domain | [Use cases](docs/ddd/use-cases.md), [Subdomain classification](docs/ddd/subdomain-classification.md), [DDD artifact pack](docs/ddd/README.md) |
-| Decisions | [ADR index](docs/adr/README.md) |
+Repository-local sources of truth: [`apis/openapi.yaml`](apis/openapi.yaml),
+[`apis/asyncapi.yaml`](apis/asyncapi.yaml) and [`docs/adr/`](docs/adr/index.md).
 
 ## Why this context exists
 
@@ -106,8 +106,8 @@ ADR 0020 — neither is meaningful without the other. ADR 0009 (Accepted)
 amends it.
 
 📄 [ADR 0001 — Network Fulfillment as a bounded context](docs/adr/0001-network-fulfillment-bounded-context.md)
-· [ADR index](docs/adr/README.md)
-· [DDD artifact pack (ddd-crew)](docs/ddd/README.md)
+· [ADR index](docs/adr/index.md)
+· [DDD artifact pack (ddd-crew)](docs/docs/ddd/ddd-artifacts.md)
 
 What exists today:
 
@@ -160,7 +160,7 @@ What exists today:
   recorded without an event; a 5xx, timeout or open breaker is retried on the
   next pass. It never changes the order's state. Counter
   `network_fulfillment.orphaned_holds.swept`. Runbook:
-  [A held order is stuck in order-management](docs/operations/runbook.md#a-held-order-is-stuck-in-order-management).
+  [A held order is stuck in order-management](docs/docs/operations/runbook.md#a-held-order-is-stuck-in-order-management).
 - **`ConfirmNetworkOrderShipment`** (ADR 0014, ADR 0026) — the one write endpoint,
   `POST /network-orders/{networkRef}/shipment-confirmation`: requests the label
   from the gateway first (one package), then `ACKNOWLEDGED -> CONFIRMED`,
@@ -198,14 +198,14 @@ What exists today:
   transaction id and status per acknowledgement, shipment confirmation and node
   registration) and `network_labels`. The tables stay empty in stub mode.
   Environment (the full table is in
-  [configuration](docs/operations/configuration.md)): `NETWORK_MODE` (default
+  [configuration](docs/docs/operations/configuration.md)): `NETWORK_MODE` (default
   `stub`; anything but `live` is `stub`); `NETWORK_BASE_URL` and
   `NETWORK_VENDOR_ID`, required only in live mode (one boot error names every
   missing one); `NETWORK_NODES_FILE`, optional and live only (node definitions
   to register, strict JSON); `NETWORK_SEED_FILE`, stub only. No credential and
   no timeout variable exist. A purchase order whose node is not mapped is
   skipped with a warning (ADR 0026, As built 1). Operations:
-  [live adapter runbook](docs/operations/runbook.md#the-live-retail-network-adapter).
+  [live adapter runbook](docs/docs/operations/runbook.md#the-live-retail-network-adapter).
   Mode `stub` stays the default everywhere, including the cluster.
 - **Live retail-network adapter: the node profile** (ADR 0027 part 1). In live
   mode a worker derives each site's operational profile (cutoffs, handling time,
@@ -218,7 +218,7 @@ What exists today:
   never guessed. `NETWORK_PROFILE_INTERVAL` (default `5m`, `0` disables) sets the
   cadence; metrics `network_fulfillment.node_profile.declarations` and
   `.revision`. Operations:
-  [node profile runbook](docs/operations/runbook.md#the-node-profile).
+  [node profile runbook](docs/docs/operations/runbook.md#the-node-profile).
 - **Live retail-network adapter: the inventory feed** (ADR 0027 part 2). In live
   mode a second worker tells the network what each site can ship with
   `POST /vendor/inventory`: one feed per site per pass, built from the
@@ -232,7 +232,7 @@ What exists today:
   Persisted in migration 0011 (`network_inventory_feeds`,
   `network_rejected_listings` and the ledger kind `INVENTORY`).
   `NETWORK_INVENTORY_INTERVAL` (default `5m`, `0` disables) sets the cadence.
-  Operations: [inventory feed runbook](docs/operations/runbook.md#the-inventory-feed).
+  Operations: [inventory feed runbook](docs/docs/operations/runbook.md#the-inventory-feed).
 - **Curated ACL files** — `PRODUCT_TRANSLATION_FILE` (network product id ->
   SKU, with an optional `site` per entry because a listing is one item at one
   node; without the file every order is rejected as untranslatable, and a warning
@@ -341,7 +341,7 @@ apis/openapi.yaml              REST contract (Spectral-linted in CI)
 apis/asyncapi.yaml             event catalogue
 web/                           Module Federation remote
 charts/network-fulfillment/    Helm chart (+ Python wiring tests)
-docs/adr/                      ADRs (index: docs/adr/README.md)
+docs/adr/                      ADRs (index: docs/adr/index.md)
 docs/ddd/                      ddd-crew DDD artifact pack
 ```
 
@@ -637,11 +637,11 @@ CI (`.github/workflows/ci.yml`) runs `lint`, `guide-lint`, `complexity`,
 only) and `web` on every PR into `develop`/`main`; `drift` and the
 exhaustive `mutation` run on schedule/manual dispatch only;
 `docker-publish` and `release` on push to `main`. See
-[docs/development/testing.md](docs/development/testing.md#ci).
+[docs/docs/development/testing.md](docs/docs/development/testing.md#ci).
 
 ## Architecture Decision Records
 
-The ADR index lives at [docs/adr/README.md](docs/adr/README.md) — 30
+The ADR index lives at [docs/adr/index.md](docs/adr/index.md) — 30
 decisions, from the bounded context itself through the transactional
 outbox, the CloudEvents mandate, the live retail-network adapter
 (ADR 0026–0028) to the A2A inbound adapter.
