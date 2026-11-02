@@ -30,11 +30,15 @@ func (r *NetworkOrderRepo) Save(_ context.Context, o *networkorder.NetworkOrder)
 	defer r.mu.Unlock()
 	// Same optimistic-locking contract as the Postgres adapter (migration
 	// 0013): a write against a version other than the one this aggregate
-	// loaded is a lost update, not a silent overwrite. Because this repo
-	// stores the aggregate pointer itself, two live instances of one ref
-	// only exist when a test or use case deliberately builds them —
-	// exactly the races the conditional UPDATE guards in production.
-	if existing := r.orders[o.NetworkRef()]; existing != nil && existing != o && existing.Version() != o.Version() {
+	// loaded is a lost update, not a silent overwrite. As in Postgres the
+	// guard binds only aggregates that have seen a row (LoadedFromStorage):
+	// a freshly received aggregate is an intake write the upsert applies
+	// as it always did. Because this repo stores the aggregate pointer
+	// itself, two live instances of one ref only exist when a test or use
+	// case deliberately builds them — exactly the races the conditional
+	// UPDATE guards in production.
+	if existing := r.orders[o.NetworkRef()]; existing != nil && existing != o &&
+		o.LoadedFromStorage() && existing.Version() != o.Version() {
 		return networkorder.ErrVersionConflict
 	}
 	r.orders[o.NetworkRef()] = o

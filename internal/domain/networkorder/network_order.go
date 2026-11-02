@@ -156,6 +156,11 @@ type NetworkOrder struct {
 	// version is the optimistic-locking version (see version.go):
 	// loaded by the repository, checked by its conditional UPDATE.
 	version int
+
+	// loaded marks an aggregate that has seen a row: built by
+	// Rehydrate, or versioned by RestoreVersion. Only these are bound
+	// by the conditional UPDATE's guard — see LoadedFromStorage.
+	loaded bool
 }
 
 // AcknowledgementWindow is how long the network gives us to answer. ADR
@@ -408,6 +413,9 @@ func Rehydrate(
 	state State,
 	localOrderId *shared.LocalOrderId,
 ) *NetworkOrder {
+	// loaded: a rehydrated aggregate stands for a row that exists, so
+	// its writes belong to the conditional UPDATE's version guard even
+	// before RestoreVersion gives it the row's number.
 	return &NetworkOrder{
 		networkRef:     ref,
 		siteId:         siteId,
@@ -417,5 +425,6 @@ func Rehydrate(
 		lines:          lines,
 		state:          state,
 		localOrderId:   localOrderId,
+		loaded:         true,
 	}
 }
