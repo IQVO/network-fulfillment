@@ -152,6 +152,10 @@ type NetworkOrder struct {
 	// ended (ADR 0024, see hold.go). Zero while the hold is open.
 	holdOutcome   HoldOutcome
 	holdSettledAt time.Time
+
+	// version is the optimistic-locking version (see version.go):
+	// loaded by the repository, checked by its conditional UPDATE.
+	version int
 }
 
 // AcknowledgementWindow is how long the network gives us to answer. ADR

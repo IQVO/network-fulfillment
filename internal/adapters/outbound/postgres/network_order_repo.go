@@ -64,23 +64,38 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 		holdSettledAt = &at
 	}
 
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO network_orders (
 			network_ref, site_id, required_ship_by, acknowledge_by,
-			state, local_order_id, received_at, hold_outcome, hold_settled_at
+			state, local_order_id, received_at, hold_outcome, hold_settled_at,
+			aggregate_version
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (network_ref) DO UPDATE SET
 			state = EXCLUDED.state,
 			local_order_id = EXCLUDED.local_order_id,
 			hold_outcome = EXCLUDED.hold_outcome,
-			hold_settled_at = EXCLUDED.hold_settled_at
+			hold_settled_at = EXCLUDED.hold_settled_at,
+			aggregate_version = network_orders.aggregate_version + 1
+		WHERE network_orders.aggregate_version = EXCLUDED.aggregate_version
 	`,
 		string(o.NetworkRef()), string(o.SiteId()), o.RequiredShipBy(), o.AcknowledgeBy(),
 		string(o.State()), localOrderId, o.ReceivedAt(), holdOutcome, holdSettledAt,
-	); err != nil {
+		o.Version(),
+	)
+	if err != nil {
 		return err
 	}
+	// Zero rows affected means the WHERE rejected the update: the stored
+	// row moved on to a newer version between our load and this write —
+	// a lost-update window the caller closes by reloading and retrying
+	// (or, on the REST surface, answering 409). A fresh order inserts
+	// with version 0 and reports one affected row, so zero here really
+	// is a conflict and nothing else.
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("save network order %q: %w", o.NetworkRef(), networkorder.ErrVersionConflict)
+	}
+	o.AdvanceVersion()
 
 	// Lines are immutable once received — the network sends demand, not
 	// amendments — so an upsert on the composite key is enough and there
@@ -111,7 +126,7 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 func (r *NetworkOrderRepo) FindByRef(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT site_id, required_ship_by, acknowledge_by, state, local_order_id, received_at,
-		       hold_outcome, hold_settled_at
+		       hold_outcome, hold_settled_at, aggregate_version
 		FROM network_orders WHERE network_ref = $1
 	`, string(ref))
 
@@ -136,9 +151,10 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		receivedAt      time.Time
 		holdOutcomeRaw  *string
 		holdSettledAt   *time.Time
+		version         int
 	)
 	if err := row.Scan(&siteId, &requiredShipBy, &acknowledgeBy, &stateRaw, &localOrderIdRaw, &receivedAt,
-		&holdOutcomeRaw, &holdSettledAt); err != nil {
+		&holdOutcomeRaw, &holdSettledAt, &version); err != nil {
 		return nil, err
 	}
 
@@ -166,6 +182,7 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		state,
 		localOrderId,
 	)
+	o.RestoreVersion(version)
 	if holdOutcomeRaw != nil {
 		// Validated like the state: a value outside the vocabulary is a row
 		// this code did not write, and must not become an aggregate.
