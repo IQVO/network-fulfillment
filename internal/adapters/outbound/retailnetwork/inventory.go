@@ -22,7 +22,7 @@ import (
 
 var _ ports.InventoryFeeder = (*LiveGateway)(nil)
 
-var pathInventory = []string{"vendor", "inventory"}
+var pathInventory = []string{segVendor, "inventory"}
 
 const (
 	// inventoryRepeatEvery is how long an unchanged feed is held back: it is

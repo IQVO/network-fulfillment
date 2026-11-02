@@ -20,7 +20,7 @@ import (
 const pollOverlap = 2 * time.Minute
 
 // The Vendor API route the gateway registers nodes on.
-var pathNodes = []string{"vendor", "nodes"}
+var pathNodes = []string{segVendor, segNodes}
 
 // LiveConfig is what NewLiveGateway needs (ADR 0026 Decision 10).
 type LiveConfig struct {

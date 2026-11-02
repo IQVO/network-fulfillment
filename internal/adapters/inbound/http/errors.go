@@ -9,6 +9,14 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
+// statusKey is the JSON key of the terse status payloads (health, readiness,
+// drain) and the structured-log key of the access log's response status.
+const statusKey = "status"
+
+// problemMalformedBody is the RFC 9457 problem type shared by every decoder
+// that rejects a request body it could not read or must not accept.
+const problemMalformedBody = "malformed-request-body"
+
 // statusFor maps a typed domain/application error to an HTTP status code.
 func statusFor(err error) int {
 	switch {

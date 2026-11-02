@@ -138,12 +138,18 @@ func (c *BreakerClient) RaiseHeldOrder(ctx context.Context, req contract.HeldOrd
 		return c.inner.RaiseHeldOrder(callCtx, req)
 	})
 	if isBreakerRejection(err) {
-		return contract.HeldOrderResult{}, fmt.Errorf("%w: %v", ErrCircuitOpen, err)
+		return contract.HeldOrderResult{}, fmt.Errorf("%w: %w", ErrCircuitOpen, err)
 	}
 	if err != nil {
 		return contract.HeldOrderResult{}, err
 	}
-	return v.(contract.HeldOrderResult), nil
+	res, ok := v.(contract.HeldOrderResult)
+	if !ok {
+		// Unreachable while inner honours FulfillmentPlanner: the closure
+		// above returned a HeldOrderResult or an error, never another type.
+		return contract.HeldOrderResult{}, fmt.Errorf("%s: breaker returned %T, not HeldOrderResult", DependencyName, v)
+	}
+	return res, nil
 }
 
 // ReleaseHeldOrder mirrors RaiseHeldOrder's breaker/timeout shape.
@@ -155,7 +161,7 @@ func (c *BreakerClient) ReleaseHeldOrder(ctx context.Context, id shared.LocalOrd
 		return nil, c.inner.ReleaseHeldOrder(callCtx, id)
 	})
 	if isBreakerRejection(err) {
-		return fmt.Errorf("%w: %v", ErrCircuitOpen, err)
+		return fmt.Errorf("%w: %w", ErrCircuitOpen, err)
 	}
 	return err
 }
@@ -169,7 +175,7 @@ func (c *BreakerClient) CancelHeldOrder(ctx context.Context, id shared.LocalOrde
 		return nil, c.inner.CancelHeldOrder(callCtx, id)
 	})
 	if isBreakerRejection(err) {
-		return fmt.Errorf("%w: %v", ErrCircuitOpen, err)
+		return fmt.Errorf("%w: %w", ErrCircuitOpen, err)
 	}
 	return err
 }

@@ -175,7 +175,7 @@ func corsMiddleware() func(http.Handler) http.Handler {
 // one degraded dependency into a restart loop, and this pod's whole job
 // is to keep a 24h clock running.
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{statusKey: "ok"})
 }
 
 func (s *Server) handleGetNetworkOrder(w http.ResponseWriter, r *http.Request) {

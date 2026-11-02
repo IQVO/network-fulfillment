@@ -78,7 +78,11 @@ func New(cfg Config) (*Client, error) {
 	}
 	c := &Client{dep: cfg.Dependency, base: base, hc: cfg.HTTPClient, callTimeout: cfg.CallTimeout, maxAttempts: cfg.MaxAttempts, sleep: cfg.Sleep}
 	if c.hc == nil {
-		c.hc = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()} // a bulkhead of its own
+		transport := http.DefaultTransport
+		if tr, ok := transport.(*http.Transport); ok {
+			transport = tr.Clone() // a bulkhead of its own
+		}
+		c.hc = &http.Client{Transport: transport}
 	}
 	if c.callTimeout <= 0 {
 		c.callTimeout = defaultCallTimeout
@@ -177,7 +181,7 @@ func (c *Client) Do(ctx context.Context, rq Request) (*Response, error) {
 	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
 		resp, err := c.attempt(ctx, rq)
 		if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
-			return nil, fmt.Errorf("%w: %s: %v", ErrCircuitOpen, c.dep, err)
+			return nil, fmt.Errorf("%w: %s: %w", ErrCircuitOpen, c.dep, err)
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
