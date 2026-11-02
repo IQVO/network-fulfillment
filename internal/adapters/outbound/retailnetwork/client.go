@@ -19,6 +19,13 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/resilience"
 )
 
+// Path segments of the retail network's vendor API, shared by every request
+// builder in this package.
+const (
+	segVendor = "vendor"
+	segNodes  = "nodes"
+)
+
 // DependencyName labels the breaker's Prometheus series
 // (circuit_breaker_state{dependency="retail-network"}), next to
 // order-management's (ADR 0004 §5).
@@ -88,7 +95,11 @@ func newAPIClient(cfg clientConfig) (*apiClient, error) {
 	if c.hc == nil {
 		// A client of its own: a bulkhead, so this dependency's slow sockets
 		// never share a pool with order-management's.
-		c.hc = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+		transport := http.DefaultTransport
+		if tr, ok := transport.(*http.Transport); ok {
+			transport = tr.Clone()
+		}
+		c.hc = &http.Client{Transport: transport}
 	}
 	if c.logger == nil {
 		c.logger = slog.Default()
@@ -217,7 +228,7 @@ func (c *apiClient) do(ctx context.Context, rq request) (*apiResponse, error) {
 	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
 		resp, err := c.attempt(ctx, rq)
 		if isBreakerRejection(err) {
-			return nil, fmt.Errorf("%w: %v", ErrCircuitOpen, err)
+			return nil, fmt.Errorf("%w: %w", ErrCircuitOpen, err)
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -261,21 +272,22 @@ func exceedsDeadline(ctx context.Context, wait time.Duration, now time.Time) boo
 }
 
 // call runs rq and decodes a successful JSON answer into out (when not nil). Any
-// other answer becomes an *APIError carrying the problem document.
-func (c *apiClient) call(ctx context.Context, rq request, out any) (*apiResponse, error) {
+// other answer becomes an *APIError carrying the problem document. The response
+// itself is deliberately not returned: no caller has ever needed it.
+func (c *apiClient) call(ctx context.Context, rq request, out any) error {
 	resp, err := c.do(ctx, rq)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if resp.status < 200 || resp.status > 299 {
-		return resp, problemError(rq.op, resp)
+		return problemError(rq.op, resp)
 	}
 	if out != nil {
 		if err := json.Unmarshal(resp.body, out); err != nil {
-			return resp, fmt.Errorf("retail-network: %s: undecodable %d answer: %w", rq.op, resp.status, err)
+			return fmt.Errorf("retail-network: %s: undecodable %d answer: %w", rq.op, resp.status, err)
 		}
 	}
-	return resp, nil
+	return nil
 }
 
 // problemError builds the *APIError for a non-2xx answer. A body that is not a

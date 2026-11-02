@@ -47,38 +47,7 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 	}
 	defer func() { _ = rollback(ctx) }()
 
-	var localOrderId *string
-	if id := o.LocalOrderId(); id != nil {
-		s := string(*id)
-		localOrderId = &s
-	}
-
-	// The hold outcome and its instant travel together (a CHECK in migration
-	// 0005 enforces it); both are NULL while the hold is open.
-	var holdOutcome *string
-	var holdSettledAt *time.Time
-	if outcome := o.HoldOutcome(); outcome != "" {
-		s := string(outcome)
-		at := o.HoldSettledAt()
-		holdOutcome = &s
-		holdSettledAt = &at
-	}
-
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO network_orders (
-			network_ref, site_id, required_ship_by, acknowledge_by,
-			state, local_order_id, received_at, hold_outcome, hold_settled_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (network_ref) DO UPDATE SET
-			state = EXCLUDED.state,
-			local_order_id = EXCLUDED.local_order_id,
-			hold_outcome = EXCLUDED.hold_outcome,
-			hold_settled_at = EXCLUDED.hold_settled_at
-	`,
-		string(o.NetworkRef()), string(o.SiteId()), o.RequiredShipBy(), o.AcknowledgeBy(),
-		string(o.State()), localOrderId, o.ReceivedAt(), holdOutcome, holdSettledAt,
-	); err != nil {
+	if err := r.writeOrder(ctx, tx, o); err != nil {
 		return err
 	}
 
@@ -106,12 +75,85 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 	return commit(ctx)
 }
 
+// writeOrder performs the order row's conditional upsert and leaves the
+// aggregate carrying the row's new version (RETURNING): after a
+// successful Save the instance and the row agree, so a use case that
+// saves the same aggregate twice — record the hold, then the answer —
+// cannot trip over its own earlier write.
+func (r *NetworkOrderRepo) writeOrder(ctx context.Context, tx pgx.Tx, o *networkorder.NetworkOrder) error {
+	var localOrderId *string
+	if id := o.LocalOrderId(); id != nil {
+		s := string(*id)
+		localOrderId = &s
+	}
+
+	// The hold outcome and its instant travel together (a CHECK in migration
+	// 0005 enforces it); both are NULL while the hold is open.
+	var holdOutcome *string
+	var holdSettledAt *time.Time
+	if outcome := o.HoldOutcome(); outcome != "" {
+		s := string(outcome)
+		at := o.HoldSettledAt()
+		holdOutcome = &s
+		holdSettledAt = &at
+	}
+
+	// The row is written at the NEXT version ($10 + 1) on both branches:
+	// the update takes the row from the loaded version ($10) to loaded+1,
+	// and an insert starts the row at loaded+1 — so the version RETURNed
+	// always equals the aggregate's version once RestoreVersion applies it.
+	// An insert that stored $10 itself would leave the row one behind the
+	// in-memory aggregate, and the SAME instance's next Save would trip
+	// the guard as if a concurrent writer had moved the row.
+	//
+	// The guard binds only aggregates that have seen a row ($11 false):
+	// a writer that loaded the row can be stale, and zero rows — the
+	// missing RETURNING row — tells it so. A freshly received aggregate
+	// has never read storage; it is an intake write, applied exactly as
+	// the pre-version upsert applied it, and the arrival-fixed columns
+	// are absent from the SET list so a re-delivery still cannot move
+	// the clock the first arrival started.
+	var rowVersion int
+	err := tx.QueryRow(ctx, `
+		INSERT INTO network_orders (
+			network_ref, site_id, required_ship_by, acknowledge_by,
+			state, local_order_id, received_at, hold_outcome, hold_settled_at,
+			aggregate_version
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10 + 1)
+		ON CONFLICT (network_ref) DO UPDATE SET
+			state = EXCLUDED.state,
+			local_order_id = EXCLUDED.local_order_id,
+			hold_outcome = EXCLUDED.hold_outcome,
+			hold_settled_at = EXCLUDED.hold_settled_at,
+			aggregate_version = network_orders.aggregate_version + 1
+		WHERE network_orders.aggregate_version = $10 OR NOT $11
+		RETURNING aggregate_version
+	`,
+		string(o.NetworkRef()), string(o.SiteId()), o.RequiredShipBy(), o.AcknowledgeBy(),
+		string(o.State()), localOrderId, o.ReceivedAt(), holdOutcome, holdSettledAt,
+		o.Version(), o.LoadedFromStorage(),
+	).Scan(&rowVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The WHERE rejected the update: the stored row moved on to a
+		// newer version between our load and this write — a lost-update
+		// window the caller closes by reloading and retrying (or, on
+		// the REST surface, answering 409).
+		return fmt.Errorf("save network order %q: %w", o.NetworkRef(), networkorder.ErrVersionConflict)
+	}
+	if err != nil {
+		return err
+	}
+	o.RestoreVersion(rowVersion)
+	return nil
+}
+
 // FindByRef returns (nil, nil) when no order has this ref — "not found"
 // is the application's concern, not the repository's.
 func (r *NetworkOrderRepo) FindByRef(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT site_id, required_ship_by, acknowledge_by, state, local_order_id, received_at,
-		       hold_outcome, hold_settled_at
+		       hold_outcome, hold_settled_at, aggregate_version
 		FROM network_orders WHERE network_ref = $1
 	`, string(ref))
 
@@ -136,9 +178,10 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		receivedAt      time.Time
 		holdOutcomeRaw  *string
 		holdSettledAt   *time.Time
+		version         int
 	)
 	if err := row.Scan(&siteId, &requiredShipBy, &acknowledgeBy, &stateRaw, &localOrderIdRaw, &receivedAt,
-		&holdOutcomeRaw, &holdSettledAt); err != nil {
+		&holdOutcomeRaw, &holdSettledAt, &version); err != nil {
 		return nil, err
 	}
 
@@ -166,6 +209,7 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		state,
 		localOrderId,
 	)
+	o.RestoreVersion(version)
 	if holdOutcomeRaw != nil {
 		// Validated like the state: a value outside the vocabulary is a row
 		// this code did not write, and must not become an aggregate.

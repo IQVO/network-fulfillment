@@ -9,7 +9,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-var pathShipmentConfirmations = []string{"vendor", "shipment-confirmations"}
+var pathShipmentConfirmations = []string{segVendor, "shipment-confirmations"}
 
 // RequestLabel asks for the labels of an order that leaves in packageCount
 // packages and persists them. It is idempotent per ref: labels already

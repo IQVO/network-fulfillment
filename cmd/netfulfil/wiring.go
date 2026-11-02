@@ -262,7 +262,7 @@ type apiDeps struct {
 	poller      *poller.Poller
 	readiness   *inboundhttp.Readiness
 	metrics     *telemetry.CircuitBreakerMetrics
-	offers      ports.CapabilityOfferRepo
+	offers      *postgres.CapabilityOfferRepo
 	events      ports.EventPublisher
 	pool        *pgxpool.Pool
 	logger      *slog.Logger
@@ -290,5 +290,6 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 		Clock:      system.Clock{},
 		UnitOfWork: postgres.NewUnitOfWork(d.pool),
 	}
+	api.Idempotency = postgres.NewIdempotencyStore(d.pool)
 	return api
 }

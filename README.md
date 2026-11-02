@@ -142,7 +142,7 @@ What exists today:
 - **`ReconcileSubmittedOrders`** — every `POLL_INTERVAL`, asks the gateway
   for each `SUBMITTED` order's transaction status (ADR 0001 §5): `SUCCESS`
   settles it `ACKNOWLEDGED` and releases the hold
-  (`POST /orders/{id}/release`); `FAILURE` cancels the hold and rejects
+  (`POST /orders/{id}/releases`); `FAILURE` cancels the hold and rejects
   (`SUBMISSION_FAILED`); `PENDING` leaves it for the next pass.
 - **`SweepAcknowledgementDeadlines`** — every `SWEEP_INTERVAL` (default
   `1m`), publishes `AcknowledgementDeadlineAtRisk` for every order still

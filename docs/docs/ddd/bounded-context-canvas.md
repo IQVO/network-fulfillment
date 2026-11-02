@@ -173,7 +173,7 @@ ship-to PII enters this context at all.
 | Collaborator | Message | Type | Channel | Relationship |
 | --- | --- | --- | --- | --- |
 | `order-management` | Raise held order + feasibility verdict | Command | REST `POST /orders` (`releaseOnAllocation: false`, `allowPartialShipment: false`, `requiredShipBy`) | Customer/Supplier (we are the Customer; OM ADR 0020) |
-| `order-management` | Release held order | Command | REST `POST /orders/{id}/release` | Customer/Supplier |
+| `order-management` | Release held order | Command | REST `POST /orders/{id}/releases` | Customer/Supplier |
 | `order-management` | Cancel held order | Command | REST `DELETE /orders/{id}` (also the orphaned-hold sweep, which reads 404 and 409/422 as answers) | Customer/Supplier |
 | `inventory-storage` | Usable quantity per SKU | Query | REST `GET /inventory/{sku}/usable` (always on) | Conformist to its Open Host |
 | External network | Acknowledge / reject in full | Command | `ports.NetworkGateway.SubmitAcknowledgement(ref, accepted)` (stub) | Conformist |

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
@@ -26,6 +27,9 @@ func (r *failingRepo) FindByRef(context.Context, shared.NetworkRef) (*networkord
 	return nil, r.findErr
 }
 func (r *failingRepo) ListUnanswered(context.Context) ([]*networkorder.NetworkOrder, error) {
+	return nil, r.listErr
+}
+func (r *failingRepo) ListUnansweredPage(context.Context, *contract.Keyset, int) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.listErr
 }
 func (r *failingRepo) ListSubmitted(context.Context) ([]*networkorder.NetworkOrder, error) {

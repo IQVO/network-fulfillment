@@ -88,7 +88,7 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 		if existing.State() != networkorder.StateNew || existing.AcknowledgementOverdue(now) {
 			return existing, nil
 		}
-		return uc.resume(ctx, existing)
+		return uc.resumeWithRetry(ctx, demand.NetworkRef)
 	}
 
 	lines, translationErr := uc.translate(ctx, demand)
@@ -112,7 +112,61 @@ func (uc *ReceiveNetworkDemand) Execute(ctx context.Context, demand contract.Inb
 		return nil, err
 	}
 
-	return uc.answer(ctx, o)
+	return uc.answerWithRetry(ctx, demand.NetworkRef)
+}
+
+// resumeWithRetry reloads the order and finishes answering it, retrying
+// the whole load-answer-save cycle when another writer — a sweep
+// settling its hold, the overdue rejection — won the row between load
+// and Save (migration 0013's optimistic lock). Every step it repeats is
+// idempotent: the held-order raise replays the same local order by its
+// Idempotency-Key, and RecordHold accepts the same id again.
+func (uc *ReceiveNetworkDemand) resumeWithRetry(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error) {
+	var out *networkorder.NetworkOrder
+	err := withVersionRetry(func() error {
+		fresh, err := uc.Orders.FindByRef(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if fresh == nil {
+			return fmt.Errorf("resume %q: %w", ref, ErrOrderNotFound)
+		}
+		// Re-checked per attempt, not just on first delivery: a conflict
+		// means the row moved, and a window that closed (or an answer
+		// that landed) in the meantime must stop the resume cold.
+		if fresh.State() != networkorder.StateNew || fresh.AcknowledgementOverdue(uc.Clock.Now()) {
+			out = fresh
+			return nil
+		}
+		out, err = uc.resume(ctx, fresh)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// answerWithRetry is resumeWithRetry for an order this same call just
+// recorded: the receipt-time checks already ran, so this only reloads
+// and answers, retrying on the same version conflicts.
+func (uc *ReceiveNetworkDemand) answerWithRetry(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error) {
+	var out *networkorder.NetworkOrder
+	err := withVersionRetry(func() error {
+		fresh, err := uc.Orders.FindByRef(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if fresh == nil {
+			return fmt.Errorf("answer %q: %w", ref, ErrOrderNotFound)
+		}
+		out, err = uc.answer(ctx, fresh)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // resume finishes an order that was recorded but never answered (see the

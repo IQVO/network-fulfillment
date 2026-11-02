@@ -365,7 +365,7 @@ func onlyKeys(what string, got map[string]any, allowed []string) error {
 
 func (w *world) unansweredRefs() ([]string, error) {
 	var list struct {
-		NetworkOrders []orderBody `json:"networkOrders"`
+		NetworkOrders []orderBody `json:"items"`
 	}
 	if err := w.decode(&list); err != nil {
 		return nil, err
@@ -402,7 +402,7 @@ func (w *world) theUnansweredListIsEmpty() error {
 	if len(refs) != 0 {
 		return fmt.Errorf("expected no unanswered orders, got %v", refs)
 	}
-	return w.theBodyContains(`"networkOrders":[]`)
+	return w.theBodyContains(`"items":[]`)
 }
 
 // ---- Then: the inbound status ------------------------------------------------

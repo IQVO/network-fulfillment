@@ -9,6 +9,14 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
+// statusKey is the JSON key of the terse status payloads (health, readiness,
+// drain) and the structured-log key of the access log's response status.
+const statusKey = "status"
+
+// problemMalformedBody is the RFC 9457 problem type shared by every decoder
+// that rejects a request body it could not read or must not accept.
+const problemMalformedBody = "malformed-request-body"
+
 // statusFor maps a typed domain/application error to an HTTP status code.
 func statusFor(err error) int {
 	switch {
@@ -20,6 +28,12 @@ func statusFor(err error) int {
 	// A conflict with current resource state, which the caller can
 	// resolve, not a server bug.
 	case errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge):
+		return http.StatusConflict
+
+	// Optimistic lock (migration 0013): another writer — the poller, a
+	// sweep — changed the order between this request's load and its
+	// save. The client reloads and retries; it is not a server bug.
+	case errors.Is(err, networkorder.ErrVersionConflict):
 		return http.StatusConflict
 
 	// A product the Anti-Corruption Layer cannot translate is a business
@@ -70,6 +84,9 @@ func problemFor(err error) problemInfo {
 
 	case errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge):
 		return problemInfo{"confirm-before-acknowledge", "Shipment cannot be confirmed before the order is acknowledged"}
+
+	case errors.Is(err, networkorder.ErrVersionConflict):
+		return problemInfo{"version-conflict", "The order was changed by another writer; reload and retry"}
 
 	case errors.Is(err, shared.ErrUnknownProduct):
 		return problemInfo{"unknown-product", "No SKU is mapped to that network product id"}

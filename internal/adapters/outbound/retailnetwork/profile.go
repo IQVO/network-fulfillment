@@ -35,7 +35,7 @@ func profileKey(site string, revision, attempt int) string {
 	return idempotencyKey("profile", fmt.Sprintf("%s-%d-%d", site, revision, attempt))
 }
 
-func profilePath(nodeID string) []string { return []string{"vendor", "nodes", nodeID, "profile"} }
+func profilePath(nodeID string) []string { return []string{segVendor, segNodes, nodeID, "profile"} }
 
 // DeclareNodeProfile declares the profile of p.SiteId's node and settles what it
 // can in one call: it takes the next revision when the content changed, writes

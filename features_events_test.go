@@ -250,7 +250,7 @@ func (w *world) aLegacyFlatEnvelopeReachesTheConsumer(ctx context.Context) error
 
 func (w *world) theConsumerRejectsItAsNotACloudEvent() error {
 	if !errors.Is(w.err, cloudevents.ErrNotCloudEvent) {
-		return fmt.Errorf("expected the consumer to reject the retired flat envelope as not a CloudEvent, got %v", w.err)
+		return fmt.Errorf("expected the consumer to reject the retired flat envelope as not a CloudEvent, got %w", w.err)
 	}
 	return nil
 }

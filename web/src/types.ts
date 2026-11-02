@@ -35,9 +35,11 @@ export interface NetworkOrder {
   lines: NetworkOrderLine[];
 }
 
-/** Mirrors the GET /network-orders response envelope. */
+/** Mirrors the GET /network-orders response envelope (NetworkOrderPage):
+ *  one keyset page; `nextCursor` is absent on the last page. */
 export interface ListNetworkOrdersResponse {
-  networkOrders: NetworkOrder[];
+  items: NetworkOrder[];
+  nextCursor?: string;
 }
 
 /** Mirrors InboundStatus in apis/openapi.yaml -- the poller-health surface.

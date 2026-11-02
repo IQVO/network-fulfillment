@@ -2,6 +2,7 @@ package usecases
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
@@ -55,7 +56,7 @@ func (uc *RejectOverdueOrders) Execute(ctx context.Context) (RejectOverdueResult
 		if !o.AcknowledgementOverdue(now) {
 			continue
 		}
-		if err := uc.rejectOne(ctx, o); err != nil {
+		if err := uc.rejectOrder(ctx, o.NetworkRef()); err != nil {
 			// One bad order must not abort the pass: the remaining
 			// orders are still holding inventory, and they are exactly
 			// what this use case exists to free. Left for the next
@@ -66,6 +67,25 @@ func (uc *RejectOverdueOrders) Execute(ctx context.Context) (RejectOverdueResult
 		res.Rejected++
 	}
 	return res, nil
+}
+
+// rejectOrder rejects one order on a fresh load, retrying when another
+// writer (the poller answering it, a hold sweep settling it) won the row
+// between the listing above and the Save below — the optimistic lock from
+// migration 0013. A reload that shows the order already answered makes
+// o.Reject fail its transition check, which the pass loop swallows like
+// any other per-order failure: another writer decided it, correctly.
+func (uc *RejectOverdueOrders) rejectOrder(ctx context.Context, ref shared.NetworkRef) error {
+	return withVersionRetry(func() error {
+		o, err := uc.Orders.FindByRef(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if o == nil {
+			return fmt.Errorf("reject %q: %w", ref, ErrOrderNotFound)
+		}
+		return uc.rejectOne(ctx, o)
+	})
 }
 
 func (uc *RejectOverdueOrders) rejectOne(ctx context.Context, o *networkorder.NetworkOrder) error {

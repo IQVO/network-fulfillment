@@ -154,8 +154,10 @@ channels:
       `internal/adapters/outbound/processpathcache/consumer.go`). The
       process-path capability cache replays it from the earliest offset under
       a per-process unique group
-      (`network-fulfillment-process-path-capability-cache`), started only when
-      `CAPABILITY_OFFER_ENABLED=true`. It acts on `ProcessPathCreated`,
+      (group id prefix `network-fulfillment-process-path-capability-cache`,
+      suffixed with hostname, PID and a timestamp), always started (ADR 0025;
+      `CAPABILITY_OFFER_ENABLED=false` is refused at boot). A message that is
+      not a valid CloudEvent is logged and skipped (no DLQ). It acts on `ProcessPathCreated`,
       `ProcessPathUpdated`, `ProcessPathDeactivated` and `CPTScheduleChanged`
       and ignores every other type.
     subscribe:
@@ -172,9 +174,11 @@ channels:
       wes-work-planning's integration topic, CONSUMED by this service, not
       published (the `Topic` constant in
       `internal/adapters/outbound/pathcapacitycache/consumer.go`). The path
-      capacity cache replays it under a per-process unique group, started only
-      when `CAPABILITY_OFFER_ENABLED=true`, and acts only on
-      `PathCapacityChanged`.
+      capacity cache replays it under a per-process unique group (prefix
+      `network-fulfillment-path-capacity-cache`, suffixed with hostname, PID
+      and a timestamp), always started (ADR 0025; `CAPABILITY_OFFER_ENABLED=false`
+      is refused at boot), and acts only on `PathCapacityChanged`. A message
+      that is not a valid CloudEvent is logged and skipped (no DLQ).
     subscribe:
       operationId: consumeWorkPlanningEvents
       summary: Keep the local remaining-admission-capacity read model current.
@@ -189,7 +193,14 @@ channels:
       books the vendor's seller-shipment cartons onto inbound-receiving's ASNs
       and reports the receipts back to the network, under the stable group
       `INBOUND_RECEIPT_CONSUMER_GROUP` (set in warehouse-infra develop as
-      `network-fulfillment-inbound-receiving`).
+      `network-fulfillment-inbound-receiving`), reading from the first offset
+      when the group is new. The Kafka key is the ASN number (used when the
+      payload carries no `asn_number`). A message that is not a valid
+      CloudEvent, or whose data breaks inbound-receiving's contract, is
+      dead-lettered to `warehouse.inbound-receiving.events.dlq` (headers
+      `x-dlq-source-topic`, `x-dlq-error`, `x-dlq-failed-at`) and committed
+      past; other failures are retried with backoff first and dead-lettered
+      when exhausted. Unknown types are skipped.
     subscribe:
       operationId: consumeInboundReceiptEvents
       summary: Apply the receipt handover of the inbound loop (ADR 0028).
@@ -1628,16 +1639,30 @@ components:
         data:
           type: object
           description: The fields this service reads (receipt, ASN, carton identity); the full contents stay with inbound-receiving.
-          required: [receipt_id, asn_number, sealed, lpn, contents, received_at]
+          required: [receipt_id, received_at]
           properties:
             receipt_id:
               type: string
             asn_number:
               type: string
+              description: Falls back to the Kafka key when empty; the event is rejected when both are empty.
             sscc:
               type: string
+              description: At least one of `sscc` and `lpn` must be non-empty, else the event is rejected.
             lpn:
               type: string
+            contents:
+              type: array
+              items:
+                type: object
+                properties:
+                  gtin:
+                    type: string
+                  qty:
+                    type: integer
+                    format: int64
+                  condition:
+                    type: string
             received_at:
               type: string
               format: date-time

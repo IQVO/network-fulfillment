@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,6 +176,7 @@ func (w *world) apiServer() *httptest.Server {
 			ConfirmShipment: &usecases.ConfirmNetworkOrderShipment{
 				Orders: w.orders, Gateway: w.gateway, Events: w.bus, Clock: w.clock,
 			},
+			Idempotency: memory.NewIdempotencyStore(),
 		}
 		if w.offersEnabled {
 			s.Offers = w.offers
@@ -204,12 +206,20 @@ func (w *world) stop() {
 	w.api, w.reports = nil, nil
 }
 
+// bddKeys numbers the Idempotency-Key of every POST the suite sends.
+var bddKeys atomic.Int64
+
 // do issues a real net/http request. No Authorization header is ever sent:
-// this context's endpoints are unauthenticated by fleet rule.
+// this context's endpoints are unauthenticated by fleet rule. Every POST
+// carries a fresh Idempotency-Key (one per logical submit, fleet REST
+// guideline section 2), as a real client does.
 func (w *world) do(ctx context.Context, srv *httptest.Server, method, path string) (int, []byte, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, method, srv.URL+path, http.NoBody)
 	if err != nil {
 		return 0, nil, nil, err
+	}
+	if method == http.MethodPost {
+		req.Header.Set("Idempotency-Key", fmt.Sprintf("bdd-key-%d", bddKeys.Add(1)))
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {

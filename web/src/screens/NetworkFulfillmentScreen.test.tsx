@@ -25,7 +25,7 @@ const UNHEALTHY_STATUS: InboundStatus = {
 };
 
 const ORDERS: ListNetworkOrdersResponse = {
-  networkOrders: [
+  items: [
     {
       networkRef: "po-4711",
       siteId: "site-1",
@@ -75,7 +75,7 @@ describe("NetworkFulfillmentScreen", () => {
   });
 
   it("renders the empty state when there are no unanswered orders", async () => {
-    mockEndpoints({ networkOrders: [] }, HEALTHY_STATUS);
+    mockEndpoints({ items: [] }, HEALTHY_STATUS);
     render(<NetworkFulfillmentScreen />);
 
     expect(
@@ -109,7 +109,7 @@ describe("NetworkFulfillmentScreen", () => {
 
   it("surfaces the acknowledge-by overdue marker on a stale order", async () => {
     const overdueOrder: ListNetworkOrdersResponse = {
-      networkOrders: [{ ...ORDERS.networkOrders[0], acknowledgementOverdue: true }],
+      items: [{ ...ORDERS.items[0], acknowledgementOverdue: true }],
     };
     mockEndpoints(overdueOrder, HEALTHY_STATUS);
     render(<NetworkFulfillmentScreen />);

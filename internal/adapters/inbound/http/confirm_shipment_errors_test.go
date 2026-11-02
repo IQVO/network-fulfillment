@@ -43,9 +43,12 @@ func TestHandleConfirmShipment_BeforeAcknowledgeReturns409(t *testing.T) {
 			Events:  nopPublisher{},
 			Clock:   fixedClock{t: at},
 		},
+		Idempotency: memory.NewIdempotencyStore(),
 	}
 	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/network-orders/po-new/shipment-confirmation", nil))
+	req := httptest.NewRequest(http.MethodPost, "/network-orders/po-new/shipment-confirmation", nil)
+	req.Header.Set("Idempotency-Key", "k-new")
+	srv.Routes().ServeHTTP(rec, req)
 
 	body := assertProblem(t, rec, http.StatusConflict)
 	if !strings.HasSuffix(body.Type, "/confirm-before-acknowledge") {
@@ -70,6 +73,7 @@ func TestCORSPreflightAllowsPostForShipmentConfirmation(t *testing.T) {
 			Events:  nopPublisher{},
 			Clock:   fixedClock{t: now()},
 		},
+		Idempotency: memory.NewIdempotencyStore(),
 	}
 	req := httptest.NewRequest(http.MethodOptions, "/network-orders/po-1/shipment-confirmation", nil)
 	req.Header.Set("Origin", "http://localhost:5173")

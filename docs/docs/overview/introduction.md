@@ -97,3 +97,7 @@ of `order-management` through a held order (ADR 0001 §7).
 **Decisions**
 
 - [ADR index](https://github.com/IQVO/network-fulfillment/blob/develop/docs/adr/README.md)
+
+:::note[Disclaimer]
+This project is a domain-driven design study. It is not associated with, endorsed by or affiliated with any company, and it uses no company's code, data, logos or trademarks. All names, figures and examples are illustrative or synthetic.
+:::
