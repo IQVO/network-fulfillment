@@ -222,21 +222,27 @@ paths:
 
         Only this list is exposed, deliberately. It is the only listing
         whose size is an operational signal; a general "all orders"
-        endpoint would need paging and would answer no question anybody
-        has while something is wrong.
+        endpoint would answer no question anybody has while something is
+        wrong.
+
+
+        Keyset-paginated (fleet REST guideline section 3): ordered by
+        (`acknowledgeBy`, `networkRef`), so orders sharing a deadline are
+        never skipped or repeated across pages. Follow `nextCursor` until
+        it is absent. Any query parameter other than `limit` and `cursor`
+        is a 400 `unknown-query-parameter`.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
-          description: Unanswered orders, soonest deadline first.
+          description: One page of unanswered orders, soonest deadline first.
           content:
             application/json:
               schema:
-                type: object
-                required: [networkOrders]
-                properties:
-                  networkOrders:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/NetworkOrder"
+                $ref: "#/components/schemas/NetworkOrderPage"
+        "400":
+          $ref: "#/components/responses/BadPageRequest"
         "500":
           $ref: "#/components/responses/Problem"
 
@@ -295,10 +301,13 @@ paths:
         from a work unit back to a `networkRef` exists (ADR 0014).
 
 
-        Idempotent: an order already `CONFIRMED` is returned unchanged with
+        Idempotent twice over: the request carries a required
+        `Idempotency-Key` (fleet REST guideline section 2) whose first
+        answer is stored and replayed with `Idempotency-Replayed: true`,
+        and an order already `CONFIRMED` is still returned unchanged with
         204, without re-submitting to the network or re-publishing the
-        event. The route is registered only when the shipment-confirmation
-        use case is wired.
+        event, when a NEW key is used. The route is registered only when
+        the shipment-confirmation use case is wired.
       parameters:
         - name: networkRef
           in: path
@@ -307,10 +316,29 @@ paths:
           schema:
             type: string
           example: po-4711
+        - $ref: "#/components/parameters/IdempotencyKey"
       responses:
         "204":
           description: >
             Shipment confirmed (or the order was already `CONFIRMED`).
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: >
+            The `Idempotency-Key` header is missing
+            (`idempotency-key-required`) or not 1-128 printable ASCII
+            characters (`idempotency-key-invalid`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.network-fulfillment.warehouse-systems.dev/idempotency-key-required
+                title: Idempotency-Key header is required
+                status: 400
+                detail: the Idempotency-Key header is required on this operation
+                instance: /network-orders/po-4711/shipment-confirmation
         "404":
           description: No network order with that `networkRef` (`network-order-not-found`), or a path that carries a NUL character (`resource-not-found`).
           content:
@@ -321,11 +349,29 @@ paths:
           description: >
             The order is not `ACKNOWLEDGED`, so shipment cannot be confirmed
             yet (`confirm-before-acknowledge`). A shipment may not be
-            confirmed for an order we never committed to.
+            confirmed for an order we never committed to. Also the answer
+            when the `Idempotency-Key` was already used with a different
+            request (method, path or body): problem type
+            `idempotency-key-reused`, a client bug, not to be retried.
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
+              examples:
+                confirmBeforeAcknowledge:
+                  value:
+                    type: https://errors.network-fulfillment.warehouse-systems.dev/confirm-before-acknowledge
+                    title: Shipment cannot be confirmed before acknowledgement
+                    status: 409
+                    detail: network order is not acknowledged
+                    instance: /network-orders/po-4711/shipment-confirmation
+                idempotencyKeyReused:
+                  value:
+                    type: https://errors.network-fulfillment.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: the Idempotency-Key was already used with a different method, path or body
+                    instance: /network-orders/po-4711/shipment-confirmation
         "422":
           description: The `networkRef` is empty (`empty-network-ref`).
           content:
@@ -357,19 +403,24 @@ paths:
 
         Always registered: the capability-offer recompute loop and its
         Kafka-fed caches are part of the runtime (ADR 0025).
+
+
+        Keyset-paginated (fleet REST guideline section 3): ordered by
+        (`sku`, `siteId`). Follow `nextCursor` until it is absent. Any
+        query parameter other than `limit` and `cursor` is a 400
+        `unknown-query-parameter`.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
-          description: All current capability offers (empty array when none).
+          description: One page of current capability offers (empty `items` when none).
           content:
             application/json:
               schema:
-                type: object
-                required: [capabilityOffers]
-                properties:
-                  capabilityOffers:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/CapabilityOffer"
+                $ref: "#/components/schemas/CapabilityOfferPage"
+        "400":
+          $ref: "#/components/responses/BadPageRequest"
         "500":
           $ref: "#/components/responses/Problem"
 
@@ -452,7 +503,69 @@ paths:
           $ref: "#/components/responses/Problem"
 
 components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Client-generated key (a UUID per logical submit; a retry of the same
+        submit reuses it), 1-128 printable ASCII characters. The first
+        answer (2xx or 4xx) is stored for at least 24 hours and replayed for
+        the same method, path and body with `Idempotency-Replayed: true`; a
+        different request under the same key is a 409
+        `idempotency-key-reused`. A 5xx is never stored.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+      example: 7b0d1c2e-9a43-4d1f-8f7e-0c2b1a9d6e55
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size, 1-500.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >
+        Opaque keyset token from a previous page's `nextCursor`. A value
+        that does not decode is a 400 `invalid-cursor`.
+      schema:
+        type: string
+
+  headers:
+    IdempotencyReplayed:
+      description: >
+        Present, with the value `true`, only when this answer is a replay of
+        the stored answer for the same `Idempotency-Key`.
+      schema:
+        type: string
+        enum: ["true"]
+
   responses:
+    BadPageRequest:
+      description: >
+        `invalid-limit` (not an integer 1-500), `invalid-cursor` (the
+        cursor does not decode), or `unknown-query-parameter` (a query
+        parameter the collection does not declare, e.g. a retired paging
+        parameter).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.network-fulfillment.warehouse-systems.dev/invalid-cursor
+            title: Invalid cursor
+            status: 400
+            detail: cursor is not a valid page token
+            instance: /network-orders
     Problem:
       description: >
         An RFC 7807 problem document. A NUL character (U+0000) is never
@@ -466,6 +579,30 @@ components:
             $ref: "#/components/schemas/Problem"
 
   schemas:
+    NetworkOrderPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetworkOrder"
+        nextCursor:
+          type: string
+          description: Opaque token for the next page; absent on the last page.
+
+    CapabilityOfferPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CapabilityOffer"
+        nextCursor:
+          type: string
+          description: Opaque token for the next page; absent on the last page.
+
     CapabilityOffer:
       type: object
       description: >

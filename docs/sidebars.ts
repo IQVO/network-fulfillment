@@ -236,6 +236,11 @@ const sidebars: SidebarsConfig = {
           label: '0031 Advertise against the next feasible cutoff, read in the site',
           href: '/docs/adr/0031-advertise-against-the-next-feasible-cutoff',
         },
+        {
+          type: 'link',
+          label: '0032 Adopt the fleet REST API guideline',
+          href: '/docs/adr/0032-adopt-the-fleet-rest-api-guideline',
+        },
       ],
     },
   ],

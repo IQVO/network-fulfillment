@@ -162,7 +162,7 @@ func (c wireClock) Now() time.Time { return c.now }
 
 // orderManagementStub is order-management behind its real REST contract —
 // exactly the endpoints ordermanagement.Planner calls: POST /orders raising
-// a held order, POST /orders/{id}/release, DELETE /orders/{id}. Feasibility
+// a held order, POST /orders/{id}/releases, DELETE /orders/{id}. Feasibility
 // is decided by promiseDate the same way the real service decides it
 // (ADR 0001 §7): a promise means the deadline is makeable, a null promise
 // means it is not. The REAL Planner adapter runs against it, so the JSON
@@ -208,7 +208,7 @@ func newOrderManagementStub(t *testing.T, feasible bool) *orderManagementStub {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(resp)
 	})
-	mux.HandleFunc("POST /orders/{id}/release", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /orders/{id}/releases", func(w http.ResponseWriter, r *http.Request) {
 		stub.mu.Lock()
 		stub.released = append(stub.released, r.PathValue("id"))
 		stub.mu.Unlock()

@@ -614,7 +614,7 @@ func (v *vendorFake) confirmShipment(w http.ResponseWriter, slot string, raw []b
 
 // planFake stands in for order-management's two endpoints this flow uses
 // (the e2e test does the same with a fixed order id): POST /orders holds an
-// order, POST /orders/{id}/release releases it. It counts raw requests, so a
+// order, POST /orders/{id}/releases releases it. It counts raw requests, so a
 // second raise of the same demand is visible even though the Idempotency-Key
 // would make a real order-management replay it.
 type planFake struct {
@@ -669,8 +669,8 @@ func (p *planFake) serve(w http.ResponseWriter, r *http.Request) {
 		fakeOK(w, http.StatusCreated, map[string]any{
 			"id": id, "promiseDate": time.Now().Add(12 * time.Hour).UTC(), "lines": []map[string]any{{"status": "HELD"}},
 		})
-	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/orders/") && strings.HasSuffix(r.URL.Path, "/release"):
-		p.releases = append(p.releases, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/orders/"), "/release"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/orders/") && strings.HasSuffix(r.URL.Path, "/releases"):
+		p.releases = append(p.releases, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/orders/"), "/releases"))
 		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/orders/"):
 		p.cancels++

@@ -13,6 +13,7 @@ import (
 	inboundhttp "github.com/claudioed/network-fulfillment/internal/adapters/inbound/http"
 	"github.com/claudioed/network-fulfillment/internal/adapters/inbound/poller"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
+	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
@@ -38,6 +39,9 @@ func (r failingRepo) FindByRef(context.Context, shared.NetworkRef) (*networkorde
 	return nil, r.err
 }
 func (r failingRepo) ListUnanswered(context.Context) ([]*networkorder.NetworkOrder, error) {
+	return nil, r.err
+}
+func (r failingRepo) ListUnansweredPage(context.Context, *contract.Keyset, int) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.err
 }
 func (r failingRepo) ListSubmitted(context.Context) ([]*networkorder.NetworkOrder, error) {
@@ -296,7 +300,7 @@ func TestListUnanswered_ReturnsOnlyUnansweredOrders(t *testing.T) {
 		NetworkOrders []struct {
 			NetworkRef string `json:"networkRef"`
 			State      string `json:"state"`
-		} `json:"networkOrders"`
+		} `json:"items"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -311,7 +315,7 @@ func TestListUnanswered_ReturnsOnlyUnansweredOrders(t *testing.T) {
 func TestListUnanswered_EmptyIsAnEmptyArrayNotNull(t *testing.T) {
 	e := newTestEnv(t)
 	rec := e.do(t, http.MethodGet, "/network-orders")
-	if !strings.Contains(rec.Body.String(), `"networkOrders":[]`) {
+	if !strings.Contains(rec.Body.String(), `"items":[]`) {
 		t.Fatalf("body = %s, want an empty array", rec.Body.String())
 	}
 }

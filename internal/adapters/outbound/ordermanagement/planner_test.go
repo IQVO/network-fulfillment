@@ -165,11 +165,32 @@ func TestReleaseAndCancel_HitOrderManagementsRealRoutes(t *testing.T) {
 		t.Fatalf("CancelHeldOrder: %v", err)
 	}
 
-	want := []string{"POST /orders/ord-1/release", "DELETE /orders/ord-1"}
+	want := []string{"POST /orders/ord-1/releases", "DELETE /orders/ord-1"}
 	for i, w := range want {
 		if rec.calls[i] != w {
 			t.Fatalf("call[%d] = %q, want %q", i, rec.calls[i], w)
 		}
+	}
+}
+
+// TestReleaseHeldOrder_SendsAStableIdempotencyKey: every order-management
+// POST is keyed (fleet REST guideline section 2); a retried release must
+// reuse the key so the provider replays instead of answering 409.
+func TestReleaseHeldOrder_SendsAStableIdempotencyKey(t *testing.T) {
+	var keys []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	p := ordermanagement.NewPlanner(srv.URL, srv.Client())
+	for _, id := range []shared.LocalOrderId{"ord-1", "ord-1", "ord-2"} {
+		if err := p.ReleaseHeldOrder(context.Background(), id); err != nil {
+			t.Fatalf("ReleaseHeldOrder(%s): %v", id, err)
+		}
+	}
+	if keys[0] == "" || keys[0] != keys[1] || keys[0] == keys[2] {
+		t.Fatalf("release keys = %q, want one stable non-empty key per order", keys)
 	}
 }
 
