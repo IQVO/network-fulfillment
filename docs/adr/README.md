@@ -46,3 +46,7 @@ to remove the duplicate number.
 Related: [`docs/planning/retail-network-adr-0001-DRAFT-for-new-repo.md`](../planning/retail-network-adr-0001-DRAFT-for-new-repo.md)
 (draft ADR for the `retail-network` repository, not a decision of this
 one) and the [DDD artifact pack](../ddd/README.md).
+
+## Disclaimer
+
+This project is a domain-driven design study. It is not associated with, endorsed by or affiliated with any company, and it uses no company's code, data, logos or trademarks. All names, figures and examples are illustrative or synthetic.

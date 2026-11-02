@@ -328,7 +328,10 @@ paths:
           description: >
             The `Idempotency-Key` header is missing
             (`idempotency-key-required`) or not 1-128 printable ASCII
-            characters (`idempotency-key-invalid`).
+            characters (`idempotency-key-invalid`; also when the header is
+            repeated), or the request body could not be read or contains a
+            NUL character (`malformed-request-body`), or the query string
+            contains a NUL character (`invalid-request`).
           content:
             application/problem+json:
               schema:
@@ -352,10 +355,13 @@ paths:
             confirmed for an order we never committed to. Also the answer
             when the `Idempotency-Key` was already used with a different
             request (method, path or body): problem type
-            `idempotency-key-reused`, a client bug, not to be retried.
-            Finally `version-conflict`: another writer (the demand poller
-            or a sweep) changed the order between this request's load and
-            its save — retryable after a reload.
+            `idempotency-key-reused`, a client bug, not to be retried. Or
+            a request with the same key is still in flight after the
+            server waited 30 seconds for it (`idempotency-key-in-progress`):
+            retry later with the same key. Finally `version-conflict`:
+            another writer (the demand poller or a sweep) changed the
+            order between this request's load and its save — retryable
+            after a reload.
           content:
             application/problem+json:
               schema:
@@ -364,16 +370,23 @@ paths:
                 confirmBeforeAcknowledge:
                   value:
                     type: https://errors.network-fulfillment.warehouse-systems.dev/confirm-before-acknowledge
-                    title: Shipment cannot be confirmed before acknowledgement
+                    title: Shipment cannot be confirmed before the order is acknowledged
                     status: 409
-                    detail: network order is not acknowledged
+                    detail: cannot confirm shipment before acknowledgement
                     instance: /network-orders/po-4711/shipment-confirmation
                 idempotencyKeyReused:
                   value:
                     type: https://errors.network-fulfillment.warehouse-systems.dev/idempotency-key-reused
                     title: Idempotency-Key was already used with a different request
                     status: 409
-                    detail: the Idempotency-Key was already used with a different method, path or body
+                    detail: idempotency key was already used with a different request
+                    instance: /network-orders/po-4711/shipment-confirmation
+                idempotencyKeyInProgress:
+                  value:
+                    type: https://errors.network-fulfillment.warehouse-systems.dev/idempotency-key-in-progress
+                    title: A request with this Idempotency-Key is still being processed
+                    status: 409
+                    detail: retry later with the same key
                     instance: /network-orders/po-4711/shipment-confirmation
                 versionConflict:
                   value:
@@ -487,9 +500,26 @@ paths:
               schema:
                 $ref: "#/components/schemas/AcknowledgementReport"
         "400":
-          $ref: "#/components/responses/Problem"
+          description: >
+            `invalid-report-query`: `from` or `to` is missing or not an
+            RFC3339 timestamp, or `granularity` is anything but `day`. (A
+            NUL character in the query is `invalid-request`.)
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.network-fulfillment.warehouse-systems.dev/invalid-report-query
+                title: The report query is malformed or missing a required parameter
+                status: 400
+                detail: query parameter 'from' is required (RFC3339)
+                instance: /reports/acknowledgement
         "500":
-          $ref: "#/components/responses/Problem"
+          description: The read model could not be queried (`report-store-error`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
 
   /reports/acknowledgement/freshness:
     get:
@@ -521,7 +551,7 @@ components:
       description: >
         Client-generated key (a UUID per logical submit; a retry of the same
         submit reuses it), 1-128 printable ASCII characters. The first
-        answer (2xx or 4xx) is stored for at least 24 hours and replayed for
+        answer (2xx or 4xx) is stored for 24 hours and replayed for
         the same method, path and body with `Idempotency-Replayed: true`; a
         different request under the same key is a 409
         `idempotency-key-reused`. A 5xx is never stored.
@@ -872,7 +902,7 @@ components:
     Problem:
       type: object
       description: RFC 7807 problem details.
-      required: [type, title, status]
+      required: [type, title, status, detail, instance]
       properties:
         type:
           type: string
