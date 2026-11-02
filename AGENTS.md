@@ -14,7 +14,7 @@ not a real retailer's SP-API) before writing network-facing code. That ADR
 was renumbered from 0002 to 0009 on 2026-10-05 to resolve a duplicate
 ADR-0002 (`0002-mcp-and-analytics-data-product.md` keeps 0002); a stub at
 the old 0002 stub was deleted; ADR 0009 is the only home of that decision.
-ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/ddd/`.
+ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/docs/ddd/`.
 
 ## Current state
 
@@ -42,9 +42,9 @@ the network (`SubmitAvailability` has no caller).
 Not built: the supply loop (ADR 0027, reserved: node profile, `DeclareCapability`,
 `SubmitAvailability`, inventory feed), a real package count (labels use one
 package), reconciling a shipment confirmation (a FAILURE is logged at ERROR only).
-Operations: `docs/operations/runbook.md` (plus configuration, observability,
-troubleshooting); CI jobs and gremlins thresholds: `docs/development/testing.md`;
-doc map: `docs/overview/introduction.md`.
+Operations: `docs/docs/operations/runbook.md` (plus configuration, observability,
+troubleshooting); CI jobs and gremlins thresholds: `docs/docs/development/testing.md`;
+doc map: `docs/docs/overview/introduction.md`.
 
 Core concept: **throughput-constrained advertised availability**
 = `min(physicalAvailable, throughputFeasibleBefore(nextFeasibleCutoff))` (ADR 0001;
