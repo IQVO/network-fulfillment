@@ -64,20 +64,28 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 		holdSettledAt = &at
 	}
 
+	// The row is written at the NEXT version ($10 + 1) on both paths:
+	// the update branch takes the row from the loaded version ($10) to
+	// loaded+1, and the insert branch starts the row at loaded+1 — so
+	// after either branch the stored version equals the aggregate's
+	// version once AdvanceVersion runs. An insert that stored $10 itself
+	// would leave the row one behind the in-memory aggregate, and the
+	// SAME instance's next Save (record receipt, then answer) would
+	// trip the conditional as if a concurrent writer had moved the row.
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO network_orders (
 			network_ref, site_id, required_ship_by, acknowledge_by,
 			state, local_order_id, received_at, hold_outcome, hold_settled_at,
 			aggregate_version
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10 + 1)
 		ON CONFLICT (network_ref) DO UPDATE SET
 			state = EXCLUDED.state,
 			local_order_id = EXCLUDED.local_order_id,
 			hold_outcome = EXCLUDED.hold_outcome,
 			hold_settled_at = EXCLUDED.hold_settled_at,
 			aggregate_version = network_orders.aggregate_version + 1
-		WHERE network_orders.aggregate_version = EXCLUDED.aggregate_version
+		WHERE network_orders.aggregate_version = $10
 	`,
 		string(o.NetworkRef()), string(o.SiteId()), o.RequiredShipBy(), o.AcknowledgeBy(),
 		string(o.State()), localOrderId, o.ReceivedAt(), holdOutcome, holdSettledAt,
@@ -90,8 +98,8 @@ func (r *NetworkOrderRepo) Save(ctx context.Context, o *networkorder.NetworkOrde
 	// row moved on to a newer version between our load and this write —
 	// a lost-update window the caller closes by reloading and retrying
 	// (or, on the REST surface, answering 409). A fresh order inserts
-	// with version 0 and reports one affected row, so zero here really
-	// is a conflict and nothing else.
+	// and reports one affected row, so zero here really is a conflict
+	// and nothing else.
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("save network order %q: %w", o.NetworkRef(), networkorder.ErrVersionConflict)
 	}
