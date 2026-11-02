@@ -220,6 +220,14 @@ func (p *ledgerProbe) idempotencyTable() int {
 	return p.count(`SELECT count(*) FROM information_schema.tables WHERE table_name = 'idempotency_keys'`)
 }
 
+// orderVersionColumn counts the network_orders.aggregate_version column
+// (migration 0013): 1 once 0013 is up, 0 after its DOWN ran.
+func (p *ledgerProbe) orderVersionColumn() int {
+	p.t.Helper()
+	return p.count(`SELECT count(*) FROM information_schema.columns
+		WHERE table_name = 'network_orders' AND column_name = 'aggregate_version'`)
+}
+
 func (p *ledgerProbe) kindRows(kind string) int {
 	p.t.Helper()
 	return p.count(`SELECT count(*) FROM network_submissions WHERE kind = $1`, kind)
@@ -302,38 +310,56 @@ func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
 	if p.idempotencyTable() != 1 {
 		t.Fatal("after Up the idempotency_keys table must exist (migration 0012)")
 	}
+	if p.orderVersionColumn() != 1 {
+		t.Fatal("after Up the aggregate_version column must exist (migration 0013)")
+	}
 	five := []string{"ACKNOWLEDGEMENT", "SHIPMENT_CONFIRMATION", "NODE_REGISTRATION", "NODE_PROFILE", "INBOUND_RECEIPT"}
 	six := append(slices.Clone(five), "INVENTORY")
 	p.expectLedgerKinds(six)
 
-	// One step down is 0012: it takes only the idempotency key store with it.
+	// One step down is 0013: it takes only the aggregate_version column
+	// with it — the optimistic lock is additive, so its removal must
+	// leave every table and ledger kind behind.
 	p.step(-1)
 	if got := p.version(); got != top-1 {
 		t.Fatalf("version after one step down = %d, want %d", got, top-1)
 	}
-	if p.idempotencyTable() != 0 {
-		t.Fatal("after one step down the idempotency_keys table must be gone")
+	if p.orderVersionColumn() != 0 {
+		t.Fatal("after one step down the aggregate_version column must be gone")
 	}
-	if p.inventoryTables() != 2 {
-		t.Fatal("after one step down the inventory feed tables must survive (0011 stays)")
+	if p.idempotencyTable() != 1 {
+		t.Fatal("after one step down the idempotency_keys table must survive (0012 stays)")
 	}
 	p.expectLedgerKinds(six)
 
-	// A second step down is 0011: it takes INVENTORY and its tables with it and
-	// leaves the five kinds of 0008 admitted.
+	// A second step down is 0012: it takes only the idempotency key store with it.
 	p.step(-1)
 	if got := p.version(); got != top-2 {
 		t.Fatalf("version after two steps down = %d, want %d", got, top-2)
 	}
+	if p.idempotencyTable() != 0 {
+		t.Fatal("after two steps down the idempotency_keys table must be gone")
+	}
+	if p.inventoryTables() != 2 {
+		t.Fatal("after two steps down the inventory feed tables must survive (0011 stays)")
+	}
+	p.expectLedgerKinds(six)
+
+	// A third step down is 0011: it takes INVENTORY and its tables with it
+	// and leaves the five kinds of 0008 admitted.
+	p.step(-1)
+	if got := p.version(); got != top-3 {
+		t.Fatalf("version after three steps down = %d, want %d", got, top-3)
+	}
 	if p.inventoryTables() != 0 {
-		t.Fatal("after two steps down the inventory feed tables must be gone")
+		t.Fatal("after three steps down the inventory feed tables must be gone")
 	}
 	p.expectLedgerKinds(five)
 	p.expectLedgerRefuses("INVENTORY")
 
 	p.step(1)
-	if got := p.version(); got != top-1 {
-		t.Fatalf("version after the second up = %d, want %d", got, top-1)
+	if got := p.version(); got != top-2 {
+		t.Fatalf("version after the second up = %d, want %d", got, top-2)
 	}
 	if p.inventoryTables() != 2 {
 		t.Fatal("after the second up the inventory feed tables must exist")
@@ -341,11 +367,20 @@ func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
 	p.expectLedgerKinds(six)
 
 	p.step(1)
-	if got := p.version(); got != top {
-		t.Fatalf("version after the third up = %d, want %d", got, top)
+	if got := p.version(); got != top-1 {
+		t.Fatalf("version after the third up = %d, want %d", got, top-1)
 	}
 	if p.idempotencyTable() != 1 {
 		t.Fatal("after the third up the idempotency_keys table must exist again")
+	}
+	p.expectLedgerKinds(six)
+
+	p.step(1)
+	if got := p.version(); got != top {
+		t.Fatalf("version after the fourth up = %d, want %d", got, top)
+	}
+	if p.orderVersionColumn() != 1 {
+		t.Fatal("after the fourth up the aggregate_version column must exist again")
 	}
 	p.expectLedgerKinds(six)
 }

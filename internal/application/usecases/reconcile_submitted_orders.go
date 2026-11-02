@@ -2,6 +2,7 @@ package usecases
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
@@ -60,12 +61,12 @@ func (uc *ReconcileSubmittedOrders) Execute(ctx context.Context) (ReconcileResul
 		}
 		switch status {
 		case contract.SubmissionSuccess:
-			if err := uc.confirm(ctx, o); err != nil {
+			if err := uc.confirm(ctx, o.NetworkRef()); err != nil {
 				continue
 			}
 			res.Confirmed++
 		case contract.SubmissionFailure:
-			if err := uc.fail(ctx, o); err != nil {
+			if err := uc.fail(ctx, o.NetworkRef()); err != nil {
 				continue
 			}
 			res.Failed++
@@ -88,7 +89,26 @@ func (uc *ReconcileSubmittedOrders) Execute(ctx context.Context) (ReconcileResul
 // atomic scope (ADR 0016) BEFORE the held order is released, so a crash
 // between the two leaves a recoverable record (the order already reads
 // ACKNOWLEDGED, its event already enqueued) rather than an ambiguous one.
-func (uc *ReconcileSubmittedOrders) confirm(ctx context.Context, o *networkorder.NetworkOrder) error {
+// confirm settles one order on a fresh load, retrying the whole
+// load-mutate-save cycle on a version conflict (migration 0013): the
+// verdict was fetched above, but the row may have moved since — e.g. the
+// overdue sweep rejected the order while we were asking the gateway. A
+// reload that is no longer SUBMITTED fails ConfirmAcknowledgement's
+// transition check and is swallowed by the pass loop, same as today.
+func (uc *ReconcileSubmittedOrders) confirm(ctx context.Context, ref shared.NetworkRef) error {
+	return withVersionRetry(func() error {
+		o, err := uc.Orders.FindByRef(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if o == nil {
+			return fmt.Errorf("confirm %q: %w", ref, ErrOrderNotFound)
+		}
+		return uc.confirmOne(ctx, o)
+	})
+}
+
+func (uc *ReconcileSubmittedOrders) confirmOne(ctx context.Context, o *networkorder.NetworkOrder) error {
 	if err := o.ConfirmAcknowledgement(); err != nil {
 		return err
 	}
@@ -120,7 +140,24 @@ func (uc *ReconcileSubmittedOrders) confirm(ctx context.Context, o *networkorder
 // and ReceiveNetworkDemand.reject use elsewhere in this package, because
 // freeing the hold is the operationally important step and must not be
 // skipped by a later failure.
-func (uc *ReconcileSubmittedOrders) fail(ctx context.Context, o *networkorder.NetworkOrder) error {
+// fail settles one refused order on a fresh load with the same conflict
+// retry as confirm; freeHold is safe to repeat because order-management's
+// cancel is idempotent and its already-released answer is handled below
+// as a normal outcome.
+func (uc *ReconcileSubmittedOrders) fail(ctx context.Context, ref shared.NetworkRef) error {
+	return withVersionRetry(func() error {
+		o, err := uc.Orders.FindByRef(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if o == nil {
+			return fmt.Errorf("fail %q: %w", ref, ErrOrderNotFound)
+		}
+		return uc.failOne(ctx, o)
+	})
+}
+
+func (uc *ReconcileSubmittedOrders) failOne(ctx context.Context, o *networkorder.NetworkOrder) error {
 	if err := freeHold(ctx, uc.Planner, o, uc.Clock.Now()); err != nil {
 		return err
 	}

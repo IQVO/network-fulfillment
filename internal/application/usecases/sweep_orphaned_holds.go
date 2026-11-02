@@ -72,7 +72,7 @@ func (uc *SweepOrphanedHolds) Execute(ctx context.Context) (SweepOrphanedHoldsRe
 		if !o.HoldOrphaned(now, uc.Grace) {
 			continue
 		}
-		outcome := uc.sweepOne(ctx, o, now)
+		outcome := uc.sweepWithRetry(ctx, o.NetworkRef(), now)
 		uc.count(ctx, outcome)
 		if outcome == contract.HoldSweepCancelled {
 			res.Cancelled++
@@ -96,7 +96,30 @@ func (uc *SweepOrphanedHolds) count(ctx context.Context, outcome contract.HoldSw
 // sweepOne frees one orphaned hold. One bad hold must not abort the pass: the
 // rest are just as orphaned, and a failed one is retried on the next pass
 // (order-management's cancel is idempotent).
-func (uc *SweepOrphanedHolds) sweepOne(ctx context.Context, o *networkorder.NetworkOrder, now time.Time) contract.HoldSweepOutcome {
+// sweepWithRetry frees one orphaned hold on a fresh load, retrying when
+// another writer won the row between the listing and the Save
+// (migration 0013's optimistic lock). CancelHeldOrder is idempotent, so
+// a repeated attempt is safe; once attempts run out, the conflict is
+// reported like any other failure and the next scheduled pass — the
+// backstop this sweep already is — picks the hold up again.
+func (uc *SweepOrphanedHolds) sweepWithRetry(ctx context.Context, ref shared.NetworkRef, now time.Time) contract.HoldSweepOutcome {
+	outcome := contract.HoldSweepFailed
+	_ = withVersionRetry(func() error {
+		fresh, err := uc.Orders.FindByRef(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if fresh == nil {
+			return nil
+		}
+		var sweepErr error
+		outcome, sweepErr = uc.sweepOne(ctx, fresh, now)
+		return sweepErr
+	})
+	return outcome
+}
+
+func (uc *SweepOrphanedHolds) sweepOne(ctx context.Context, o *networkorder.NetworkOrder, now time.Time) (contract.HoldSweepOutcome, error) {
 	err := uc.Planner.CancelHeldOrder(ctx, *o.LocalOrderId())
 	if err == nil {
 		return uc.settle(ctx, o, networkorder.HoldCancelled, shared.HoldAnswerCancelled, now)
@@ -107,7 +130,7 @@ func (uc *SweepOrphanedHolds) sweepOne(ctx context.Context, o *networkorder.Netw
 	if errors.Is(err, contract.ErrHeldOrderAlreadyReleased) {
 		return uc.settle(ctx, o, networkorder.HoldAlreadyReleased, "", now)
 	}
-	return contract.HoldSweepFailed
+	return contract.HoldSweepFailed, nil
 }
 
 // settle records the outcome and, when the hold was cancelled, reports it in
@@ -119,9 +142,9 @@ func (uc *SweepOrphanedHolds) settle(
 	outcome networkorder.HoldOutcome,
 	answer shared.HoldAnswer,
 	now time.Time,
-) contract.HoldSweepOutcome {
+) (contract.HoldSweepOutcome, error) {
 	if err := o.SettleHold(outcome, now); err != nil {
-		return contract.HoldSweepFailed
+		return contract.HoldSweepFailed, nil
 	}
 	err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
 		if err := uc.Orders.Save(ctx, o); err != nil {
@@ -140,10 +163,17 @@ func (uc *SweepOrphanedHolds) settle(
 		})
 	})
 	if err != nil {
-		return contract.HoldSweepFailed
+		// A version conflict is the one settle failure THIS pass can
+		// fix on its own: sweepWithRetry reloads the order and runs it
+		// again. Anything else stays a plain failure for the next
+		// scheduled pass, exactly as before.
+		if errors.Is(err, networkorder.ErrVersionConflict) {
+			return contract.HoldSweepFailed, err
+		}
+		return contract.HoldSweepFailed, nil
 	}
 	if outcome == networkorder.HoldAlreadyReleased {
-		return contract.HoldSweepAlreadyReleased
+		return contract.HoldSweepAlreadyReleased, nil
 	}
-	return contract.HoldSweepCancelled
+	return contract.HoldSweepCancelled, nil
 }

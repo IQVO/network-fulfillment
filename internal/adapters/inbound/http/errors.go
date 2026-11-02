@@ -22,6 +22,12 @@ func statusFor(err error) int {
 	case errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge):
 		return http.StatusConflict
 
+	// Optimistic lock (migration 0013): another writer — the poller, a
+	// sweep — changed the order between this request's load and its
+	// save. The client reloads and retries; it is not a server bug.
+	case errors.Is(err, networkorder.ErrVersionConflict):
+		return http.StatusConflict
+
 	// A product the Anti-Corruption Layer cannot translate is a business
 	// fact about OUR catalogue, not a malformed request: the network
 	// asked for something we do not stock. 422 rather than 400 because
@@ -70,6 +76,9 @@ func problemFor(err error) problemInfo {
 
 	case errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge):
 		return problemInfo{"confirm-before-acknowledge", "Shipment cannot be confirmed before the order is acknowledged"}
+
+	case errors.Is(err, networkorder.ErrVersionConflict):
+		return problemInfo{"version-conflict", "The order was changed by another writer; reload and retry"}
 
 	case errors.Is(err, shared.ErrUnknownProduct):
 		return problemInfo{"unknown-product", "No SKU is mapped to that network product id"}
