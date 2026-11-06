@@ -238,6 +238,28 @@ jobs:
         run: python3 scripts/harness/red_issue.py drift --close
 
   # ============================================================
+  # CLASSIFICATION: CONTRACT PINS (compared with the producer's develop)
+  # ============================================================
+  # The consumer contract test validates against a COPY of the producer's spec. A
+  # copy nobody refreshes keeps that test green while the producer moves on
+  # (vendor-connectivity, 2026-11-01). This job fails when a pin in
+  # contracts/pinned.json differs from the producer's develop. The producer repo
+  # is public; a producer that cannot be read fails the job (exit 2), never passes it.
+  pinned-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Pins equal the producer's develop
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/harness/pinned_contract_gate.py
+      - name: The gate's own tests
+        run: python3 scripts/harness/test_pinned_contract_gate.py
+
+  # ============================================================
   # CLASSIFICATION: LINTERS & STATIC ANALYSIS (API CONTRACT)
   # ============================================================
   # The REST contract this context publishes. Read-only by design — demand

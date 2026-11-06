@@ -123,7 +123,7 @@ func (n *inboundNetwork) poll(w http.ResponseWriter, r *http.Request) {
 			"status": s.Status, "pallets": orEmpty(s.Pallets), "cartons": orEmpty(s.Cartons),
 		})
 	}
-	fakeOK(w, http.StatusOK, map[string]any{"inboundShipments": out})
+	fakeOK(w, http.StatusOK, map[string]any{"items": out})
 }
 
 func orEmpty(v []map[string]any) []map[string]any {

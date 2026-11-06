@@ -13,14 +13,16 @@ func (c *apiClient) vendorQuery() url.Values {
 	return url.Values{"vendorId": {c.vendorID}}
 }
 
-// pollPage fetches one page of purchase orders.
-func (c *apiClient) pollPage(ctx context.Context, createdAfter time.Time, nextToken string) (purchaseOrderPageDTO, error) {
+// pollPage fetches one page of purchase orders. The filters are repeated on
+// every page request; the cursor only says where the previous page stopped.
+func (c *apiClient) pollPage(ctx context.Context, createdAfter time.Time, cursor string) (purchaseOrderPageDTO, error) {
 	q := c.vendorQuery()
 	q.Set("limit", strconv.Itoa(pollPageLimit))
-	if nextToken != "" {
-		q.Set("nextToken", nextToken)
-	} else if !createdAfter.IsZero() {
+	if !createdAfter.IsZero() {
 		q.Set("createdAfter", createdAfter.UTC().Format(time.RFC3339Nano))
+	}
+	if cursor != "" {
+		q.Set("cursor", cursor)
 	}
 	var page purchaseOrderPageDTO
 	err := c.call(ctx, request{op: "pollPurchaseOrders", method: http.MethodGet, path: []string{segVendor, "purchase-orders"}, query: q}, &page)
@@ -39,10 +41,18 @@ func (c *apiClient) getTransaction(ctx context.Context, id string) (transactionD
 	return tx, err
 }
 
+// listNodes reads every page of the vendor's nodes.
 func (c *apiClient) listNodes(ctx context.Context) ([]vendorNodeDTO, error) {
-	var list vendorNodeListDTO
-	err := c.call(ctx, request{op: "listVendorNodes", method: http.MethodGet, path: []string{segVendor, segNodes}, query: c.vendorQuery()}, &list)
-	return list.Nodes, err
+	return collectPages(ctx, "listVendorNodes", func(ctx context.Context, cursor string) (vendorNodeListDTO, error) {
+		q := c.vendorQuery()
+		q.Set("limit", strconv.Itoa(pollPageLimit))
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		var list vendorNodeListDTO
+		err := c.call(ctx, request{op: "listVendorNodes", method: http.MethodGet, path: []string{segVendor, segNodes}, query: q}, &list)
+		return list, err
+	})
 }
 
 // postAsync sends an asynchronous write (202 {transactionId}) with its
@@ -83,27 +93,33 @@ func (c *apiClient) requestLabels(ctx context.Context, idemKey string, body []by
 	return out, err
 }
 
-// pollAll pages through every purchase order created after createdAfter. A page
-// that repeats a token, or more pages than any real backlog, is an error rather
-// than a loop.
+// pollAll pages through every purchase order created after createdAfter.
 func (c *apiClient) pollAll(ctx context.Context, createdAfter time.Time) ([]purchaseOrderDTO, error) {
-	var all []purchaseOrderDTO
+	return collectPages(ctx, "pollPurchaseOrders", func(ctx context.Context, cursor string) (purchaseOrderPageDTO, error) {
+		return c.pollPage(ctx, createdAfter, cursor)
+	})
+}
+
+// collectPages follows nextCursor until it is absent. A page that repeats a
+// cursor, or more pages than any real backlog, is an error rather than a loop.
+func collectPages[T any](ctx context.Context, op string, fetch func(context.Context, string) (pageDTO[T], error)) ([]T, error) {
+	var all []T
 	seen := map[string]bool{}
-	token := ""
+	cursor := ""
 	for range maxPollPages {
-		page, err := c.pollPage(ctx, createdAfter, token)
+		page, err := fetch(ctx, cursor)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, page.PurchaseOrders...)
-		if page.NextToken == "" {
+		all = append(all, page.Items...)
+		if page.NextCursor == "" {
 			return all, nil
 		}
-		if seen[page.NextToken] {
-			return nil, fmt.Errorf("retail-network: pollPurchaseOrders: the network repeated page token %q", page.NextToken)
+		if seen[page.NextCursor] {
+			return nil, fmt.Errorf("retail-network: %s: the network repeated page cursor %q", op, page.NextCursor)
 		}
-		seen[page.NextToken] = true
-		token = page.NextToken
+		seen[page.NextCursor] = true
+		cursor = page.NextCursor
 	}
-	return nil, fmt.Errorf("retail-network: pollPurchaseOrders: more than %d pages", maxPollPages)
+	return nil, fmt.Errorf("retail-network: %s: more than %d pages", op, maxPollPages)
 }
