@@ -42,7 +42,7 @@ import (
 // shipped while this file still pinned the 2026-10-24 spec). The `pinned-contracts`
 // CI job (scripts/harness/pinned_contract_gate.py, contracts/pinned.json) fails
 // when the copy differs from vendor-connectivity's develop. To refresh: copy the
-// new file over this one, update the provenance above and in ADR 0033, fix what
+// new file over this one, update the provenance above and in ADR 0034, fix what
 // fails.
 
 const specPath = "testdata/vendor-connectivity-openapi.yaml"
