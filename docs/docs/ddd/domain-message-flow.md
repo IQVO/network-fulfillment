@@ -32,7 +32,7 @@ sequenceDiagram
     NF->>RN: qry: SubmissionStatus networkRef
     RN-->>NF: qry: reply SUCCESS
     NF->>K: evt: networkorder.NetworkOrderAcknowledged.v2
-    NF->>OM: cmd: POST /orders/id/release
+    NF->>OM: cmd: POST /orders/{id}/releases
     Note over NF: order is ACKNOWLEDGED
     OP->>NF: cmd: POST /network-orders/networkRef/shipment-confirmation
     NF->>K: evt: networkorder.NetworkOrderShipmentConfirmed
@@ -72,14 +72,14 @@ sequenceDiagram
         NF->>OM: cmd: POST /orders held, requiredShipBy
         OM-->>NF: cmd: reply order id + promiseDate null = infeasible
         Note over NF: hold recorded on the order, still NEW (ADR 0024)
-        NF->>OM: cmd: DELETE /orders/id
+        NF->>OM: cmd: DELETE /orders/{id}
         NF->>K: evt: networkorder.NetworkOrderRejected reason INFEASIBLE_DEADLINE
         NF->>RN: cmd: SubmitAcknowledgement accepted false
     end
     opt later, a submitted acceptance reconciles to FAILURE
         NF->>RN: qry: SubmissionStatus networkRef
         RN-->>NF: qry: reply FAILURE
-        NF->>OM: cmd: DELETE /orders/id
+        NF->>OM: cmd: DELETE /orders/{id}
         NF->>K: evt: networkorder.NetworkOrderRejected reason SUBMISSION_FAILED
     end
 ```
@@ -108,7 +108,7 @@ sequenceDiagram
     end
     Note over NF: RejectOverdueOrders on its own ticker
     opt a hold is recorded and still open
-        NF->>OM: cmd: DELETE /orders/id
+        NF->>OM: cmd: DELETE /orders/{id}
     end
     NF->>K: evt: networkorder.NetworkOrderRejected reason ACKNOWLEDGEMENT_DEADLINE_MISSED
     K->>PJ: evt: networkorder.NetworkOrderRejected on the analytics topic
@@ -174,7 +174,7 @@ sequenceDiagram
     participant K as Kafka
     Note over NF: a NEW or REJECTED order has a recorded hold with no outcome, and now is past acknowledgeBy plus ORPHAN_HOLD_GRACE
     loop every SWEEP_INTERVAL, SweepOrphanedHolds
-        NF->>OM: cmd: DELETE /orders/id
+        NF->>OM: cmd: DELETE /orders/{id}
         alt 2xx or 404
             OM-->>NF: cmd: reply cancelled, or hold not found
             Note over NF: outcome CANCELLED recorded with the event, one transaction

@@ -19,7 +19,7 @@ flowchart LR
     SUB["any subscriber<br/>none found"]
 
     RN -->|"U to D: CF + ACL<br/>poll demand, submit answer, status, shipment<br/>NetworkGateway port, stub or live"| NF
-    OM -->|"U to D: C/S, NF is Customer<br/>REST POST /orders, /orders/id/release, DELETE /orders/id"| NF
+    OM -->|"U to D: C/S, NF is Customer<br/>REST POST /orders, /orders/{id}/releases, DELETE /orders/{id}"| NF
     INV -.->|"U to D: OHS / CF<br/>REST GET /inventory/sku/usable<br/>always on"| NF
     PPM -.->|"U to D: OHS+PL / CF<br/>Kafka ProcessPath* + CPTScheduleChanged<br/>always-on cache"| NF
     WWP -.->|"U to D: OHS+PL / CF<br/>Kafka PathCapacityChanged<br/>always-on cache"| NF
