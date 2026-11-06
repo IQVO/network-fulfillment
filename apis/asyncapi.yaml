@@ -209,6 +209,37 @@ channels:
           - $ref: "#/components/messages/ReceiptCartonReceived"
           - $ref: "#/components/messages/CartonDiscrepancyRaised"
           - $ref: "#/components/messages/ReceiptClosed"
+  warehouse.outbound-shipping.events:
+    description: |
+      outbound-shipping's integration topic, CONSUMED by this service, not
+      published (the event path of ADR 0014's 2026-11-06 addendum:
+      `TypeShipmentConfirmed` in
+      `internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`).
+      The consumer joins each `ShipmentConfirmed.orders[].order_id` on
+      `NetworkOrder.localOrderId` — the persisted mapping ADR 0014 named as
+      the missing correlation — and confirms the mapped network orders
+      through the ONE `ConfirmNetworkOrderShipment` use case the manual
+      `POST /network-orders/{networkRef}/shipment-confirmation` also uses
+      (kept one release as the operator fallback, D6). Delivery is
+      at-least-once under the stable group `OUTBOUND_SHIPPING_CONSUMER_GROUP`
+      (default `network-fulfillment-outbound-shipping`), reading from the
+      first offset when the group is new; dedupe is the use case's
+      (load_id, order_id) confirmation key, which subsumes the CloudEvents
+      id — a redelivered or re-published ShipmentConfirmed confirms
+      nothing new, and the manual endpoint racing the event double-submits
+      nothing. An `order_id` no NetworkOrder carries (a local order raised
+      from customer demand sharing the load) is skipped and logged. Unknown
+      types are skipped. A message that is not a valid CloudEvent, or whose
+      data breaks outbound-shipping's contract, is dead-lettered to
+      `warehouse.outbound-shipping.events.dlq` (headers `x-dlq-source-topic`,
+      `x-dlq-error`, `x-dlq-failed-at`) and committed past. The Kafka key
+      is the load id (used when the payload carries no `load_id`).
+    subscribe:
+      operationId: consumeOutboundShippingEvents
+      summary: Confirm network orders from the fleet's shipment facts (ADR 0014 addendum).
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ShipmentConfirmed"
 
 components:
   messages:
@@ -900,6 +931,26 @@ components:
       contentType: application/cloudevents+json
       payload:
         $ref: "#/components/schemas/ReceiptClosedEvent"
+    ShipmentConfirmed:
+      name: ShipmentConfirmed
+      title: Shipment confirmed (consumed from outbound-shipping)
+      summary: The trailer left with a closed load; the shipment is a fact.
+      description: |
+        CONSUMED, not produced. Pinned by outbound-shipping's merged
+        `apis/asyncapi.yaml` (IQVO/outbound-shipping PR #2):
+        `source=/warehouse/outbound-shipping`, type
+        `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed`,
+        subject and Kafka key = the load id, dataschema
+        `urn:warehouse:outbound-shipping:events:ShipmentConfirmed:v1`.
+        `orders[].order_id` is order-management's `OrderId` — the join key
+        on `NetworkOrder.localOrderId` (ADR 0014 addendum). A per-order
+        `package_count` is an additive producer change that has NOT landed;
+        this consumer's decode tolerates it and reports the real count the
+        day it ships, keeping ADR 0026's single-package placeholder until
+        then.
+      contentType: application/cloudevents+json
+      payload:
+        $ref: "#/components/schemas/ShipmentConfirmedEvent"
   schemas:
     KafkaHeaders:
       type: object
@@ -1756,3 +1807,66 @@ components:
               type: array
               items:
                 type: object
+
+    ShipmentConfirmedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              type: string
+              const: "com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed"
+            subject:
+              type: string
+              description: The load id.
+            time:
+              type: string
+              format: date-time
+            datacontenttype:
+              type: string
+              enum: ["application/json"]
+            dataschema:
+              type: string
+              const: "urn:warehouse:outbound-shipping:events:ShipmentConfirmed:v1"
+            data:
+              type: object
+              description: |
+                Pinned per outbound-shipping's merged contract; every field
+                below is required there. `orders[].package_count` is NOT in
+                the contract yet (additive, pending) — listed here as the
+                optional field this consumer already tolerates.
+              required: [load_id, site_id, cpt_id, carrier, trailer_id, seal_number, departed_at, orders, version]
+              properties:
+                load_id:
+                  type: string
+                  description: The shipment reference of the idempotency key; falls back to the Kafka key when empty — an event naming neither is dead-lettered.
+                site_id:
+                  type: string
+                cpt_id:
+                  type: string
+                carrier:
+                  type: string
+                trailer_id:
+                  type: string
+                seal_number:
+                  type: string
+                departed_at:
+                  type: string
+                  format: date-time
+                orders:
+                  type: array
+                  description: Distinct source_order_id (order-management OrderId) of the shipped packages; a package manifested without one is excluded by the producer.
+                  items:
+                    type: object
+                    required: [order_id]
+                    properties:
+                      order_id:
+                        type: string
+                        description: The join key on NetworkOrder.localOrderId; no match means a customer-demand order — skipped and logged.
+                      package_count:
+                        type: integer
+                        minimum: 1
+                        description: ADDITIVE, NOT in the merged contract yet. The real per-order package count; until it lands the network is told 1 (ADR 0026, gap recorded in ADR 0014's addendum).
+                version:
+                  type: integer
+                  minimum: 1

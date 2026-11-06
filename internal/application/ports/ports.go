@@ -45,6 +45,34 @@ type NetworkOrderRepo interface {
 	// surface: ordered by (acknowledgeBy, networkRef), rows strictly after
 	// `after` (nil = first page), at most limit rows.
 	ListUnansweredPage(ctx context.Context, after *contract.Keyset, limit int) ([]*networkorder.NetworkOrder, error)
+	// FindByLocalOrderId resolves the NetworkOrder whose demand became this
+	// order-management OrderId (the persisted mapping ADR 0014 named as the
+	// missing correlation): the join key of outbound-shipping's
+	// ShipmentConfirmed orders[].order_id. Returns (nil, nil) when no order
+	// of ours carries the id — a local order raised from customer demand,
+	// not network demand, and none of this context's business.
+	FindByLocalOrderId(ctx context.Context, localOrderId shared.LocalOrderId) (*networkorder.NetworkOrder, error)
+}
+
+// ShipmentConfirmationLog is the durable idempotency ledger behind
+// ConfirmNetworkOrderShipment: one row per (shipment reference, order id)
+// pair the network was already told confirms that order (ADR 0014
+// addendum). It is what makes a duplicate submission — a redelivered
+// ShipmentConfirmed, or the manual endpoint racing the event — a no-op
+// that returns the existing confirmation instead of a second submission.
+type ShipmentConfirmationLog interface {
+	// Exists reports whether this (shipmentRef, orderId) pair was already
+	// confirmed. orderId is the identifying order id the use case joined on:
+	// the order-management OrderId when one is linked, else the NetworkRef.
+	Exists(ctx context.Context, shipmentRef string, orderId string) (bool, error)
+	// Record claims the pair. It JOINS the caller's unit of work when ctx
+	// already carries one (beginOrJoin): the claim commits in the same
+	// transaction as the CONFIRMED save and the
+	// NetworkOrderShipmentConfirmed outbox write, so the ledger can never
+	// say "told" for a confirmation that did not happen. A duplicate claim
+	// is NOT an error (the aggregate's version guard is the concurrency
+	// backstop); the early Exists check is the fast no-op path.
+	Record(ctx context.Context, shipmentRef string, orderId string, networkRef shared.NetworkRef, confirmedAt time.Time) error
 }
 
 // NetworkGateway is the ONLY route to the external network. Every call
