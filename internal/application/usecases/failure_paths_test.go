@@ -26,6 +26,9 @@ func (r *failingRepo) Save(context.Context, *networkorder.NetworkOrder) error { 
 func (r *failingRepo) FindByRef(context.Context, shared.NetworkRef) (*networkorder.NetworkOrder, error) {
 	return nil, r.findErr
 }
+func (r *failingRepo) FindByLocalOrderId(context.Context, shared.LocalOrderId) (*networkorder.NetworkOrder, error) {
+	return nil, r.findErr
+}
 func (r *failingRepo) ListUnanswered(context.Context) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.listErr
 }

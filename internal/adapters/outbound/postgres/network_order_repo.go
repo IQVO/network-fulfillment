@@ -167,6 +167,33 @@ func (r *NetworkOrderRepo) FindByRef(ctx context.Context, ref shared.NetworkRef)
 	return o, nil
 }
 
+// FindByLocalOrderId returns the NetworkOrder whose demand became this
+// order-management OrderId — the persisted correlation ADR 0014 named, now
+// the join key of outbound-shipping's ShipmentConfirmed. (nil, nil) when
+// no order of ours carries the id: a local order raised from customer
+// demand is not this context's business. The link is one-to-one in
+// practice (one raised local order per NetworkOrder, one NetworkOrder per
+// order-management order created from network demand); the deterministic
+// order-by makes the improbable duplicate impossible to observe as
+// flip-flop reads.
+func (r *NetworkOrderRepo) FindByLocalOrderId(ctx context.Context, localOrderId shared.LocalOrderId) (*networkorder.NetworkOrder, error) {
+	var ref string
+	err := r.pool.QueryRow(ctx, `
+		SELECT network_ref FROM network_orders WHERE local_order_id = $1
+		ORDER BY network_ref
+		LIMIT 1
+	`, string(localOrderId)).Scan(&ref)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Rehydrate through FindByRef so the full aggregate (lines, hold,
+	// version) comes back exactly as every other reader sees it.
+	return r.FindByRef(ctx, shared.NetworkRef(ref))
+}
+
 // scanOrder rehydrates one aggregate from an order row plus its lines.
 func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef, row pgx.Row) (*networkorder.NetworkOrder, error) {
 	var (

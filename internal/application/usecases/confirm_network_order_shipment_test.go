@@ -14,10 +14,11 @@ import (
 
 func (f *fixture) confirmShipment() *usecases.ConfirmNetworkOrderShipment {
 	return &usecases.ConfirmNetworkOrderShipment{
-		Orders:  f.orders,
-		Gateway: f.gateway,
-		Events:  nopPublisher{},
-		Clock:   fixedClock{t: now()},
+		Orders:        f.orders,
+		Gateway:       f.gateway,
+		Events:        nopPublisher{},
+		Clock:         fixedClock{t: now()},
+		Confirmations: f.confirmations,
 	}
 }
 

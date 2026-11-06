@@ -126,6 +126,11 @@ func run(ctx context.Context) int {
 	eventPublisher, relay, closeEventPublisher := wireEventPublisher(in.pool, cfg.kafkaBrokers, logger)
 	defer closeEventPublisher()
 
+	// The ONE confirm use case, shared by the REST endpoint and the
+	// ShipmentConfirmed consumer (ADR 0014 addendum): built once so both
+	// paths carry the same idempotency ledger.
+	confirmShipment := wireConfirmShipment(in, eventPublisher)
+
 	receive, sweep, rejectOverdue := wireUseCases(in.orders, in.gateway, planner, in.translation, eventPublisher, in.pool)
 	reconcile := wireReconcile(in.orders, in.gateway, planner, eventPublisher, in.pool)
 	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
@@ -150,7 +155,15 @@ func run(ctx context.Context) int {
 		pool:        in.pool,
 		logger:      logger,
 		serviceName: serviceName,
+		confirm:     confirmShipment,
 	})
+
+	// The ShipmentConfirmed consumer (ADR 0014 addendum, the event path):
+	// runs in EVERY mode — the topic is a fleet integration topic, not a
+	// network-adapter leg — stopped before the pool closes like the loops.
+	shipmentLoop, stopShipmentLoop := startShipmentConfirmedLoop(ctx, stop,
+		outboundShippingConsumerGroup(os.Getenv), in.orders, confirmShipment, cfg.kafkaBrokers, logger)
+	defer shipmentLoop.stop(stopShipmentLoop, inboundLoopStopBudget)
 
 	// The inbound loop (ADR 0028): live mode only, stopped before the pool closes.
 	loop, stopLoop, err := startInboundLoop(ctx, stop, cfg, in, circuitBreakerMetrics, logger)
@@ -165,6 +178,9 @@ func run(ctx context.Context) int {
 	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inventory, inbound, relay, readiness, in.recompute, in.capDone)
 	if loop.failed() && code == 0 {
 		code = 1 // a dead receipt consumer is a failure, whatever the signal said
+	}
+	if shipmentLoop.failed() && code == 0 {
+		code = 1 // a dead shipment-confirmed consumer is a failure too
 	}
 	return code
 }
