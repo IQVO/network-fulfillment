@@ -135,7 +135,7 @@ func TestClient_ReadsCarryTheVendorAndWritesCarryTheKey(t *testing.T) {
 			ok(w, map[string]string{"transactionId": "tx-1"})
 			return
 		}
-		ok(w, map[string]any{"purchaseOrders": []any{}})
+		ok(w, map[string]any{"items": []any{}})
 	})
 	c, _, _ := testClient(t, f.srv.URL+"/api/retail-network/vendor-connectivity", nil)
 
@@ -168,8 +168,8 @@ func TestClient_ReadsCarryTheVendorAndWritesCarryTheKey(t *testing.T) {
 	}
 }
 
-func TestClient_PageTokenReplacesTheFilterAndAPathElementIsEscaped(t *testing.T) {
-	f := newFake(t, func(n int, w http.ResponseWriter, r *http.Request) { ok(w, map[string]any{}) })
+func TestClient_PageCursorRepeatsTheFiltersAndAPathElementIsEscaped(t *testing.T) {
+	f := newFake(t, func(n int, w http.ResponseWriter, r *http.Request) { ok(w, map[string]any{"items": []any{}}) })
 	c, _, _ := testClient(t, f.srv.URL, nil)
 
 	if _, err := c.pollPage(context.Background(), time.Date(2026, 10, 24, 11, 0, 0, 0, time.UTC), "tok-2"); err != nil {
@@ -179,8 +179,8 @@ func TestClient_PageTokenReplacesTheFilterAndAPathElementIsEscaped(t *testing.T)
 		t.Fatalf("getPurchaseOrder: %v", err)
 	}
 	got := f.requests()
-	if q := got[0].RawQuery; !strings.Contains(q, "nextToken=tok-2") || strings.Contains(q, "createdAfter") {
-		t.Errorf("page 2 query = %q, want the token and no createdAfter (the network ignores other filters)", q)
+	if q := got[0].RawQuery; !strings.Contains(q, "cursor=tok-2") || !strings.Contains(q, "createdAfter=") || strings.Contains(q, "nextToken") {
+		t.Errorf("page 2 query = %q, want the cursor AND the repeated createdAfter filter (guideline: repeat the filters on every page)", q)
 	}
 	if got[1].Path != "/vendor/purchase-orders/PO/1 2?x" || !strings.Contains(got[1].RawQuery, "vendorId=V-WS") {
 		t.Errorf("escaped request = %+v, want the decoded path PO/1 2?x and the vendorId query", got[1])
@@ -189,13 +189,13 @@ func TestClient_PageTokenReplacesTheFilterAndAPathElementIsEscaped(t *testing.T)
 
 func TestClient_PollAllFollowsNextTokenUntilItIsAbsent(t *testing.T) {
 	pages := map[string]purchaseOrderPageDTO{
-		"":    {PurchaseOrders: []purchaseOrderDTO{{PoNumber: "PO-1"}, {PoNumber: "PO-2"}}, NextToken: "t1"},
-		"t1":  {PurchaseOrders: []purchaseOrderDTO{{PoNumber: "PO-3"}}, NextToken: "t2"},
-		"t2":  {PurchaseOrders: []purchaseOrderDTO{{PoNumber: "PO-4"}}},
+		"":    {Items: []purchaseOrderDTO{{PoNumber: "PO-1"}, {PoNumber: "PO-2"}}, NextCursor: "t1"},
+		"t1":  {Items: []purchaseOrderDTO{{PoNumber: "PO-3"}}, NextCursor: "t2"},
+		"t2":  {Items: []purchaseOrderDTO{{PoNumber: "PO-4"}}},
 		"bad": {},
 	}
 	f := newFake(t, func(n int, w http.ResponseWriter, r *http.Request) {
-		ok(w, pages[r.URL.Query().Get("nextToken")])
+		ok(w, pages[r.URL.Query().Get("cursor")])
 	})
 	c, _, _ := testClient(t, f.srv.URL, nil)
 
@@ -217,10 +217,10 @@ func TestClient_PollAllFollowsNextTokenUntilItIsAbsent(t *testing.T) {
 
 func TestClient_PollAllRefusesARepeatedPageToken(t *testing.T) {
 	f := newFake(t, func(n int, w http.ResponseWriter, r *http.Request) {
-		ok(w, purchaseOrderPageDTO{NextToken: "same"})
+		ok(w, purchaseOrderPageDTO{Items: []purchaseOrderDTO{}, NextCursor: "same"})
 	})
 	c, _, _ := testClient(t, f.srv.URL, nil)
-	if _, err := c.pollAll(context.Background(), time.Time{}); err == nil || !strings.Contains(err.Error(), "repeated page token") {
+	if _, err := c.pollAll(context.Background(), time.Time{}); err == nil || !strings.Contains(err.Error(), "repeated page cursor") {
 		t.Fatalf("err = %v, want a repeated-token error rather than an endless loop", err)
 	}
 	if n := f.calls.Load(); n != 2 {
@@ -235,7 +235,7 @@ func TestClient_429WaitsForRetryAfterThenSucceeds(t *testing.T) {
 			problem(w, http.StatusTooManyRequests, "rate-limited")
 			return
 		}
-		ok(w, map[string]any{"nodes": []any{}})
+		ok(w, map[string]any{"items": []any{}})
 	})
 	c, sl, _ := testClient(t, f.srv.URL, nil)
 
@@ -356,7 +356,7 @@ func TestClient_ATimeoutIsRetried(t *testing.T) {
 		if n == 1 {
 			time.Sleep(300 * time.Millisecond) // longer than the 50ms call timeout
 		}
-		ok(w, map[string]any{"nodes": []any{}})
+		ok(w, map[string]any{"items": []any{}})
 	})
 	c, sl, _ := testClient(t, f.srv.URL, func(cfg *clientConfig) { cfg.callTimeout = 50 * time.Millisecond })
 
@@ -433,7 +433,7 @@ func TestClient_TheBreakerOpensOnDependencyFailuresRejectsWithoutCallingAndRecov
 	var healthy atomic.Bool
 	f := newFake(t, func(n int, w http.ResponseWriter, r *http.Request) {
 		if healthy.Load() {
-			ok(w, map[string]any{"nodes": []any{}})
+			ok(w, map[string]any{"items": []any{}})
 			return
 		}
 		problem(w, http.StatusInternalServerError, "internal-error")
@@ -529,5 +529,43 @@ func TestClient_GetTransactionAndGetPurchaseOrderDecode(t *testing.T) {
 	po, err := c.getPurchaseOrder(context.Background(), "PO-1")
 	if err != nil || po.State != "ACCEPTED" || po.Acknowledgement == nil || po.Acknowledgement.TransactionID != "tx-5" || po.Lines[0].ListingID != "L-1" {
 		t.Fatalf("getPurchaseOrder = %+v, %v", po, err)
+	}
+}
+
+// The 2026-11-01 incident: the Vendor API moved every collection to
+// { items, nextCursor } while this client still decoded purchaseOrders /
+// nextToken. The answer was 200, the old decoder found nothing and returned
+// zero orders, so purchase orders stopped without a single error.
+func TestClient_ARetiredPageShapeIsAnErrorNeverAnEmptyPoll(t *testing.T) {
+	for name, body := range map[string]string{
+		"purchase orders (retired key)": `{"purchaseOrders":[{"poNumber":"PO-1"}],"nextToken":"t"}`,
+		"null items":                    `{"items":null}`,
+		"empty object":                  `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFake(t, func(n int, w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			})
+			c, _, _ := testClient(t, f.srv.URL, nil)
+			if got, err := c.pollAll(context.Background(), time.Time{}); err == nil {
+				t.Fatalf("pollAll = %v, nil; want an error: a 200 that is not a page must never read as zero purchase orders", got)
+			}
+			if got, err := c.pollInboundAll(context.Background(), "N-1", time.Time{}); err == nil {
+				t.Fatalf("pollInboundAll = %v, nil; want an error", got)
+			}
+			if got, err := c.listNodes(context.Background()); err == nil {
+				t.Fatalf("listNodes = %v, nil; want an error", got)
+			}
+		})
+	}
+}
+
+func TestClient_AnEmptyItemsArrayIsAnEmptyPollNotAnError(t *testing.T) {
+	f := newFake(t, func(n int, w http.ResponseWriter, r *http.Request) { ok(w, map[string]any{"items": []any{}}) })
+	c, _, _ := testClient(t, f.srv.URL, nil)
+	got, err := c.pollAll(context.Background(), time.Time{})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("pollAll = %v, %v; want an empty poll", got, err)
 	}
 }

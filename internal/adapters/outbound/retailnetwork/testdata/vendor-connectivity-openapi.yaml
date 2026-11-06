@@ -12,7 +12,7 @@ info:
 
     Protocol rules (from the model's `business_decisions` and the Gap Register):
 
-    - Poll purchase orders with `GET /vendor/purchase-orders`, paging with `nextToken`.
+    - Poll purchase orders with `GET /vendor/purchase-orders`, paging with `cursor` and `nextCursor`.
       A purchase order may be delivered more than once (simulation knob
       `PO_REDELIVERY_RATE`); be idempotent on `poNumber`.
     - Acknowledge once, in full, before `ackBy`. Fill-or-kill: one decision covers
@@ -74,9 +74,11 @@ paths:
       summary: Poll purchase orders (PollPurchaseOrders)
       description: |
         Returns purchase orders issued to the vendor's nodes after `createdAfter`,
-        oldest first, in pages. Pass the returned `nextToken` to fetch the next
-        page; an absent `nextToken` means the last page. A purchase order can be
-        returned again (`PO_REDELIVERY_RATE`); the vendor deduplicates on `poNumber`.
+        oldest first, in pages. Pass the returned `nextCursor` as `cursor` to fetch the next
+        page (repeat the filters); an absent `nextCursor` means the last page. A purchase order can be
+        returned again (`PO_REDELIVERY_RATE`): when it fires, the first item of a non-empty page is appended
+        a second time, so a page can hold `limit` + 1 items. The vendor deduplicates on `poNumber`. A `nodeId`
+        that is unknown or belongs to another vendor is `404`; an unknown `vendorId` is `404` `not-found`.
       parameters:
       - $ref: '#/components/parameters/VendorId'
       - name: createdAfter
@@ -92,20 +94,21 @@ paths:
         description: Only purchase orders for this node.
         schema:
           type: string
-      - name: nextToken
-        in: query
-        required: false
-        description: Opaque continuation token from the previous page. When present, the other filters are ignored.
-        schema:
-          type: string
+      - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/Limit'
       responses:
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
           description: One page of purchase orders.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PurchaseOrderPage'
+        '400':
+          $ref: '#/components/responses/PageBadRequest'
         '422':
           $ref: '#/components/responses/ValidationProblem'
         '429':
@@ -120,6 +123,10 @@ paths:
       - $ref: '#/components/parameters/VendorId'
       - $ref: '#/components/parameters/PoNumber'
       responses:
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
           description: The purchase order, its acknowledgement, labels and shipment.
           content:
@@ -156,6 +163,10 @@ paths:
             schema:
               $ref: '#/components/schemas/AcknowledgementRequest'
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '202':
           $ref: '#/components/responses/Accepted'
         '404':
@@ -187,6 +198,10 @@ paths:
             schema:
               $ref: '#/components/schemas/InventoryFeedRequest'
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '202':
           $ref: '#/components/responses/Accepted'
         '404':
@@ -207,13 +222,21 @@ paths:
         `nodeId` (G30).
       parameters:
       - $ref: '#/components/parameters/VendorId'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
       responses:
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
-          description: The vendor's nodes.
+          description: One page of the vendor's nodes.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/VendorNodeList'
+        '400':
+          $ref: '#/components/responses/PageBadRequest'
         '422':
           $ref: '#/components/responses/ValidationProblem'
         '429':
@@ -239,6 +262,10 @@ paths:
             schema:
               $ref: '#/components/schemas/NodeRegistrationRequest'
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '202':
           $ref: '#/components/responses/Accepted'
         '404':
@@ -260,6 +287,10 @@ paths:
       - $ref: '#/components/parameters/VendorId'
       - $ref: '#/components/parameters/NodeId'
       responses:
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
           description: The node as the network knows it.
           content:
@@ -293,6 +324,10 @@ paths:
             schema:
               $ref: '#/components/schemas/NodeProfileRequest'
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '202':
           $ref: '#/components/responses/Accepted'
         '404':
@@ -308,6 +343,7 @@ paths:
       tags:
       - Nodes
       operationId: getScorecard
+      x-pagination-exempt: view  # one scorecard resource per node whose representation holds one entry per rolling window (a fixed, small set)
       summary: Get the node's measured scorecard (GetScorecard)
       description: 'Relayed synchronously from node-performance (`GET /scorecards/{nodeId}`). A node without observations has no scorecard: `404`
         `not-found`.'
@@ -315,6 +351,12 @@ paths:
       - $ref: '#/components/parameters/VendorId'
       - $ref: '#/components/parameters/NodeId'
       responses:
+        '502':
+          $ref: '#/components/responses/UpstreamRefused'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
           description: The node's rolling-window scorecards.
           content:
@@ -352,8 +394,17 @@ paths:
             schema:
               $ref: '#/components/schemas/LabelRequest'
       responses:
+        '502':
+          $ref: '#/components/responses/UpstreamRefused'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: One label per requested package.
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
           content:
             application/json:
               schema:
@@ -389,6 +440,10 @@ paths:
             schema:
               $ref: '#/components/schemas/ShipmentConfirmationRequest'
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '202':
           $ref: '#/components/responses/Accepted'
         '404':
@@ -409,8 +464,8 @@ paths:
         Returns the `SHIPPED` inbound shipments bound for the vendor's nodes after
         `createdAfter`, oldest first, in pages. Every shipment is the pallet-and-carton
         tree shipment > pallet > carton > item. `createdAfter` compares with `shippedAt`,
-        the instant the seller handed the shipment over. Pass the returned `nextToken`
-        for the next page; an absent `nextToken` means the last page. A shipment
+        the instant the seller handed the shipment over. Pass the returned `nextCursor` as `cursor`
+        for the next page (repeat the filters); an absent `nextCursor` means the last page. A shipment
         leaves the poll once the network records its receipt.
       parameters:
       - $ref: '#/components/parameters/VendorId'
@@ -427,14 +482,11 @@ paths:
         description: Only shipments bound for this node.
         schema:
           type: string
-      - name: nextToken
-        in: query
-        required: false
-        description: Opaque continuation token from the previous page. When present, the other filters are ignored.
-        schema:
-          type: string
+      - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/Limit'
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
           description: One page of inbound shipments.
           content:
@@ -442,7 +494,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/InboundShipmentPage'
               example:
-                inboundShipments:
+                items:
                 - shipmentId: SHP-1001
                   sellerId: S-100
                   nodeId: n-1
@@ -471,7 +523,9 @@ paths:
                     - gtin: '00614141000036'
                       qtyEaches: 6
                     grossWeightG: 2100
-                nextToken: eyJ0IjoiMjAyNi0xMC0yNFQxMzowMDowMFoiLCJzIjoiU0hQLTEwMDEiLCJ2IjoiVi1XUyJ9
+                nextCursor: eyJzIjoiMjAyNi0xMC0yNFQxMzowMDowMFoiLCJpIjoiU0hQLTEwMDEifQ
+        '400':
+          $ref: '#/components/responses/PageBadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
         '422':
@@ -493,6 +547,10 @@ paths:
       - $ref: '#/components/parameters/VendorId'
       - $ref: '#/components/parameters/ShipmentId'
       responses:
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
           description: The inbound shipment.
           content:
@@ -545,6 +603,10 @@ paths:
                 complianceCodes:
                 - CARTON_CRUSHED
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '202':
           $ref: '#/components/responses/Accepted'
         '404':
@@ -565,6 +627,10 @@ paths:
       - $ref: '#/components/parameters/VendorId'
       - $ref: '#/components/parameters/TransactionId'
       responses:
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
           description: The transaction and, once processed, its outcome.
           content:
@@ -594,20 +660,32 @@ paths:
             schema:
               $ref: '#/components/schemas/OnboardVendorRequest'
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The vendor account already existed; returned unchanged.
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/VendorAccount'
         '201':
           description: The vendor account, ACTIVE.
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/VendorAccount'
         '422':
           $ref: '#/components/responses/ValidationProblem'
+        '409':
+          $ref: '#/components/responses/StateConflict'
   /vendors/{vendorId}:
     get:
       tags:
@@ -618,6 +696,8 @@ paths:
       parameters:
       - $ref: '#/components/parameters/VendorIdPath'
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
         '200':
           description: The vendor account.
           content:
@@ -626,7 +706,7 @@ paths:
                 $ref: '#/components/schemas/VendorAccount'
         '404':
           $ref: '#/components/responses/NotFound'
-  /vendors/{vendorId}:suspend:
+  /vendors/{vendorId}/suspensions:
     post:
       tags:
       - Vendors
@@ -639,8 +719,17 @@ paths:
       - $ref: '#/components/parameters/VendorIdPath'
       - $ref: '#/components/parameters/IdempotencyKey'
       responses:
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The vendor account.
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
           content:
             application/json:
               schema:
@@ -655,7 +744,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/SuspendVendorRequest'
-  /vendors/{vendorId}:reinstate:
+  /vendors/{vendorId}/reinstatements:
     post:
       tags:
       - Vendors
@@ -667,8 +756,15 @@ paths:
       - $ref: '#/components/parameters/VendorIdPath'
       - $ref: '#/components/parameters/IdempotencyKey'
       responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The vendor account.
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
           content:
             application/json:
               schema:
@@ -704,9 +800,10 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Client-chosen key. A retry with the same key returns the first response (for an asynchronous write, the same `transactionId`).
+      description: 'Client-chosen key, 1 to 128 printable ASCII characters (`400 idempotency-key-required` when absent, `400 idempotency-key-invalid` when malformed). A retry with the same key, method, path and body returns the first response with `Idempotency-Replayed: true`; the same key with anything else is `409 idempotency-key-reused`.'
       schema:
         type: string
+        minLength: 1
         maxLength: 128
     VendorId:
       name: vendorId
@@ -734,27 +831,61 @@ components:
       name: limit
       in: query
       required: false
-      description: Page size, 1 to 200 (default 50).
+      description: Page size, 1 to 500 (default 100).
       schema:
         type: integer
         minimum: 1
-        maximum: 200
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque continuation token (`nextCursor` of the previous page). Repeat the filters on every page request. An undecodable cursor is `400 invalid-cursor`; an undeclared query parameter is `400 unknown-query-parameter`.
+      schema:
+        type: string
   headers:
+    IdempotencyReplayed:
+      description: '`true` when this response is a replay of the first response stored for the `Idempotency-Key`; absent otherwise.'
+      schema:
+        type: string
+        enum:
+        - 'true'
     RetryAfter:
       description: Seconds to wait before the next call.
       schema:
         type: integer
         minimum: 1
   responses:
+    BadRequest:
+      description: |
+        The `Idempotency-Key` header is missing (`idempotency-key-required`) or not 1 to 128
+        printable ASCII characters (`idempotency-key-invalid`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PageBadRequest:
+      description: |
+        The paging query is refused. Problem types: `invalid-limit` (`limit` not an integer from 1 to 500, empty or repeated),
+        `invalid-cursor` (the `cursor` is not a token this operation issued for this vendor, or is repeated) and
+        `unknown-query-parameter` (a query parameter the operation does not declare).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
     Accepted:
       description: Accepted for processing. Reconcile with `GET /vendor/transactions/{transactionId}`.
+      headers:
+        Idempotency-Replayed:
+          $ref: '#/components/headers/IdempotencyReplayed'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/TransactionAccepted'
     NotFound:
       description: |
-        The resource does not exist (`not-found`), or it belongs to another vendor
+        The resource does not exist (`not-found`; this includes an unknown `vendorId` on a vendor read or write), or it belongs to another vendor
         (`ErrNodeNotOwnedByVendor`, problem type `node-not-owned-by-vendor`, 404 so a vendor cannot probe another vendor's nodes).
       content:
         application/problem+json:
@@ -768,7 +899,8 @@ components:
         `confirm-without-label` (`ErrConfirmWithoutLabel`), `vendor-suspended`
         (`ErrVendorSuspended`), `illegal-transition` (a write against a state the model
         gives no `Err...` for) and `concurrent-update` (optimistic-concurrency
-        conflict; the caller re-reads and retries).
+        conflict; the caller re-reads and retries) and `idempotency-key-reused` (the `Idempotency-Key` was
+        already used with a different method, path or body).
       content:
         application/problem+json:
           schema:
@@ -776,7 +908,9 @@ components:
     ValidationProblem:
       description: |
         The request is malformed or breaks a validation rule. Problem types:
-        `validation-failed`, `partial-acknowledgement` (`ErrPartialAcknowledgement`) and
+        `validation-failed` (an unparsable body, an unknown or mistyped field, trailing data, a NUL character in the query or the body,
+        a missing or invalid `vendorId`, `createdAfter` that is not an RFC 3339 date-time, a failed field rule),
+        `partial-acknowledgement` (`ErrPartialAcknowledgement`) and
         `ack-window-out-of-range` (`ErrAckWindowOutOfRange`).
       content:
         application/problem+json:
@@ -797,6 +931,18 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+    UpstreamRefused:
+      description: A neighbouring context answered with a refusal this context does not translate. Problem type `upstream-refused`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    InternalError:
+      description: An unexpected error. Problem type `internal-error`; the `detail` is always the opaque text `an unexpected error occurred`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
   schemas:
     Problem:
       type: object
@@ -805,6 +951,8 @@ components:
       - type
       - title
       - status
+      - detail
+      - instance
       properties:
         type:
           type: string
@@ -822,6 +970,8 @@ components:
           example: poNumber PO-7f3c was due by 2026-10-22T14:00:00Z
         instance:
           type: string
+          description: The escaped request path.
+          example: /vendor/acknowledgements
     TransactionAccepted:
       type: object
       required:
@@ -869,6 +1019,7 @@ components:
       - kind
       - status
       - receivedAt
+      - errors
       properties:
         transactionId:
           type: string
@@ -919,6 +1070,7 @@ components:
       - lineNo
       - listingId
       - quantity
+      - packaging
       properties:
         lineNo:
           type: integer
@@ -1056,13 +1208,13 @@ components:
     PurchaseOrderPage:
       type: object
       required:
-      - purchaseOrders
+      - items
       properties:
-        purchaseOrders:
+        items:
           type: array
           items:
             $ref: '#/components/schemas/PurchaseOrder'
-        nextToken:
+        nextCursor:
           type: string
           description: Absent on the last page.
     AckLine:
@@ -1098,7 +1250,7 @@ components:
         reasonCode:
           allOf:
           - $ref: '#/components/schemas/RejectReason'
-          description: Required when `decision` is `REJECT`.
+          description: Required when `decision` is `REJECT`; refused (`validation-failed`) when `decision` is `ACCEPT`.
         lines:
           type: array
           minItems: 1
@@ -1117,6 +1269,7 @@ components:
         availableQty:
           type: integer
           minimum: 0
+          maximum: 2147483647
         basis:
           type: string
           enum:
@@ -1146,7 +1299,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/InventoryLine'
-          description: At most 5000 lines.
+          description: At most 5000 lines; each `listingId` at most once.
           maxItems: 5000
     NodeType:
       type: string
@@ -1180,6 +1333,7 @@ components:
           type: string
         vendorNodeCode:
           type: string
+          maxLength: 100
           description: The vendor's own code for the node, unique per vendor.
         nodeType:
           $ref: '#/components/schemas/NodeType'
@@ -1192,13 +1346,20 @@ components:
           example: America/Sao_Paulo
         postalCode:
           type: string
+          maxLength: 100
           description: The node's own location (a building), not a customer address.
         countryCode:
           type: string
+          pattern: ^[A-Z]{2}$
+          description: ISO 3166-1 alpha-2.
         lat:
           type: number
+          minimum: -90
+          maximum: 90
         lon:
           type: number
+          minimum: -180
+          maximum: 180
     CutoffSlot:
       type: object
       required:
@@ -1206,15 +1367,15 @@ components:
       properties:
         localTime:
           type: string
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
           example: '18:00'
           description: Local time of day, HH:mm.
         maxOrders:
           type: integer
           minimum: 1
+          maximum: 2147483647
         days:
           type: array
-          minItems: 1
-          uniqueItems: true
           description: The weekdays the cutoff applies to. Absent means every operating day.
           items:
             $ref: '#/components/schemas/Weekday'
@@ -1228,6 +1389,7 @@ components:
         value:
           type: integer
           minimum: 1
+          maximum: 2147483647
         timeUnit:
           type: string
           enum:
@@ -1254,9 +1416,11 @@ components:
         profileRevision:
           type: integer
           minimum: 1
+          maximum: 2147483647
           description: Strictly increases per node.
         timezone:
           type: string
+          description: IANA time zone.
         operatingHoursByDay:
           $ref: '#/components/schemas/OperatingHoursByDay'
         holidays:
@@ -1264,12 +1428,15 @@ components:
           items:
             type: string
             format: date
+          maxItems: 400
           description: ISO dates on which the node is closed all day.
         handlingTimeMinutes:
           type: integer
           minimum: 1
+          maximum: 2147483647
         cutoffs:
           type: array
+          maxItems: 50
           items:
             $ref: '#/components/schemas/CutoffSlot'
         throughputCap:
@@ -1277,6 +1444,7 @@ components:
         sortDwellMinutes:
           type: integer
           minimum: 0
+          maximum: 2147483647
     VendorNode:
       type: object
       required:
@@ -1384,6 +1552,7 @@ components:
         packageNo:
           type: integer
           minimum: 1
+          maximum: 999999
     LabelRequest:
       type: object
       required:
@@ -1398,6 +1567,7 @@ components:
         packages:
           type: array
           minItems: 1
+          maxItems: 100
           items:
             $ref: '#/components/schemas/LabelPackage'
           description: The packages to label, each `packageNo` once.
@@ -1537,13 +1707,13 @@ components:
     InboundShipmentPage:
       type: object
       required:
-      - inboundShipments
+      - items
       properties:
-        inboundShipments:
+        items:
           type: array
           items:
             $ref: '#/components/schemas/InboundShipment'
-        nextToken:
+        nextCursor:
           type: string
           description: Absent on the last page.
     InboundReceiptItem:
@@ -1579,7 +1749,8 @@ components:
           - DAMAGED
         items:
           type: array
-          description: Per-GTIN counts. Empty for a `MISSING` carton.
+          description: Per-GTIN counts, each GTIN at most once, at most 500. Empty for a `MISSING` carton.
+          maxItems: 500
           items:
             $ref: '#/components/schemas/InboundReceiptItem'
         complianceCodes:
@@ -1647,6 +1818,7 @@ components:
           example: V-WS
         name:
           type: string
+          maxLength: 120
         ackWindowMinutes:
           type: integer
           minimum: 60
@@ -1689,10 +1861,12 @@ components:
       properties:
         start:
           type: string
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
           description: Local opening time, HH:mm.
           example: 06:00
         end:
           type: string
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
           description: Local closing time, HH:mm.
           example: '22:00'
     OperatingHoursByDay:
@@ -1717,15 +1891,19 @@ components:
     VendorNodeList:
       type: object
       required:
-      - nodes
+      - items
       properties:
-        nodes:
+        items:
           type: array
           items:
             $ref: '#/components/schemas/VendorNode'
+        nextCursor:
+          type: string
+          description: Absent on the last page.
     SuspendVendorRequest:
       type: object
       properties:
         reason:
           type: string
-          description: Why the partner manager suspended the vendor.
+          maxLength: 200
+          description: Why the partner manager suspended the vendor. The body itself may be omitted.

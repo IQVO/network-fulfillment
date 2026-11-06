@@ -41,7 +41,7 @@ func serveInbound(f *liveFixture, pages map[string]inboundShipmentPageDTO) {
 		if r.Method != http.MethodGet || r.URL.Path != "/vendor/inbound-shipments" {
 			return false
 		}
-		ok(w, pages[r.URL.Query().Get("nextToken")])
+		ok(w, pages[r.URL.Query().Get("cursor")])
 		return true
 	}
 }
@@ -52,13 +52,13 @@ func TestInbound_PollFlattensPalletsAndCartonsAndPages(t *testing.T) {
 	closed := inboundTree("SHP-closed")
 	closed.Status = "CLOSED"
 	serveInbound(f, map[string]inboundShipmentPageDTO{
-		"":   {InboundShipments: []inboundShipmentDTO{inboundTree("SHP-1"), closed}, NextToken: "p2"},
-		"p2": {InboundShipments: []inboundShipmentDTO{inboundTree("SHP-1"), inboundTree("SHP-2")}},
+		"":   {Items: []inboundShipmentDTO{inboundTree("SHP-1"), closed}, NextCursor: "p2"},
+		"p2": {Items: []inboundShipmentDTO{inboundTree("SHP-1"), inboundTree("SHP-2")}},
 	})
 
 	got, err := f.g.PollInboundShipments(context.Background(), "FC-1", t0)
 	if err != nil {
-		t.Fatalf("PollInboundShipments: %v", err)
+		t.Fatalf("PollItems: %v", err)
 	}
 	if len(got) != 2 || got[0].Ref != "SHP-1" || got[1].Ref != "SHP-2" {
 		t.Fatalf("shipments = %+v, want SHP-1 once and SHP-2 (a repeated and a non-SHIPPED one dropped)", got)
@@ -101,8 +101,10 @@ func expectPagedQueries(t *testing.T, reqs []seen) {
 			t.Errorf("first page query %q misses %q (the cursor minus the 2 minute overlap)", reqs[0].RawQuery, want)
 		}
 	}
-	if strings.Contains(reqs[1].RawQuery, "createdAfter") || !strings.Contains(reqs[1].RawQuery, "nextToken=p2") {
-		t.Errorf("next page query %q: a token replaces the filters", reqs[1].RawQuery)
+	for _, want := range []string{"vendorId=V-WS", "nodeId=N-1", "createdAfter=2026-10-24T09%3A58%3A00Z", "cursor=p2"} {
+		if !strings.Contains(reqs[1].RawQuery, want) {
+			t.Errorf("next page query %q misses %q: the filters are repeated on every page", reqs[1].RawQuery, want)
+		}
 	}
 }
 
@@ -121,10 +123,10 @@ func TestInbound_PollRefusesARepeatedPageToken(t *testing.T) {
 	f := readyFixture(t, nil)
 	_, _ = f.g.PollDemand(context.Background(), t0)
 	serveInbound(f, map[string]inboundShipmentPageDTO{
-		"":     {InboundShipments: []inboundShipmentDTO{inboundTree("SHP-1")}, NextToken: "loop"},
-		"loop": {InboundShipments: []inboundShipmentDTO{inboundTree("SHP-2")}, NextToken: "loop"},
+		"":     {Items: []inboundShipmentDTO{inboundTree("SHP-1")}, NextCursor: "loop"},
+		"loop": {Items: []inboundShipmentDTO{inboundTree("SHP-2")}, NextCursor: "loop"},
 	})
-	if _, err := f.g.PollInboundShipments(context.Background(), "FC-1", t0); err == nil || !strings.Contains(err.Error(), "repeated page token") {
+	if _, err := f.g.PollInboundShipments(context.Background(), "FC-1", t0); err == nil || !strings.Contains(err.Error(), "repeated page cursor") {
 		t.Fatalf("err = %v, want the repeated token refused", err)
 	}
 }
@@ -271,16 +273,16 @@ func jsonFieldsFor(name string) []string {
 
 func TestInboundContract_ARecordedShipmentPageIsValidAndDecodes(t *testing.T) {
 	spec := loadSpec(t)
-	page := `{"inboundShipments":[{"shipmentId":"SHP-1001","sellerId":"S-100","nodeId":"n-1","shippedAt":"2026-10-24T13:00:00Z","status":"SHIPPED",
+	page := `{"items":[{"shipmentId":"SHP-1001","sellerId":"S-100","nodeId":"n-1","shippedAt":"2026-10-24T13:00:00Z","status":"SHIPPED",
 		"pallets":[{"sscc":"006141410000000036","cartons":[{"sscc":"006141410000000012","parentSscc":"006141410000000036","kind":"HOMOGENEOUS_CASE",
 		"contents":[{"gtin":"00614141000036","qtyEaches":12,"lot":"L-77","expiry":"2027-03-01"}],"grossWeightG":4200,"dimsMm":{"l":400,"w":300,"h":200}}]}],
-		"cartons":[{"sscc":"006141410000000029","kind":"MIXED","contents":[{"gtin":"00614141000036","qtyEaches":6}],"grossWeightG":2100}]}],"nextToken":"abc"}`
+		"cartons":[{"sscc":"006141410000000029","kind":"MIXED","contents":[{"gtin":"00614141000036","qtyEaches":6}],"grossWeightG":2100}]}],"nextCursor":"abc"}`
 	spec.validate(t, "InboundShipmentPage", []byte(page))
 	var dto inboundShipmentPageDTO
 	if err := json.Unmarshal([]byte(page), &dto); err != nil {
 		t.Fatal(err)
 	}
-	s := shipmentFromDTO(dto.InboundShipments[0], "FC-1")
+	s := shipmentFromDTO(dto.Items[0], "FC-1")
 	if s.Ref != "SHP-1001" || s.OwnerRef != "S-100" || len(s.Cartons) != 2 || s.Cartons[0].ParentSSCC != ssccPallet || s.Cartons[1].GrossWeightG != 2100 {
 		t.Errorf("decoded = %+v", s)
 	}
@@ -295,7 +297,7 @@ func TestInboundContract_EveryRouteTheInboundClientCallsExistsWithItsParameters(
 			ok(w, map[string]string{"transactionId": "tx-1"})
 			return
 		}
-		ok(w, map[string]any{"inboundShipments": []any{}})
+		ok(w, map[string]any{"items": []any{}})
 	})
 	c, _, _ := testClient(t, f.srv.URL, nil)
 	_, _ = c.inboundPage(context.Background(), "N-1", t0, "")

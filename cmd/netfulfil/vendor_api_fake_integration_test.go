@@ -342,7 +342,7 @@ func (v *vendorFake) listNodes(w http.ResponseWriter) {
 	for _, n := range v.nodes {
 		nodes = append(nodes, v.nodeJSON(n))
 	}
-	fakeOK(w, http.StatusOK, map[string]any{"nodes": nodes})
+	fakeOK(w, http.StatusOK, map[string]any{"items": nodes})
 }
 
 func (v *vendorFake) getNode(w http.ResponseWriter, id string) {
@@ -376,7 +376,7 @@ func (v *vendorFake) pollOrders(w http.ResponseWriter) {
 			page = append(page, v.orderJSON(o))
 		}
 	}
-	fakeOK(w, http.StatusOK, map[string]any{"purchaseOrders": page})
+	fakeOK(w, http.StatusOK, map[string]any{"items": page})
 }
 
 func (v *vendorFake) getOrder(w http.ResponseWriter, poNumber string) {

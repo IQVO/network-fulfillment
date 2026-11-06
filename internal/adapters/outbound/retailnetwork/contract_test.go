@@ -20,9 +20,9 @@ import (
 
 // The contract test (ADR 0026 Decision 9). testdata/vendor-connectivity-openapi.yaml
 // is a BYTE COPY of vendor-connectivity's apis/openapi.yaml (blob
-// 7393aeb57374eb7e38d98272a6851a5ee4ba36a1, last changed by commit
-// 26c54625e72343d5e1e7ede651dcfe03ed149706, copied from its develop at
-// 802cfe28096ac25288522063db3ab92aba60de06 on 2026-10-24). The repository has a
+// b1fcd61fc549aa7bbc192f70c5e73309909eea5d, last changed by commit
+// ce4afd450a1ac8e5ca06036ba671221047ca6a55, copied from its develop at
+// 8a2dc1e47670fd6714596c23c61ed734cefc0193 on 2026-11-05). The repository has a
 // JSON Schema validator already in go.sum (google/jsonschema-go, via the MCP
 // SDK), so this test validates for real instead of comparing field lists:
 //
@@ -37,9 +37,13 @@ import (
 //   - every route the client calls exists, with the Idempotency-Key header on
 //     writes and the vendorId query on reads.
 //
-// Drift: the copy is not refreshed automatically. When vendor-connectivity
-// changes its contract, copy the new file over this one, update the commit above
-// and in ADR 0026, and fix what fails.
+// Drift: the copy is not refreshed automatically, and a stale copy keeps this
+// test green while the vendor moves on (2026-11-01: { items, nextCursor } paging
+// shipped while this file still pinned the 2026-10-24 spec). The `pinned-contracts`
+// CI job (scripts/harness/pinned_contract_gate.py, contracts/pinned.json) fails
+// when the copy differs from vendor-connectivity's develop. To refresh: copy the
+// new file over this one, update the provenance above and in ADR 0033, fix what
+// fails.
 
 const specPath = "testdata/vendor-connectivity-openapi.yaml"
 
@@ -334,17 +338,17 @@ func TestContract_EveryValueTheAdapterSendsOrBranchesOnExistsInTheSpec(t *testin
 
 func TestContract_ARecordedPurchaseOrderPageIsValidAndDecodes(t *testing.T) {
 	spec := loadSpec(t)
-	page := `{"purchaseOrders":[{"poNumber":"PO-7f3c","vendorId":"V-WS","nodeId":"N-1","state":"ISSUED",
+	page := `{"items":[{"poNumber":"PO-7f3c","vendorId":"V-WS","nodeId":"N-1","state":"ISSUED",
 		"issuedAt":"2026-10-24T12:00:00Z","requiredShipBy":"2026-10-26T18:00:00Z","ackBy":"2026-10-24T15:00:00Z",
-		"lines":[{"lineNo":1,"listingId":"L-1","quantity":2}],"labels":[],"trackingNumbers":[]}],"nextToken":"abc"}`
+		"lines":[{"lineNo":1,"listingId":"L-1","quantity":2,"packaging":[]}],"labels":[],"trackingNumbers":[]}],"nextCursor":"abc"}`
 	spec.validate(t, "PurchaseOrderPage", []byte(page))
 
 	var got purchaseOrderPageDTO
 	if err := json.Unmarshal([]byte(page), &got); err != nil {
 		t.Fatal(err)
 	}
-	po := got.PurchaseOrders[0]
-	if po.PoNumber != "PO-7f3c" || po.NodeID != "N-1" || po.State != stateIssued || po.Lines[0].ListingID != "L-1" || got.NextToken != "abc" {
+	po := got.Items[0]
+	if po.PoNumber != "PO-7f3c" || po.NodeID != "N-1" || po.State != stateIssued || po.Lines[0].ListingID != "L-1" || got.NextCursor != "abc" {
 		t.Errorf("decoded page = %+v", got)
 	}
 	if want := time.Date(2026, 10, 24, 15, 0, 0, 0, time.UTC); !po.AckBy.Equal(want) {
@@ -371,7 +375,7 @@ func TestContract_RecordedTransactionsAreValidAndDecode(t *testing.T) {
 				return tx.Status == txFailure && tx.Errors[0].Code == "ErrSimulatedFailure" && tx.PoNumber == "PO-7f3c"
 			}},
 		{"still processing", `{"transactionId":"tx-3","vendorId":"V-WS","kind":"SHIPMENT_CONFIRMATION","status":"PROCESSING",
-			"receivedAt":"2026-10-24T12:00:00Z"}`,
+			"receivedAt":"2026-10-24T12:00:00Z","errors":[]}`,
 			func(tx transactionDTO) bool { return tx.Status == txProcessing && tx.ProcessedAt == nil }},
 		{"a stale profile revision is a failed transaction, not an HTTP refusal", `{"transactionId":"tx-4","vendorId":"V-WS","kind":"NODE_PROFILE","status":"FAILURE",
 			"receivedAt":"2026-10-24T12:00:00Z","processedAt":"2026-10-24T12:00:05Z",
@@ -407,10 +411,10 @@ func TestContract_RecordedTransactionsAreValidAndDecode(t *testing.T) {
 func TestContract_RecordedNodesLabelsAndProblemsAreValidAndDecode(t *testing.T) {
 	spec := loadSpec(t)
 
-	nodes := `{"nodes":[{"nodeId":"N-1","vendorId":"V-WS","vendorNodeCode":"site-1","nodeType":"FULFILLMENT_CENTER","status":"ACTIVE"}]}`
+	nodes := `{"items":[{"nodeId":"N-1","vendorId":"V-WS","vendorNodeCode":"site-1","nodeType":"FULFILLMENT_CENTER","status":"ACTIVE"}]}`
 	spec.validate(t, "VendorNodeList", []byte(nodes))
 	var list vendorNodeListDTO
-	if err := json.Unmarshal([]byte(nodes), &list); err != nil || list.Nodes[0].VendorNodeCode != "site-1" || list.Nodes[0].NodeID != "N-1" {
+	if err := json.Unmarshal([]byte(nodes), &list); err != nil || list.Items[0].VendorNodeCode != "site-1" || list.Items[0].NodeID != "N-1" {
 		t.Errorf("decoded nodes = %+v, %v", list, err)
 	}
 
@@ -497,6 +501,49 @@ func checkRouteAgainstSpec(t *testing.T, paths map[string]any, r seen) {
 	if !slices.Contains(refs, "#/components/parameters/VendorId") || !strings.Contains(r.RawQuery, "vendorId=V-WS") {
 		t.Errorf("GET %s: the spec requires vendorId (listed=%v) and the client sent %q", r.Path, refs, r.RawQuery)
 	}
+	checkQueryParametersAreDeclared(t, op, r)
+}
+
+// checkQueryParametersAreDeclared: the Vendor API answers 400
+// unknown-query-parameter to a query key the operation does not declare, so a
+// retired key (nextToken) the client still sends is an outage, not a nicety.
+func checkQueryParametersAreDeclared(t *testing.T, op map[string]any, r seen) {
+	t.Helper()
+	declared := map[string]bool{}
+	params, _ := op["parameters"].([]any)
+	for _, p := range params {
+		m, _ := p.(map[string]any)
+		if ref, ok := m["$ref"].(string); ok {
+			m, _ = componentParameter(t, ref)
+		}
+		if name, _ := m["name"].(string); name != "" {
+			declared[name] = true
+		}
+	}
+	for key := range parseQuery(r.RawQuery) {
+		if !declared[key] {
+			t.Errorf("%s %s: the client sends query key %q, which the operation does not declare (declared=%v)", r.Method, r.Path, key, declared)
+		}
+	}
+}
+
+func componentParameter(t *testing.T, ref string) (map[string]any, bool) {
+	t.Helper()
+	spec := loadSpec(t)
+	comps, _ := spec.root["components"].(map[string]any)
+	params, _ := comps["parameters"].(map[string]any)
+	m, ok := params[strings.TrimPrefix(ref, "#/components/parameters/")].(map[string]any)
+	return m, ok
+}
+
+func parseQuery(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, kv := range strings.Split(raw, "&") {
+		if k, _, _ := strings.Cut(kv, "="); k != "" {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 func parameterRefs(op map[string]any) []string {
