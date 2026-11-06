@@ -222,8 +222,8 @@ func TestLive_ARegistrationRetriedAfter5xxResendsTheSameKeyAndBody(t *testing.T)
 func pagedFixture(t *testing.T) (*liveFixture, []contract.InboundDemand) {
 	t.Helper()
 	f := readyFixture(t, nil)
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2, 1), issuedPO("PO-2", "N-1", 5)}, NextToken: "t1"})
-	f.sim.setPage("t1", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-3", "N-1", 1)}})
+	f.sim.setPage("", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2, 1), issuedPO("PO-2", "N-1", 5)}, NextCursor: "t1"})
+	f.sim.setPage("t1", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-3", "N-1", 1)}})
 	got, err := f.g.PollDemand(context.Background(), t0)
 	if err != nil || len(got) != 3 {
 		t.Fatalf("PollDemand = %d demands, %v; want 3 across two pages", len(got), err)
@@ -259,7 +259,7 @@ func TestLive_PollDemandMintsTheRefAndPersistsTheMapBackToThePurchaseOrder(t *te
 	}
 }
 
-func TestLive_PollDemandFollowsNextTokenWithTheOverlapOnlyOnTheFirstPage(t *testing.T) {
+func TestLive_PollDemandFollowsNextCursorRepeatingTheOverlappedFilter(t *testing.T) {
 	f, _ := pagedFixture(t)
 
 	pages := f.requestsTo(http.MethodGet, "/vendor/purchase-orders")
@@ -269,8 +269,8 @@ func TestLive_PollDemandFollowsNextTokenWithTheOverlapOnlyOnTheFirstPage(t *test
 	if !strings.Contains(pages[0].RawQuery, "createdAfter=2026-10-24T09%3A58%3A00Z") {
 		t.Errorf("first page query %q: createdAfter must be since minus the 2 minute overlap", pages[0].RawQuery)
 	}
-	if !strings.Contains(pages[1].RawQuery, "nextToken=t1") || strings.Contains(pages[1].RawQuery, "createdAfter") {
-		t.Errorf("second page query %q, want the token alone", pages[1].RawQuery)
+	if !strings.Contains(pages[1].RawQuery, "cursor=t1") || !strings.Contains(pages[1].RawQuery, "createdAfter=2026-10-24T09%3A58%3A00Z") {
+		t.Errorf("second page query %q, want the cursor and the SAME createdAfter (the filters are repeated on every page)", pages[1].RawQuery)
 	}
 }
 
@@ -286,7 +286,7 @@ func TestLive_AZeroWatermarkAsksForEverything(t *testing.T) {
 
 func TestLive_ARedeliveredPurchaseOrderYieldsTheSameNetworkRef(t *testing.T) {
 	f := readyFixture(t, nil)
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2), issuedPO("PO-2", "N-1", 1)}})
+	f.sim.setPage("", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2), issuedPO("PO-2", "N-1", 1)}})
 
 	first := f.poll(t)
 	second := f.poll(t)
@@ -298,8 +298,8 @@ func TestLive_ARedeliveredPurchaseOrderYieldsTheSameNetworkRef(t *testing.T) {
 
 func TestLive_APurchaseOrderRepeatedInsideOnePollIsReturnedOnce(t *testing.T) {
 	f := readyFixture(t, nil)
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2)}, NextToken: "t1"})
-	f.sim.setPage("t1", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2), issuedPO("PO-2", "N-1", 1)}})
+	f.sim.setPage("", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2)}, NextCursor: "t1"})
+	f.sim.setPage("t1", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2), issuedPO("PO-2", "N-1", 1)}})
 
 	if refs := f.poll(t); len(refs) != 2 {
 		t.Fatalf("demands = %v, want PO-1 once and PO-2", refs)
@@ -314,7 +314,7 @@ func TestLive_OnlyIssuedPurchaseOrdersAreDemand(t *testing.T) {
 		po.State = state
 		others = append(others, po)
 	}
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: append([]purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}, others...)})
+	f.sim.setPage("", purchaseOrderPageDTO{Items: append([]purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}, others...)})
 
 	if refs := f.poll(t); len(refs) != 1 {
 		t.Fatalf("demands = %v, want only the ISSUED one: the rest were answered here or ended by the network", refs)
@@ -326,7 +326,7 @@ func TestLive_OnlyIssuedPurchaseOrdersAreDemand(t *testing.T) {
 
 func TestLive_APurchaseOrderOnAnUnknownNodeIsSkippedWithAWarningAndTheRestStillFlow(t *testing.T) {
 	f := readyFixture(t, nil)
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{
+	f.sim.setPage("", purchaseOrderPageDTO{Items: []purchaseOrderDTO{
 		issuedPO("PO-1", "N-1", 1), issuedPO("PO-GHOST", "N-404", 1), issuedPO("PO-2", "N-1", 1),
 	}})
 
@@ -350,7 +350,7 @@ func TestLive_APurchaseOrderOnAnUnknownNodeIsSkippedWithAWarningAndTheRestStillF
 
 func TestLive_PollDemandWaitsOutA429AndSucceeds(t *testing.T) {
 	f := readyFixture(t, nil)
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}})
+	f.sim.setPage("", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}})
 	f.sim.inject = failFirst(http.MethodGet, "/vendor/purchase-orders", 1, http.StatusTooManyRequests, map[string]string{"Retry-After": "3"})
 
 	if refs := f.poll(t); len(refs) != 1 {
@@ -363,7 +363,7 @@ func TestLive_PollDemandWaitsOutA429AndSucceeds(t *testing.T) {
 
 func TestLive_PollDemandRetriesA5xxAndATimeout(t *testing.T) {
 	f := readyFixture(t, func(c *fixtureCfg) { c.client = func(cc *clientConfig) { cc.callTimeout = 50 * time.Millisecond } })
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}})
+	f.sim.setPage("", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}})
 	fail5xx := failFirst(http.MethodGet, "/vendor/purchase-orders", 1, http.StatusServiceUnavailable, nil)
 	slow := slowFirst(http.MethodGet, "/vendor/nodes", 1, 300*time.Millisecond)
 	f.sim.inject = func(w http.ResponseWriter, r *http.Request) bool { return slow(w, r) || fail5xx(w, r) }
@@ -378,7 +378,7 @@ func TestLive_PollDemandRetriesA5xxAndATimeout(t *testing.T) {
 
 func TestLive_PollDemandReportsAnOutageAndPersistsNothing(t *testing.T) {
 	f := readyFixture(t, func(c *fixtureCfg) { c.client = func(cc *clientConfig) { cc.maxAttempts = 2 } })
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}})
+	f.sim.setPage("", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 1)}})
 	f.sim.inject = failFirst(http.MethodGet, "/vendor/purchase-orders", 99, http.StatusInternalServerError, nil)
 
 	got, err := f.g.PollDemand(context.Background(), t0)

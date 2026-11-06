@@ -31,7 +31,7 @@ flowchart LR
     SUB["subscribers<br/>none found"]
 
     RN -->|"PollDemand, SubmitAcknowledgement,<br/>SubmissionStatus, SubmitShipmentConfirmation"| NF
-    NF -->|"POST /orders, POST /orders/id/release,<br/>DELETE /orders/id"| OM
+    NF -->|"POST /orders, POST /orders/{id}/releases,<br/>DELETE /orders/{id}"| OM
     NF -.->|"GET /inventory/sku/usable<br/>always on"| INV
     PPM -.->|"warehouse.process-path-management.events<br/>always on"| NF
     WWP -.->|"warehouse.work-planning.events<br/>always on"| NF

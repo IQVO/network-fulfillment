@@ -1,6 +1,10 @@
 package retailnetwork
 
-import "time"
+import (
+	"encoding/json"
+	"errors"
+	"time"
+)
 
 // The wire shapes of the Vendor API (apis/openapi.yaml of vendor-connectivity,
 // copied under testdata/ and checked by contract_test.go). They are the network's
@@ -33,10 +37,33 @@ type purchaseOrderDTO struct {
 	Acknowledgement *acknowledgementDTO `json:"acknowledgement,omitempty"`
 }
 
-type purchaseOrderPageDTO struct {
-	PurchaseOrders []purchaseOrderDTO `json:"purchaseOrders"`
-	NextToken      string             `json:"nextToken,omitempty"`
+// pageDTO is the ONE collection shape of the Vendor API since 2026-11-01:
+// { "items": [...], "nextCursor": "..." }, nextCursor absent on the last page.
+// Decoding refuses a body without an "items" array. Without that refusal a
+// poller still reading a retired shape (purchaseOrders, nodes, inboundShipments)
+// would get 200, zero items and no error: purchase orders and inbound shipments
+// would stop silently.
+type pageDTO[T any] struct {
+	Items      []T    `json:"items"`
+	NextCursor string `json:"nextCursor,omitempty"`
 }
+
+func (p *pageDTO[T]) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Items      *[]T   `json:"items"`
+		NextCursor string `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	if raw.Items == nil {
+		return errors.New("the answer is not a { items, nextCursor } page: it has no items array")
+	}
+	p.Items, p.NextCursor = *raw.Items, raw.NextCursor
+	return nil
+}
+
+type purchaseOrderPageDTO = pageDTO[purchaseOrderDTO]
 
 type submissionErrorDTO struct {
 	Code    string `json:"code"`
@@ -71,9 +98,7 @@ type vendorNodeDTO struct {
 	ProfileRevision int `json:"profileRevision,omitempty"`
 }
 
-type vendorNodeListDTO struct {
-	Nodes []vendorNodeDTO `json:"nodes"`
-}
+type vendorNodeListDTO = pageDTO[vendorNodeDTO]
 
 type labelDTO struct {
 	PackageNo      int    `json:"packageNo,omitempty"`
