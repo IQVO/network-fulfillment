@@ -124,18 +124,28 @@ const feasibleCutoffHorizon = 7 * 24 * time.Hour
 // no cycle-time data (unknown, or zero) stays eligible -- no data is not
 // evidence -- and capacity is never scaled by cycle time.
 //
-// Feasibility (ADR 0031, amending ADR 0017): a cutoff for which every path is
+// Feasibility (ADR 0031, amending ADR 0017; ADR 0033 for full cutoffs): a cutoff for which every path is
 // ruled out by cycle time is not "cannot ship" but "misses this truck"; the
 // walk moves on to the following cutoff, and the one after, up to
-// feasibleCutoffHorizon from now. Only when no cutoff inside that bound can be
-// made is the result a proven zero (known=true).
+// feasibleCutoffHorizon from now. A cutoff whose observed capacity is used up
+// is skipped the same way (ADR 0033). Only when no cutoff inside that bound can
+// be made, and has room, is the result a proven zero (known=true).
 func (u *RecomputeCapabilityOffers) throughputFeasible(now time.Time) (int, bool) {
 	next, hasSchedule := u.PathCap.NextCutoff(u.SiteId, now)
 	if !hasSchedule {
 		return 0, false
 	}
 	horizon := now.Add(feasibleCutoffHorizon)
-	for !anyPathFits(next, now) {
+	for {
+		if anyPathFits(next, now) {
+			total, known := u.capacityBefore(next, now)
+			// Full is not infeasible-forever (leak B): a cutoff whose observed
+			// capacity is used up misses nothing but THIS truck, so the walk
+			// moves on exactly as it does for a cutoff no path can make.
+			if !known || total > 0 {
+				return total, known
+			}
+		}
 		// NextCutoff's `after` is inclusive: ask strictly after the cutoff
 		// just ruled out, or the cache answers the same one again.
 		later, found := u.PathCap.NextCutoff(u.SiteId, next.CutoffAt.Add(time.Nanosecond))
@@ -144,7 +154,6 @@ func (u *RecomputeCapabilityOffers) throughputFeasible(now time.Time) (int, bool
 		}
 		next = later
 	}
-	return u.capacityBefore(next, now)
 }
 
 // anyPathFits reports whether the cutoff can be made by at least one of its
