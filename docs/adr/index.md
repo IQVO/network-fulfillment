@@ -46,3 +46,4 @@ immutable; a changed decision gets a new ADR that supersedes the old one. The
 | [0030](/docs/adr/0030-a2a-inbound-adapter) | A2A inbound adapter (a read-only third driving adapter) | **Accepted** (2026-10-29). Mirrors the reference rollout in |
 | [0031](/docs/adr/0031-advertise-against-the-next-feasible-cutoff) | Advertise against the next feasible cutoff, read in the site's timezone | **Accepted** (2026-10-30). Two root causes of the same live symptom, decided |
 | [0032](/docs/adr/0032-adopt-the-fleet-rest-api-guideline) | Adopt the fleet REST API guideline | **Accepted** (2026-11-01). Keyed POST, paged lists, order-management releases |
+| [0033](/docs/adr/0033-a-full-cutoff-misses-only-its-own-truck) | A full cutoff misses only its own truck | **Accepted** (2026-11-05). Amends §1 of [ADR 0031](./0031-advertise-against-the-next-feasible-cutoff.md) |
