@@ -4,7 +4,7 @@ slug: /adr/0034-follow-the-vendor-api-page-envelope
 title: "34. Follow the Vendor API page envelope, and gate the pinned copy against develop"
 sidebar_label: "34. Vendor API page envelope"
 sidebar_position: 34
-description: "ADR 0033: the retail-network adapter reads { items, nextCursor } from the Vendor API, refuses any 200 that is not a page, repeats the filters on every page, and a CI job fails when the pinned vendor-connectivity spec differs from its develop."
+description: "ADR 0034: the retail-network adapter reads { items, nextCursor } from the Vendor API, refuses any 200 that is not a page, repeats the filters on every page, and a CI job fails when the pinned vendor-connectivity spec differs from its develop."
 ---
 
 # 34. Follow the Vendor API page envelope, and gate the pinned copy against develop
