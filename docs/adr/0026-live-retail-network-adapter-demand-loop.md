@@ -213,9 +213,10 @@ mutations for lack of an idempotency-key contract; here every write has one
 
 `testdata/vendor-connectivity-openapi.yaml` is a byte copy of
 `vendor-connectivity` `apis/openapi.yaml` (blob
-`7393aeb57374eb7e38d98272a6851a5ee4ba36a1`, last changed by commit
-`26c54625e72343d5e1e7ede651dcfe03ed149706`, copied from its `develop` at
-`802cfe28096ac25288522063db3ab92aba60de06` on 2026-10-24). The repository already
+`9cdc765a7971514aa60829fad8adf19083341810`, last changed by commit
+`235753c37a02aec28cc31077ce0ba7bb542f5686`, copied from its `develop` at
+`21683477f86185f7fe04241ea80a0354003fab76` on 2026-11-09; that refresh added the
+optional purchase-order line `ownerRef`, which this adapter does not send). The repository already
 carries a JSON Schema validator (`google/jsonschema-go`, through the MCP SDK), so
 the test loads the spec, resolves its component schemas and validates every request
 body the adapter builds (types, required fields, enums, no property the schema does

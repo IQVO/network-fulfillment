@@ -20,9 +20,9 @@ import (
 
 // The contract test (ADR 0026 Decision 9). testdata/vendor-connectivity-openapi.yaml
 // is a BYTE COPY of vendor-connectivity's apis/openapi.yaml (blob
-// b1fcd61fc549aa7bbc192f70c5e73309909eea5d, last changed by commit
-// ce4afd450a1ac8e5ca06036ba671221047ca6a55, copied from its develop at
-// 8a2dc1e47670fd6714596c23c61ed734cefc0193 on 2026-11-05). The repository has a
+// 9cdc765a7971514aa60829fad8adf19083341810, last changed by commit
+// 235753c37a02aec28cc31077ce0ba7bb542f5686, copied from its develop at
+// 21683477f86185f7fe04241ea80a0354003fab76 on 2026-11-09). The repository has a
 // JSON Schema validator already in go.sum (google/jsonschema-go, via the MCP
 // SDK), so this test validates for real instead of comparing field lists:
 //
