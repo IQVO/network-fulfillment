@@ -1081,6 +1081,9 @@ components:
         quantity:
           type: integer
           minimum: 1
+        ownerRef:
+          type: string
+          description: The owner of the goods to pick (the seller's ownerRef); omitted for operator-owned stock
         packaging:
           type: array
           description: The active packaging levels of the listing's catalogue item, from the network's catalogue (empty when none was declared).
