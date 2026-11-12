@@ -350,17 +350,7 @@ func (c *AnalyticsConsumer) dlqPublish(ctx context.Context, msg kafkago.Message,
 	if c.dlqWriter == nil {
 		return nil
 	}
-	headers := append([]kafkago.Header{}, msg.Headers...)
-	headers = append(headers,
-		kafkago.Header{Key: "x-dlq-source-topic", Value: []byte(c.Reader.Config().Topic)},
-		kafkago.Header{Key: "x-dlq-error", Value: []byte(cause.Error())},
-		kafkago.Header{Key: "x-dlq-failed-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
-	)
-	return c.dlqWriter.WriteMessages(ctx, kafkago.Message{
-		Key:     msg.Key,
-		Value:   msg.Value,
-		Headers: headers,
-	})
+	return c.dlqWriter.WriteMessages(ctx, deadLetterMessage(msg, c.Reader.Config().Topic, cause, time.Now()))
 }
 
 // commit acknowledges msg so it is never redelivered. Only a commit

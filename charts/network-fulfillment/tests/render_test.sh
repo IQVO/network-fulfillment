@@ -149,6 +149,9 @@ grep -q 'INBOUND_RECEIVING_URL: "http://inbound-receiving.invalid"' <<<"$live_cm
 grep -q 'PRODUCT_MASTER_URL: "http://product-master.invalid"' <<<"$live_cm" || fail "live: PRODUCT_MASTER_URL is not rendered"
 grep -q 'INBOUND_INTAKE_INTERVAL: "30s"' <<<"$live_cm" || fail "live: INBOUND_INTAKE_INTERVAL is not rendered"
 grep -q 'INBOUND_RECEIPT_CONSUMER_GROUP: "network-fulfillment-inbound-receipts"' <<<"$live_cm" || fail "live: INBOUND_RECEIPT_CONSUMER_GROUP is not rendered"
+# The outbound-shipping consumer group renders in EVERY mode (ADR 0014 addendum:
+# the topic is a fleet integration topic, not a network-adapter leg).
+grep -q 'OUTBOUND_SHIPPING_CONSUMER_GROUP: "network-fulfillment-outbound-shipping"' <<<"$live_cm" || fail "live: OUTBOUND_SHIPPING_CONSUMER_GROUP is not rendered"
 expect_refusal "live without the receipt consumer group" "config.inboundReceiptConsumerGroup" "${base[@]}" \
   --set config.networkMode=live --set config.networkBaseUrl=https://vendor.invalid --set config.networkVendorId=V-1 \
   --set config.inboundReceivingUrl=http://inbound-receiving.invalid --set config.productMasterUrl=http://product-master.invalid

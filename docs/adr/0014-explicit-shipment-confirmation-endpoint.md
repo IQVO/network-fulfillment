@@ -18,6 +18,10 @@ this context's first and only write endpoint, narrowing Hard rule 9
 ("REST is read-only... no write endpoint without a new ADR") for this
 one case only.
 
+Addendum (2026-11-06): the `ShipmentConfirmed` consumer is the primary
+trigger; the explicit endpoint stays one release as the operator fallback,
+both through one idempotent use case — see the Addendum section below.
+
 ## Context
 
 `NetworkOrderShipmentConfirmed` (`internal/domain/shared/events.go`) and
@@ -86,3 +90,57 @@ one. The endpoint is unauthenticated like every surface in this fleet
 for any order; this is acceptable under the fleet's current flat-trust
 network model and is the same exposure every other context's write
 endpoints already carry.
+
+## Addendum (2026-11-06): the event path is primary; the endpoint stays one release
+
+The correlation this ADR said was missing now exists — but not the one its
+Context paragraph guessed at. The fleet built `outbound-shipping`, and its
+`ShipmentConfirmed` event (merged contract, outbound-shipping PR #2) lists
+every shipped order as `orders[].order_id`, which IS order-management's
+`OrderId` — exactly the identifier `NetworkOrder.localOrderId` has persisted
+since the demand loop (the mapping this ADR's own Context named as "the
+persisted mapping ... but no table anywhere stores the second hop": the
+second hop is now outbound-shipping's, not a WorkUnitId join). This ADR's
+Hard rule 4 reasoning holds untouched: no string convention anywhere, the
+join is on a stored column.
+
+**Decision (fleet plan D6, outbound-shipping-2026-11-05):**
+
+1. **Primary path — consume the event.** `ShipmentConfirmedConsumer`
+   (`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`)
+   subscribes to `warehouse.outbound-shipping.events` under
+   `OUTBOUND_SHIPPING_CONSUMER_GROUP` (default
+   `network-fulfillment-outbound-shipping`), joins each
+   `orders[].order_id` on `NetworkOrder.localOrderId`
+   (`FindByLocalOrderId`), and confirms through the ONE use case. An
+   `order_id` no NetworkOrder carries is a local order raised from
+   customer demand sharing the load: skipped and logged, never an error.
+   Unknown types are ignored; a message that is not a CloudEvent or breaks
+   the contract is dead-lettered to `warehouse.outbound-shipping.events.dlq`.
+2. **The manual POST stays, for exactly one release, as the operator
+   fallback** — also the operator's way to close the gap a dead-lettered
+   confirmation leaves. It deprecates when the event path has run clean in
+   the fleet (its own ADR then).
+3. **Neither path double-submits.** Both route through the one
+   `ConfirmNetworkOrderShipment` (one instance in the composition root),
+   whose idempotency is now two-legged: the aggregate's terminal CONFIRMED
+   state (as before), plus a durable `(shipment reference, order id)`
+   ledger (`shipment_confirmations`, migration 0014) — the load id and the
+   order-management OrderId on the event path, the NetworkRef itself on
+   the manual path. The ledger row commits in the same transaction as the
+   CONFIRMED save and the `NetworkOrderShipmentConfirmed` outbox write, so
+   a redelivered event, a re-published load, or the endpoint racing the
+   event is a no-op returning the existing confirmation: one label request,
+   one network submission, one event, proven by test in both orders
+   (`confirm_shipment_paths_test.go`) and on the real stack
+   (`shipment_confirmed_integration_test.go`).
+
+**Known gap — package count.** The network is told `1` package per order
+(`const singlePackage`, ADR 0026) because `ShipmentConfirmed.orders[]`
+carries only `order_id` today; the per-order package count is an additive
+producer change that has not landed. The consumer's decode already
+tolerates `package_count` and the use case threads it to `RequestLabel`,
+so the real count flows the day the producer ships it — until then the
+single-package behavior stands, and the spike's evidence (one package per
+order is structural today) keeps that honest.
+

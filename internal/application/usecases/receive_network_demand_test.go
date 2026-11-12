@@ -62,10 +62,11 @@ func (p *fakePlanner) CancelHeldOrder(_ context.Context, _ shared.LocalOrderId) 
 }
 
 type fixture struct {
-	orders      *memory.NetworkOrderRepo
-	gateway     *retailnetwork.StubGateway
-	planner     *fakePlanner
-	translation *producttranslation.Dictionary
+	orders        *memory.NetworkOrderRepo
+	gateway       *retailnetwork.StubGateway
+	planner       *fakePlanner
+	translation   *producttranslation.Dictionary
+	confirmations *memory.ShipmentConfirmationLog
 }
 
 func newFixture(feasible bool) *fixture {
@@ -73,10 +74,11 @@ func newFixture(feasible bool) *fixture {
 	tr.Add("ASIN-1", "SKU-1")
 	tr.Add("ASIN-2", "SKU-2")
 	return &fixture{
-		orders:      memory.NewNetworkOrderRepo(),
-		gateway:     retailnetwork.NewStubGateway(nil),
-		planner:     &fakePlanner{feasible: feasible},
-		translation: tr,
+		orders:        memory.NewNetworkOrderRepo(),
+		gateway:       retailnetwork.NewStubGateway(nil),
+		planner:       &fakePlanner{feasible: feasible},
+		translation:   tr,
+		confirmations: memory.NewShipmentConfirmationLog(),
 	}
 }
 
