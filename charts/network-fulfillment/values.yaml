@@ -257,6 +257,15 @@ config:
   # refuse live without it. No default: warehouse-infra names it.
   inboundReceiptConsumerGroup: ""
 
+  # OUTBOUND_SHIPPING_CONSUMER_GROUP: this service's consumer group on
+  # outbound-shipping's events topic, through which ShipmentConfirmed arrives
+  # (ADR 0014 addendum: the event path is the primary confirmation trigger).
+  # Durable and unique to this service, in EVERY mode (the topic is a fleet
+  # integration topic, not a network-adapter leg). Unlike the receipt group it
+  # carries the binary's own default, so deployments that predate the consumer
+  # keep booting; warehouse-infra pins the live value, as it does there.
+  outboundShippingConsumerGroup: "network-fulfillment-outbound-shipping"
+
   # order-management's in-cluster REST base URL. The one upstream this
   # context calls; the default matches the fleet's service naming.
   orderManagementUrl: "http://order-management.warehouse.svc.cluster.local"

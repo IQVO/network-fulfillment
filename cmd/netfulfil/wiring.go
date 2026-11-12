@@ -267,9 +267,15 @@ type apiDeps struct {
 	pool        *pgxpool.Pool
 	logger      *slog.Logger
 	serviceName string
+	// confirm is the shared ConfirmNetworkOrderShipment (built by
+	// wireConfirmShipment): the REST endpoint and the ShipmentConfirmed
+	// consumer run the same instance.
+	confirm *usecases.ConfirmNetworkOrderShipment
 }
 
-// wireAPI builds the REST server and its ConfirmShipment use case.
+// wireAPI builds the REST server. Its ConfirmShipment use case is the one
+// built by wireConfirmShipment — the same instance the ShipmentConfirmed
+// consumer runs, never a second construction.
 func wireAPI(d apiDeps) *inboundhttp.Server {
 	api := &inboundhttp.Server{
 		Orders:          d.orders,
@@ -283,13 +289,7 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 		ServiceName:     d.serviceName,
 	}
 
-	api.ConfirmShipment = &usecases.ConfirmNetworkOrderShipment{
-		Orders:     d.orders,
-		Gateway:    d.gateway,
-		Events:     d.events,
-		Clock:      system.Clock{},
-		UnitOfWork: postgres.NewUnitOfWork(d.pool),
-	}
+	api.ConfirmShipment = d.confirm
 	api.Idempotency = postgres.NewIdempotencyStore(d.pool)
 	return api
 }

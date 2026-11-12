@@ -51,6 +51,14 @@ data:
 {{- end }}
 {{- end }}
 
+  # This service's consumer group on outbound-shipping's events topic, through
+  # which ShipmentConfirmed arrives (ADR 0014 addendum: the event path is the
+  # primary shipment-confirmation trigger, the manual endpoint the fallback).
+  # Rendered in EVERY mode, unlike the receipt group above: the topic is a
+  # fleet integration topic, not a network-adapter leg, so a stub-network
+  # deployment still confirms its orders when a fixture load departs.
+  OUTBOUND_SHIPPING_CONSUMER_GROUP: {{ .Values.config.outboundShippingConsumerGroup | quote }}
+
   # order-management's REST base URL. This is the one upstream this
   # context calls, and it is a genuine dependency rather than optional
   # plumbing: without it no held order can be raised and no feasibility
