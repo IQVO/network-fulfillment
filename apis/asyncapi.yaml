@@ -1808,6 +1808,44 @@ components:
               items:
                 type: object
 
+    CloudEventEnvelope:
+      type: object
+      required:
+      - specversion
+      - id
+      - source
+      - type
+      - subject
+      - time
+      - datacontenttype
+      - dataschema
+      - data
+      properties:
+        specversion:
+          type: string
+          const: '1.0'
+        id:
+          type: string
+          description: UUID minted once per occurrence and persisted with the outbox row; consumers dedupe
+            on it.
+        source:
+          type: string
+          const: /warehouse/outbound-shipping
+        type:
+          type: string
+          description: com.warehouse.wms.outbound-shipping.<entity>.<EventName>.
+        subject:
+          type: string
+          description: Aggregate root id; also the Kafka partition key.
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          const: application/json
+        dataschema:
+          type: string
+          description: urn:warehouse:outbound-shipping:<events|analytics>:<EventName>:v1.
     ShipmentConfirmedEvent:
       allOf:
         - $ref: "#/components/schemas/CloudEventEnvelope"
