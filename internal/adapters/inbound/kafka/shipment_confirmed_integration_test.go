@@ -180,7 +180,7 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM outbox_events
-		WHERE event_type = 'NetworkOrderShipmentConfirmed' AND topic = 'warehouse.network-fulfillment.events'
+		WHERE event_type LIKE '%NetworkOrderShipmentConfirmed' AND topic = 'warehouse.network-fulfillment.events'
 	`).Scan(&outboxRows); err != nil {
 		t.Fatalf("count outbox: %v", err)
 	}

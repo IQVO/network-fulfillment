@@ -3,6 +3,7 @@ package usecases
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
@@ -94,28 +95,13 @@ func (uc *ConfirmNetworkOrderShipment) ExecuteForShipment(ctx context.Context, r
 	if o == nil {
 		return nil, ErrOrderNotFound
 	}
-
-	// The idempotency key: shipment reference + the identifying order id
-	// (the order-management OrderId when one is linked — the event's join
-	// key — else the NetworkRef the manual path named).
-	orderId := string(ref)
-	if id := o.LocalOrderId(); id != nil {
-		orderId = string(*id)
+	shipmentRef, orderId := confirmationIds(o, ref, shipmentRef)
+	duplicate, err := uc.alreadyConfirmed(ctx, o, shipmentRef, orderId)
+	if err != nil {
+		return nil, err
 	}
-	if shipmentRef == "" {
-		shipmentRef = string(ref)
-	}
-	if uc.Confirmations != nil {
-		confirmed, err := uc.Confirmations.Exists(ctx, shipmentRef, orderId)
-		if err != nil {
-			return nil, err
-		}
-		if confirmed {
-			return o, nil // duplicate submission: the existing confirmation
-		}
-	}
-	if o.State() == networkorder.StateConfirmed {
-		return o, nil // confirmed already, by whichever path got there first
+	if duplicate {
+		return o, nil
 	}
 	if packageCount <= 0 {
 		packageCount = singlePackage
@@ -136,22 +122,62 @@ func (uc *ConfirmNetworkOrderShipment) ExecuteForShipment(ctx context.Context, r
 	}
 
 	now := uc.Clock.Now()
+	if err := uc.record(ctx, o, shipmentRef, orderId, now); err != nil {
+		return nil, err
+	}
+	if err := uc.Gateway.SubmitShipmentConfirmation(ctx, o.NetworkRef(), now); err != nil {
+		return nil, fmt.Errorf("submit shipment confirmation: %w", err)
+	}
+	return o, nil
+}
+
+// confirmationIds normalizes the idempotency key pair: the order-management
+// OrderId when one is linked (the event's join key), else the NetworkRef the
+// manual path named; an empty shipmentRef falls back to the NetworkRef too.
+func confirmationIds(o *networkorder.NetworkOrder, ref shared.NetworkRef, shipmentRef string) (string, string) {
+	orderId := string(ref)
+	if id := o.LocalOrderId(); id != nil {
+		orderId = string(*id)
+	}
+	if shipmentRef == "" {
+		shipmentRef = string(ref)
+	}
+	return shipmentRef, orderId
+}
+
+// alreadyConfirmed reports whether this confirmation already happened:
+// recorded in the (shipmentRef, order id) ledger, or the aggregate itself
+// is already CONFIRMED — the terminal state, whichever path got there
+// first.
+func (uc *ConfirmNetworkOrderShipment) alreadyConfirmed(ctx context.Context, o *networkorder.NetworkOrder, shipmentRef, orderId string) (bool, error) {
+	if uc.Confirmations != nil {
+		confirmed, err := uc.Confirmations.Exists(ctx, shipmentRef, orderId)
+		if err != nil {
+			return false, err
+		}
+		if confirmed {
+			return true, nil
+		}
+	}
+	return o.State() == networkorder.StateConfirmed, nil
+}
+
+// record persists the confirmation atomically: the CONFIRMED save, the
+// ledger claim and the NetworkOrderShipmentConfirmed outbox write happen
+// in ONE UnitOfWork, so the ledger only ever claims a confirmation that
+// also happened.
+func (uc *ConfirmNetworkOrderShipment) record(ctx context.Context, o *networkorder.NetworkOrder, shipmentRef, orderId string, now time.Time) error {
 	var localOrderId shared.LocalOrderId
 	if id := o.LocalOrderId(); id != nil {
 		localOrderId = *id
 	}
 	confirmations := uc.Confirmations
-	shipmentRefForRecord, orderIdForRecord := shipmentRef, orderId
-
-	if err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
 		if err := uc.Orders.Save(ctx, o); err != nil {
 			return err
 		}
 		if confirmations != nil {
-			// Inside the same atomic scope as the CONFIRMED save and the
-			// outbox write: the ledger only ever claims a confirmation
-			// that also happened.
-			if err := confirmations.Record(ctx, shipmentRefForRecord, orderIdForRecord, o.NetworkRef(), now); err != nil {
+			if err := confirmations.Record(ctx, shipmentRef, orderId, o.NetworkRef(), now); err != nil {
 				return err
 			}
 		}
@@ -161,12 +187,5 @@ func (uc *ConfirmNetworkOrderShipment) ExecuteForShipment(ctx context.Context, r
 			LocalOrderId: localOrderId,
 			At:           now,
 		})
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := uc.Gateway.SubmitShipmentConfirmation(ctx, o.NetworkRef(), now); err != nil {
-		return nil, fmt.Errorf("submit shipment confirmation: %w", err)
-	}
-	return o, nil
+	})
 }

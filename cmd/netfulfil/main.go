@@ -81,12 +81,8 @@ func run(ctx context.Context) int {
 	// blocks on the Collector. MUST run before wireAPI/Routes(): otelchi
 	// binds the global MeterProvider when the middleware is built.
 	serviceName := getenv("OTEL_SERVICE_NAME", inboundhttp.DefaultServiceName)
-	otelCtx, otelCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	otelClose, err := telemetry.Setup(otelCtx, serviceName,
-		getenv("SERVICE_VERSION", "dev"), getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultOTLPEndpoint))
-	otelCancel()
-	if err != nil {
-		logger.Error("telemetry setup failed", "error", err)
+	otelClose, ok := setupTelemetry(serviceName, logger)
+	if !ok {
 		return 1
 	}
 	defer func() {
@@ -109,19 +105,10 @@ func run(ctx context.Context) int {
 
 	planner := wirePlanner(circuitBreakerMetrics)
 
-	// readiness gates GET /readyz (ADR 0004 §graceful shutdown). The
-	// zero value is ready; SetNotReady is called as the FIRST step of
-	// the shutdown sequence (shutdownGracefully), before the HTTP server
-	// itself stops accepting connections, so a Kubernetes readinessProbe
-	// has a chance to observe the flip and stop routing new traffic
-	// during the drain window that follows.
-	//
-	// The gate also requires Postgres and Kafka to answer: /readyz is 503
-	// dependency-unavailable while either is down, /healthz stays 200.
-	readiness := inboundhttp.NewReadiness(inboundhttp.DefaultReadinessTTL, inboundhttp.DefaultReadinessTimeout,
-		inboundhttp.Dependency{Name: "postgres", Check: in.pool.Ping},
-		inboundhttp.Dependency{Name: "kafka", Check: outboundkafka.NewBrokerCheck(cfg.kafkaBrokers).Check},
-	)
+	// readiness gates GET /readyz (ADR 0004 §graceful shutdown): 503
+	// dependency-unavailable while either dependency is down; /healthz
+	// stays 200. See wireReadiness for the flip-on-shutdown contract.
+	readiness := wireReadiness(in, cfg)
 
 	eventPublisher, relay, closeEventPublisher := wireEventPublisher(in.pool, cfg.kafkaBrokers, logger)
 	defer closeEventPublisher()
@@ -136,12 +123,10 @@ func run(ctx context.Context) int {
 	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
 	profiles, inventory := wireSupplyLoop(logger, in)
 
-	// The inbound leg. Until now ReceiveNetworkDemand was constructed and
-	// DISCARDED (`_ = receive`), so nothing in a deployed environment
-	// could create a NetworkOrder at all.
-	inbound := poller.New(in.gateway, receive, system.Clock{}, poller.Config{
-		Interval: pollInterval(),
-	}, logger)
+	// The inbound leg: the demand poller feeding ReceiveNetworkDemand (the
+	// use case itself is wired in wiring.go; until ADR 0028 nothing in a
+	// deployed environment could create a NetworkOrder at all).
+	inbound := wireInboundPoller(in, receive, logger)
 
 	api := wireAPI(apiDeps{
 		orders:      in.orders,
@@ -183,6 +168,44 @@ func run(ctx context.Context) int {
 		code = 1 // a dead shipment-confirmed consumer is a failure too
 	}
 	return code
+}
+
+// wireInboundPoller builds the demand poller that feeds
+// ReceiveNetworkDemand on the fixed system clock.
+func wireInboundPoller(in infra, receive *usecases.ReceiveNetworkDemand, logger *slog.Logger) *poller.Poller {
+	return poller.New(in.gateway, receive, system.Clock{}, poller.Config{
+		Interval: pollInterval(),
+	}, logger)
+}
+
+// wireReadiness gates GET /readyz (ADR 0004 §graceful shutdown) on
+// Postgres and Kafka answering: /readyz is 503 dependency-unavailable
+// while either is down, /healthz stays 200. The zero value is ready;
+// SetNotReady is called as the FIRST step of the shutdown sequence
+// (shutdownGracefully), before the HTTP server itself stops accepting
+// connections, so a Kubernetes readinessProbe has a chance to observe
+// the flip and stop routing new traffic during the drain window.
+func wireReadiness(in infra, cfg bootConfig) *inboundhttp.Readiness {
+	return inboundhttp.NewReadiness(inboundhttp.DefaultReadinessTTL, inboundhttp.DefaultReadinessTimeout,
+		inboundhttp.Dependency{Name: "postgres", Check: in.pool.Ping},
+		inboundhttp.Dependency{Name: "kafka", Check: outboundkafka.NewBrokerCheck(cfg.kafkaBrokers).Check},
+	)
+}
+
+// setupTelemetry wires OTLP trace + metric export and Go runtime metrics
+// (ADR 0019) under a bounded 10s setup budget — it never blocks on the
+// Collector. The returned closer flushes on shutdown; ok=false means
+// setup failed (already logged) and the caller must boot-fail.
+func setupTelemetry(serviceName string, logger *slog.Logger) (close func(context.Context) error, ok bool) {
+	otelCtx, otelCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer otelCancel()
+	otelClose, err := telemetry.Setup(otelCtx, serviceName,
+		getenv("SERVICE_VERSION", "dev"), getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultOTLPEndpoint))
+	if err != nil {
+		logger.Error("telemetry setup failed", "error", err)
+		return nil, false
+	}
+	return otelClose, true
 }
 
 // bootInfra builds the pieces that must exist before any use case, in

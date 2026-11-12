@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	ce "github.com/cloudevents/sdk-go/v2/event"
 	kafkago "github.com/segmentio/kafka-go"
 
@@ -109,37 +108,11 @@ func (c *ShipmentConfirmedConsumer) Close() error {
 }
 
 func (c *ShipmentConfirmedConsumer) handleMessage(ctx context.Context, msg kafkago.Message) error {
-	policy := backoff.NewExponentialBackOff(backoff.WithInitialInterval(retryInitialInterval), backoff.WithMaxInterval(retryMaxInterval))
-	bounded := backoff.WithContext(backoff.WithMaxRetries(policy, maxHandlerAttempts-1), ctx)
-	err := backoff.Retry(func() error {
-		err := c.Handle(ctx, string(msg.Key), msg.Value)
-		if errors.Is(err, cloudevents.ErrNotCloudEvent) || errors.Is(err, errBadShipmentEvent) {
-			return backoff.Permanent(err)
-		}
-		return err
-	}, bounded)
-	if err == nil {
-		return c.Reader.CommitMessages(ctx, msg)
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	c.Logger.Warn("shipment-confirmed consumer: sending the message to the dead-letter topic",
-		"topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "error", err)
-	if dlqErr := c.dlq(ctx, msg, err); dlqErr != nil {
-		return fmt.Errorf("shipment-confirmed consumer: publish to dead-letter topic: %w", dlqErr)
-	}
-	return c.Reader.CommitMessages(ctx, msg)
+	return handleWithDeadLetter(ctx, c.Logger, "shipment-confirmed consumer", c.Handle, errBadShipmentEvent, c.Reader, c.dlq, msg)
 }
 
 func (c *ShipmentConfirmedConsumer) dlq(ctx context.Context, msg kafkago.Message, cause error) error {
-	headers := append([]kafkago.Header{}, msg.Headers...)
-	headers = append(headers,
-		kafkago.Header{Key: "x-dlq-source-topic", Value: []byte(c.Reader.Config().Topic)},
-		kafkago.Header{Key: "x-dlq-error", Value: []byte(cause.Error())},
-		kafkago.Header{Key: "x-dlq-failed-at", Value: []byte(c.Now().UTC().Format(time.RFC3339))},
-	)
-	return c.dlqWriter.WriteMessages(ctx, kafkago.Message{Key: msg.Key, Value: msg.Value, Headers: headers})
+	return c.dlqWriter.WriteMessages(ctx, deadLetterMessage(msg, c.Reader.Config().Topic, cause, c.Now()))
 }
 
 var errBadShipmentEvent = errors.New("shipment-confirmed consumer: the event data is not what outbound-shipping's contract says")
