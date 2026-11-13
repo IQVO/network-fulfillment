@@ -136,13 +136,44 @@ func adminExec(ctx context.Context, sql string) error {
 // shared container. Any failure aborts the test: this helper never hands back
 // a database that was not migrated, and never skips.
 func URL(t *testing.T) string {
+	return namedFromTemplate(t, "t")
+}
+
+// EmptyURL returns the DSN of a FRESH, EMPTY database on the shared
+// container — no migrations applied, not even the operational template's.
+// It is for the binaries that own their schema themselves (the analytics
+// projector runs the analytics migrations on start): handing those a
+// pre-migrated database would hide the migration step the binary must
+// prove it performs. The database is created WITHOUT a TEMPLATE clause,
+// so it inherits the container's pristine template1 and nothing else.
+func EmptyURL(t *testing.T) string {
 	t.Helper()
 	once.Do(start)
 	if errStart != nil {
 		t.Fatalf("start postgres container: %v", errStart)
 	}
 	ctx := context.Background()
-	name := fmt.Sprintf("t_%d", seq.Add(1))
+	name := fmt.Sprintf("t_empty_%d", seq.Add(1))
+	if err := adminExec(ctx, `CREATE DATABASE `+name); err != nil {
+		t.Fatalf("create database %s: %v", name, err)
+	}
+	dsn, err := databaseURL(ctx, name)
+	if err != nil {
+		t.Fatalf("database url: %v", err)
+	}
+	return dsn
+}
+
+// namedFromTemplate clones the migrated template database under a fresh
+// unique name and returns its DSN.
+func namedFromTemplate(t *testing.T, prefix string) string {
+	t.Helper()
+	once.Do(start)
+	if errStart != nil {
+		t.Fatalf("start postgres container: %v", errStart)
+	}
+	ctx := context.Background()
+	name := fmt.Sprintf("%s_%d", prefix, seq.Add(1))
 	if err := adminExec(ctx, `CREATE DATABASE `+name+` TEMPLATE `+templateName); err != nil {
 		t.Fatalf("create database %s: %v", name, err)
 	}
