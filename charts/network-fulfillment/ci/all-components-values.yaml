@@ -7,6 +7,8 @@ database:
   url: postgres://u@example.invalid:5432/db
 kafka:
   brokers: kafka.invalid:9092
+config:
+  networkSiteMap: site-1=AUS3
 analytics:
   enabled: true
   database:
