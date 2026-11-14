@@ -467,6 +467,7 @@ Stub mode (the default) needs no credential and no sibling: seed demand from
 | `OUTBOX_MAX_ATTEMPTS` | `20` | outbox relay attempt cap (ADR 0021): a row that failed this many sends is logged at ERROR and excluded until re-armed (`UPDATE outbox_events SET attempts = 0 WHERE id = ...`); `0` = unlimited |
 | `CAPABILITY_OFFER_ENABLED` | unset | only `true` (or unset, which means `true`) is accepted; anything else fails the boot. The two Kafka caches, the inventory client, the recompute ticker and `GET /capability-offers` are always wired; boot blocks until both caches replay |
 | `SITE_ID` | `site-1` | the single site capability offers are computed for |
+| `NETWORK_SITE_MAP` | unset | optional, every mode: comma-separated `networkSite=warehouseSite` pairs (ADR 0035), e.g. `site-1=AUS3`. A held order carries the warehouse site as `fulfillmentSiteId` (order-management only accepts `^[A-Z0-9]+$`); an unmapped site is sent only if it is already a site code. Strict: a duplicate, an empty half or entry, or a warehouse site that is not a site code refuses to boot |
 | `RECOMPUTE_INTERVAL` | `1m` | Go duration; capability-offer recompute cadence |
 | `INVENTORY_STORAGE_URL` | `http://localhost:8080` | base URL for `GET /inventory/{sku}/usable` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTel Collector (OTLP/gRPC); see [Observability](#observability) |

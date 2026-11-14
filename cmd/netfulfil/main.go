@@ -103,7 +103,7 @@ func run(ctx context.Context) int {
 	}
 	defer closeInfra()
 
-	planner := wirePlanner(circuitBreakerMetrics)
+	planner := wirePlanner(circuitBreakerMetrics, cfg.siteMap, logger)
 
 	// readiness gates GET /readyz (ADR 0004 §graceful shutdown): 503
 	// dependency-unavailable while either dependency is down; /healthz

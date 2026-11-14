@@ -51,6 +51,15 @@ data:
 {{- end }}
 {{- end }}
 
+{{- if .Values.config.networkSiteMap }}
+
+  # networkSite=warehouseSite pairs (ADR 0035): the warehouse site a held order
+  # carries as fulfillmentSiteId, for a network site that is not itself a site
+  # code. Read in every mode, rendered only when set; the binary validates it
+  # strictly at boot and refuses to start on a bad map.
+  NETWORK_SITE_MAP: {{ .Values.config.networkSiteMap | quote }}
+{{- end }}
+
   # This service's consumer group on outbound-shipping's events topic, through
   # which ShipmentConfirmed arrives (ADR 0014 addendum: the event path is the
   # primary shipment-confirmation trigger, the manual endpoint the fallback).

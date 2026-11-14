@@ -297,14 +297,14 @@ func TestRaiseHeldOrder_SerialisesTheSameDemandIdentically(t *testing.T) {
 }
 
 // raiseBody raises a held order for site and returns the JSON body sent.
-func raiseBody(t *testing.T, site shared.SiteId) map[string]any {
+func raiseBody(t *testing.T, site shared.SiteId, opts ...ordermanagement.PlannerOption) map[string]any {
 	t.Helper()
 	rec := &recorder{handler: func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"ord-1","promiseDate":"2026-09-24T08:00:00Z","lines":[]}`))
 	}}
 	srv := rec.server(t)
-	p := ordermanagement.NewPlanner(srv.URL, srv.Client())
+	p := ordermanagement.NewPlanner(srv.URL, srv.Client(), opts...)
 	if _, err := p.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{
 		NetworkRef: "po-1", SiteId: site, RequiredShipBy: now().Add(time.Hour),
 		Lines: map[shared.SKU]int{"SKU-1": 2},

@@ -158,12 +158,18 @@ func loadProductTranslation(logger *slog.Logger) (*producttranslation.Dictionary
 // is no degraded-but-non-fatal branch to log, unlike order-management's
 // OTel-instrument-name variant. The metrics are built by the caller because the
 // retail-network breaker (ADR 0026 Decision 8) reports into the same gauge.
-func wirePlanner(metrics *telemetry.CircuitBreakerMetrics) ports.FulfillmentPlanner {
+// siteMap is NETWORK_SITE_MAP, validated at boot (ADR 0035): the planner
+// translates the network's site to the warehouse site with it, and holds no
+// other copy of it.
+func wirePlanner(metrics *telemetry.CircuitBreakerMetrics, siteMap networkSiteMap, logger *slog.Logger) ports.FulfillmentPlanner {
 	omBase := os.Getenv("ORDER_MANAGEMENT_URL")
 	if omBase == "" {
 		omBase = "http://localhost:8080"
 	}
-	rawPlanner := ordermanagement.NewPlanner(omBase, nil)
+	if len(siteMap) > 0 {
+		logger.Info("network site map loaded; held orders carry the warehouse site", "entries", len(siteMap))
+	}
+	rawPlanner := ordermanagement.NewPlanner(omBase, nil, ordermanagement.WithSiteMap(siteMap))
 	return ordermanagement.NewBreakerClient(rawPlanner, metrics)
 }
 
