@@ -68,55 +68,63 @@ func (s *shipFlow) seed(t *testing.T, ref shared.NetworkRef, state networkorder.
 	}
 }
 
-func TestConfirmPendingShipments_EarlyEventThenReconcileThenSweepConfirmsOnce(t *testing.T) {
-	s := newShipFlow()
-	ctx := context.Background()
-	submittedOrder(t, s.f, "po-1")
+// wantPass runs one confirm-pending pass and checks its counters.
+func (s *shipFlow) wantPass(t *testing.T, label string, want usecases.ConfirmPendingShipmentsResult) {
+	t.Helper()
+	res, err := s.confirmPending().Execute(context.Background())
+	if err != nil || res != want {
+		t.Fatalf("%s: %+v %v, want %+v", label, res, err, want)
+	}
+}
 
-	// The load departs while the order is still SUBMITTED.
-	if err := s.f.deferShipment().Execute(ctx, "po-1", "load-7", 3); err != nil {
-		t.Fatalf("defer: %v", err)
-	}
-	// A sweep before the acknowledgement settles skips the order.
-	res, err := s.confirmPending().Execute(ctx)
-	if err != nil || res.Examined != 1 || res.Confirmed != 0 {
-		t.Fatalf("sweep while SUBMITTED: %+v %v, want examined 1, confirmed 0", res, err)
-	}
-	if got := s.state(t, "po-1"); got != networkorder.StateSubmitted {
-		t.Fatalf("state = %v, want SUBMITTED still", got)
-	}
-
-	// The network settles the acknowledgement; the next sweep confirms.
-	if _, err := s.f.reconcile().Execute(ctx); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	res, err = s.confirmPending().Execute(ctx)
-	if err != nil || res != (usecases.ConfirmPendingShipmentsResult{Examined: 1, Confirmed: 1}) {
-		t.Fatalf("sweep after ACKNOWLEDGED: %+v %v, want examined 1, confirmed 1", res, err)
-	}
-
-	if got := s.state(t, "po-1"); got != networkorder.StateConfirmed {
+// wantConfirmedOnce checks everything the network and the event stream saw for
+// the one order the flow confirmed: CONFIRMED, the fact used, one label request
+// for packages, one submission, one NetworkOrderShipmentConfirmed.
+func (s *shipFlow) wantConfirmedOnce(t *testing.T, ref shared.NetworkRef, packages int) {
+	t.Helper()
+	if got := s.state(t, ref); got != networkorder.StateConfirmed {
 		t.Fatalf("state = %v, want CONFIRMED", got)
 	}
 	if got := s.shipmentConfirmedEvents(); got != 1 {
 		t.Fatalf("NetworkOrderShipmentConfirmed published %d times, want exactly 1", got)
 	}
-	if len(s.gateway.labelReqs) != 1 || s.gateway.labelReqs[0] != 3 {
-		t.Fatalf("labels requested = %v, want one request for 3 packages (the noted count)", s.gateway.labelReqs)
+	if len(s.gateway.labelReqs) != 1 || s.gateway.labelReqs[0] != packages {
+		t.Fatalf("labels requested = %v, want one request for %d packages", s.gateway.labelReqs, packages)
 	}
 	if len(s.gateway.shipped) != 1 {
 		t.Fatalf("shipment confirmations sent to the network = %d, want 1", len(s.gateway.shipped))
 	}
-	o, _ := s.f.orders.FindByRef(ctx, "po-1")
+	o, _ := s.f.orders.FindByRef(context.Background(), ref)
 	if _, ok := o.PendingShipment(); ok {
 		t.Fatal("the pending shipment must be cleared once used")
 	}
+}
+
+func TestConfirmPendingShipments_EarlyEventThenReconcileThenSweepConfirmsOnce(t *testing.T) {
+	s := newShipFlow()
+	ctx := context.Background()
+	submittedOrder(t, s.f, "po-1")
+
+	// The load departs while the order is still SUBMITTED; a sweep before the
+	// acknowledgement settles skips the order.
+	if err := s.f.deferShipment().Execute(ctx, "po-1", "load-7", 3); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	s.wantPass(t, "sweep while SUBMITTED", usecases.ConfirmPendingShipmentsResult{Examined: 1})
+	if got := s.state(t, "po-1"); got != networkorder.StateSubmitted {
+		t.Fatalf("state = %v, want SUBMITTED still", got)
+	}
+
+	// The network settles the acknowledgement; the next sweep confirms, with the
+	// noted package count.
+	if _, err := s.f.reconcile().Execute(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	s.wantPass(t, "sweep after ACKNOWLEDGED", usecases.ConfirmPendingShipmentsResult{Examined: 1, Confirmed: 1})
+	s.wantConfirmedOnce(t, "po-1", 3)
 
 	// A further sweep finds nothing and confirms nothing again.
-	res, err = s.confirmPending().Execute(ctx)
-	if err != nil || res != (usecases.ConfirmPendingShipmentsResult{}) {
-		t.Fatalf("third sweep: %+v %v, want an empty pass", res, err)
-	}
+	s.wantPass(t, "third sweep", usecases.ConfirmPendingShipmentsResult{})
 	if got := s.shipmentConfirmedEvents(); got != 1 {
 		t.Fatalf("events after the third sweep = %d, want still 1", got)
 	}

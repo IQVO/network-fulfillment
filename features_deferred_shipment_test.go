@@ -13,6 +13,7 @@ import (
 	inboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/inbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/memory"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -82,23 +83,38 @@ func (w *world) pendingShipmentConfirmationsRun(ctx context.Context) error {
 }
 
 func (w *world) theShipmentReportIsCommitted() error {
-	if w.shipping.lastErr != nil {
-		return fmt.Errorf("expected the report to be committed without a dead letter, the consumer answered: %v", w.shipping.lastErr)
+	if err := w.shipping.lastErr; err != nil {
+		return fmt.Errorf("expected the report to be committed without a dead letter, the consumer answered: %w", err)
 	}
 	return nil
 }
 
 func (w *world) theShipmentReportFailsWith(text string) error {
-	if w.shipping.lastErr == nil || !strings.Contains(w.shipping.lastErr.Error(), text) {
-		return fmt.Errorf("expected the report to fail with %q (retried, then dead-lettered), the consumer answered: %v", text, w.shipping.lastErr)
+	err := w.shipping.lastErr
+	if err == nil {
+		return fmt.Errorf("expected the report to fail with %q (retried, then dead-lettered), the consumer committed it", text)
+	}
+	if !strings.Contains(err.Error(), text) {
+		return fmt.Errorf("expected the report to fail with %q, the consumer answered: %w", text, err)
 	}
 	return nil
 }
 
-func (w *world) networkOrderIsWaitingForTheShipment(ctx context.Context, ref, loadId string) error {
+func (w *world) findOrder(ctx context.Context, ref string) (*networkorder.NetworkOrder, error) {
 	o, err := w.orders.FindByRef(ctx, shared.NetworkRef(ref))
-	if err != nil || o == nil {
-		return fmt.Errorf("find %q: %v %v", ref, o, err)
+	if err != nil {
+		return nil, fmt.Errorf("find %q: %w", ref, err)
+	}
+	if o == nil {
+		return nil, fmt.Errorf("no network order %q", ref)
+	}
+	return o, nil
+}
+
+func (w *world) networkOrderIsWaitingForTheShipment(ctx context.Context, ref, loadId string) error {
+	o, err := w.findOrder(ctx, ref)
+	if err != nil {
+		return err
 	}
 	if p, ok := o.PendingShipment(); !ok || p.ShipmentRef != loadId {
 		return fmt.Errorf("expected %q to be waiting for the shipment of load %q, it holds %+v (recorded: %v)", ref, loadId, p, ok)
@@ -107,9 +123,9 @@ func (w *world) networkOrderIsWaitingForTheShipment(ctx context.Context, ref, lo
 }
 
 func (w *world) networkOrderIsWaitingForNoShipment(ctx context.Context, ref string) error {
-	o, err := w.orders.FindByRef(ctx, shared.NetworkRef(ref))
-	if err != nil || o == nil {
-		return fmt.Errorf("find %q: %v %v", ref, o, err)
+	o, err := w.findOrder(ctx, ref)
+	if err != nil {
+		return err
 	}
 	if p, ok := o.PendingShipment(); ok {
 		return fmt.Errorf("expected %q to hold no pending shipment, it holds %+v", ref, p)
