@@ -23,21 +23,28 @@ with the code — never describe a planned concept as if it exists.
 - **Held order** — an order-management order raised with
   `releaseOnAllocation: false`; released on acknowledgement, cancelled on
   rejection.
-- **CapabilityOffer** — *planned* (ADR 0001), not in code: advertised
-  quantity per `(sku, siteId)` constrained by throughput, not just stock.
+- **CapabilityOffer** (`internal/domain/capabilityoffer`, ADR 0001 §8) —
+  advertised quantity per `(sku, siteId)` constrained by throughput, not just
+  stock; recomputed on a schedule by `RecomputeCapabilityOffers`, always on.
 
 ## Aggregates
 
 - **NetworkOrder** (`internal/domain/networkorder`) —
-  `NEW -> ACKNOWLEDGED -> CONFIRMED`, `NEW -> REJECTED`.
+  `NEW -> SUBMITTED -> ACKNOWLEDGED -> CONFIRMED`, `NEW` or `SUBMITTED -> REJECTED`.
   - `Receive` requires a non-empty `NetworkRef` and at least one line;
     `ReceiveUntranslatable` records demand we must reject because a product
     has no SKU mapping.
-  - `Acknowledge` / `Reject` only from `NEW` (`ErrAlreadyAnswered`).
-  - `LinkLocalOrder` only when acknowledged (`ErrNotAcknowledged`) and only
-    once (`ErrLocalOrderAlreadyLinked`).
+  - `Submit` (`NEW -> SUBMITTED`: our answer is in flight, ADR 0001 §5);
+    `ConfirmAcknowledgement` settles it to `ACKNOWLEDGED` (what
+    `ReconcileSubmittedOrders` calls, `ErrNotSubmitted` otherwise).
+    `Acknowledge` does both in one step and exists for tests and fixtures.
+  - `Reject` only from `NEW` or `SUBMITTED` (`ErrAlreadyAnswered`).
+  - `LinkLocalOrder` once `SUBMITTED` or `ACKNOWLEDGED` (`ErrNotAcknowledged`)
+    and only once (`ErrLocalOrderAlreadyLinked`).
   - `ConfirmShipment` only from `ACKNOWLEDGED`
-    (`ErrConfirmBeforeAcknowledge`) — no use case calls it yet.
+    (`ErrConfirmBeforeAcknowledge`); `ConfirmNetworkOrderShipment` calls it.
+  - The hold on the local order is tracked in `hold.go` (`RecordHold`,
+    `SettleHold`, `HoldOrphaned(now, grace)`).
   - `AcknowledgementOverdue(now)` — still `NEW` and past `acknowledgeBy`.
 - Value-object validation errors live in `internal/domain/shared`
   (`ErrEmptyNetworkRef`, `ErrEmptyNetworkLineRef`,
@@ -46,9 +53,10 @@ with the code — never describe a planned concept as if it exists.
 
 ## Domain events
 
-None typed yet. The `ports.EventPublisher` port exists and is wired to a
-log-only publisher in `cmd/netfulfil`, but no use case calls it. See
-`.claude/rules/integration-events.md`.
+Seven, published through `ports.EventPublisher`: `NetworkOrderReceived`,
+`NetworkOrderSubmitted`, `NetworkOrderAcknowledged`, `NetworkOrderRejected`,
+`NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and
+`OrphanedHoldCancelled`. See `.claude/rules/integration-events.md`.
 
 ## Key use cases (`internal/application/usecases`)
 
@@ -58,16 +66,33 @@ log-only publisher in `cmd/netfulfil`, but no use case calls it. See
   (`ports.FulfillmentPlanner.RaiseHeldOrder`), then either link + save +
   acknowledge to the network + release, or cancel + save + reject to the
   network. No promise arithmetic.
-- `SweepAcknowledgementDeadlines` — rejects every overdue `NEW` order and
-  cancels its held local order, if any.
+- `SweepAcknowledgementDeadlines` — finds orders whose acknowledgement window
+  has closed with no answer and reports `AcknowledgementDeadlineAtRisk`; it
+  never changes the aggregate (ADR 0001 §6).
+- `RejectOverdueOrders` — the irreversible step the sweep leaves out: rejects
+  the overdue order and cancels its held local order (ADR 0001 §6).
+- `ReconcileSubmittedOrders` — settles `SUBMITTED` orders by asking the
+  gateway's transaction-status query (ADR 0001 §5).
+- `ConfirmNetworkOrderShipment` — tells the network an order shipped, closes
+  it and raises `NetworkOrderShipmentConfirmed`. Driven by outbound-shipping's
+  `ShipmentConfirmed` consumer (primary); the REST endpoint is the operator
+  fallback (ADR 0014 addendum).
+- `SweepOrphanedHolds` — frees order-management holds nobody decided (ADR 0024).
+- `RecomputeCapabilityOffers` — recomputes and persists the `CapabilityOffer`s
+  on a schedule (ADR 0001 §8); `FeedInventory` sends them to the network, one
+  feed per site; `DeclareNodeProfiles` declares each site's cutoffs, handling
+  time and throughput (ADR 0027).
+- `IntakeInboundShipments` and `ReturnInboundReceipts` — the two halves of the
+  inbound loop (ADR 0028).
 
-Both are driven from `cmd/netfulfil`: the poller
-(`internal/adapters/inbound/poller`) feeds `ReceiveNetworkDemand`; a ticker
-runs the sweep.
+Wiring lives in `cmd/netfulfil`: the poller (`internal/adapters/inbound/poller`)
+feeds `ReceiveNetworkDemand` and the Kafka consumers in
+`internal/adapters/inbound/kafka` drive the event-triggered use cases.
 
 ## Ports (`internal/application/ports`, interfaces only)
 
-`NetworkOrderRepo` (postgres; memory is a test double), `NetworkGateway` (stub only —
-`sandbox`/`live` refuse to boot), `FulfillmentPlanner` (order-management
+`NetworkOrderRepo` (postgres; memory is a test double), `NetworkGateway` (stub by default;
+`NETWORK_MODE=live` selects the retail network's Vendor API gateway, ADR 0026;
+`sandbox` is retired and parses as stub), `FulfillmentPlanner` (order-management
 REST), `ProductTranslation` (file-backed map, `adapters/outbound/producttranslation`), `EventPublisher`,
 `Clock`.
