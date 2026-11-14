@@ -77,10 +77,6 @@ func run(ctx context.Context) int {
 		return 1
 	}
 
-	if len(cfg.siteMap) > 0 {
-		logger.Info("network site map loaded; held orders carry the warehouse site", "entries", len(cfg.siteMap))
-	}
-
 	// OTLP trace + metric export and Go runtime metrics (ADR 0019). Never
 	// blocks on the Collector. MUST run before wireAPI/Routes(): otelchi
 	// binds the global MeterProvider when the middleware is built.
@@ -107,7 +103,7 @@ func run(ctx context.Context) int {
 	}
 	defer closeInfra()
 
-	planner := wirePlanner(circuitBreakerMetrics, cfg.siteMap)
+	planner := wirePlanner(circuitBreakerMetrics, cfg.siteMap, logger)
 
 	// readiness gates GET /readyz (ADR 0004 §graceful shutdown): 503
 	// dependency-unavailable while either dependency is down; /healthz

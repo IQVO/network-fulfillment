@@ -234,7 +234,7 @@ func parseNetworkSiteMap(raw string) (networkSiteMap, error) {
 // parseSiteMapEntry parses one already-trimmed networkSite=warehouseSite pair.
 func parseSiteMapEntry(entry string) (network, warehouse shared.SiteId, err error) {
 	if entry == "" {
-		return "", "", errors.New("NETWORK_SITE_MAP: empty entry (a stray comma?); the form is networkSite=warehouseSite,...")
+		return "", "", errors.New("NETWORK_SITE_MAP: empty entry (a stray comma?); each entry is networkSite=warehouseSite")
 	}
 	left, right, found := strings.Cut(entry, "=")
 	if !found {

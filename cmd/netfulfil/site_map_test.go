@@ -23,68 +23,78 @@ import (
 
 func TestParseNetworkSiteMap(t *testing.T) {
 	cases := []struct {
-		name    string
-		raw     string
-		want    networkSiteMap // compared by content; nil and empty are the same "no map"
-		wantErr string         // substring; empty means success
+		name string
+		raw  string
+		want networkSiteMap // compared by content; nil and empty are the same "no map"
 	}{
-		{name: "unset is no map", raw: "", want: networkSiteMap{}},
-		{name: "blank is no map", raw: " \t ", want: networkSiteMap{}},
-		{name: "one pair", raw: "site-1=AUS3", want: networkSiteMap{"site-1": "AUS3"}},
-		{name: "two pairs", raw: "site-1=AUS3,node-b=DAL1", want: networkSiteMap{"site-1": "AUS3", "node-b": "DAL1"}},
-		{name: "whitespace around everything is trimmed", raw: "  site-1 = AUS3 ,\tnode-b\t=\tDAL1  ",
-			want: networkSiteMap{"site-1": "AUS3", "node-b": "DAL1"}},
-		{name: "two network sites may share one building", raw: "site-1=AUS3,site-2=AUS3",
-			want: networkSiteMap{"site-1": "AUS3", "site-2": "AUS3"}},
-		{name: "a digits-only warehouse site is a site code", raw: "site-1=7", want: networkSiteMap{"site-1": "7"}},
-		{name: "a network site that is already a site code may be remapped", raw: "WH1=AUS3", want: networkSiteMap{"WH1": "AUS3"}},
-
-		{name: "duplicate key", raw: "site-1=AUS3,site-1=DAL1", wantErr: `duplicate network site "site-1"`},
-		{name: "duplicate key with the same value", raw: "site-1=AUS3,site-1=AUS3", wantErr: `duplicate network site "site-1"`},
-		{name: "duplicate key after trimming", raw: "site-1=AUS3, site-1 =DAL1", wantErr: `duplicate network site "site-1"`},
-
-		{name: "lowercase warehouse site", raw: "site-1=aus3", wantErr: `warehouse site "aus3"`},
-		{name: "dash in the warehouse site", raw: "site-1=AUS-3", wantErr: `warehouse site "AUS-3"`},
-		{name: "inner space in the warehouse site", raw: "site-1=AUS 3", wantErr: `warehouse site "AUS 3"`},
-		{name: "a second = lands in the warehouse site", raw: "site-1=AUS3=X", wantErr: `warehouse site "AUS3=X"`},
-		{name: "non-ASCII warehouse site", raw: "site-1=ÅUS3", wantErr: `warehouse site "ÅUS3"`},
-
-		{name: "empty warehouse site", raw: "site-1=", wantErr: "empty warehouse site"},
-		{name: "blank warehouse site", raw: "site-1=  ", wantErr: "empty warehouse site"},
-		{name: "empty network site", raw: "=AUS3", wantErr: "empty network site"},
-		{name: "blank network site", raw: " =AUS3", wantErr: "empty network site"},
-		{name: "only a separator", raw: "=", wantErr: "empty network site"},
-		{name: "no separator", raw: "site-1", wantErr: `"site-1"`},
-		{name: "no separator in the second entry", raw: "site-1=AUS3,site-2", wantErr: `"site-2"`},
-		{name: "trailing comma", raw: "site-1=AUS3,", wantErr: "empty entry"},
-		{name: "leading comma", raw: ",site-1=AUS3", wantErr: "empty entry"},
-		{name: "doubled comma", raw: "site-1=AUS3,,site-2=DAL1", wantErr: "empty entry"},
-		{name: "only a comma", raw: ",", wantErr: "empty entry"},
-		{name: "a blank entry between commas", raw: "site-1=AUS3, ,site-2=DAL1", wantErr: "empty entry"},
+		{"unset is no map", "", networkSiteMap{}},
+		{"blank is no map", " \t ", networkSiteMap{}},
+		{"one pair", "site-1=AUS3", networkSiteMap{"site-1": "AUS3"}},
+		{"two pairs", "site-1=AUS3,node-b=DAL1", networkSiteMap{"site-1": "AUS3", "node-b": "DAL1"}},
+		{"whitespace around everything is trimmed", "  site-1 = AUS3 ,\tnode-b\t=\tDAL1  ",
+			networkSiteMap{"site-1": "AUS3", "node-b": "DAL1"}},
+		{"two network sites may share one building", "site-1=AUS3,site-2=AUS3",
+			networkSiteMap{"site-1": "AUS3", "site-2": "AUS3"}},
+		{"a digits-only warehouse site is a site code", "site-1=7", networkSiteMap{"site-1": "7"}},
+		{"a network site that is already a site code may be remapped", "WH1=AUS3", networkSiteMap{"WH1": "AUS3"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseNetworkSiteMap(tc.raw)
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("parseNetworkSiteMap(%q) = %v, want an error containing %q", tc.raw, got, tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error %q does not contain %q", err, tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), "NETWORK_SITE_MAP") {
-					t.Fatalf("error %q does not name NETWORK_SITE_MAP", err)
-				}
-				if got != nil {
-					t.Fatalf("a refused map must return nothing, got %v", got)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("parseNetworkSiteMap(%q): %v", tc.raw, err)
 			}
 			if len(got) != len(tc.want) || (len(got) > 0 && !reflect.DeepEqual(got, tc.want)) {
 				t.Fatalf("parseNetworkSiteMap(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// Every refusal names the variable and the reason, and returns no map at all.
+func TestParseNetworkSiteMap_Refused(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr string // substring
+	}{
+		{"duplicate key", "site-1=AUS3,site-1=DAL1", `duplicate network site "site-1"`},
+		{"duplicate key with the same value", "site-1=AUS3,site-1=AUS3", `duplicate network site "site-1"`},
+		{"duplicate key after trimming", "site-1=AUS3, site-1 =DAL1", `duplicate network site "site-1"`},
+
+		{"lowercase warehouse site", "site-1=aus3", `warehouse site "aus3"`},
+		{"dash in the warehouse site", "site-1=AUS-3", `warehouse site "AUS-3"`},
+		{"inner space in the warehouse site", "site-1=AUS 3", `warehouse site "AUS 3"`},
+		{"a second = lands in the warehouse site", "site-1=AUS3=X", `warehouse site "AUS3=X"`},
+		{"non-ASCII warehouse site", "site-1=ÅUS3", `warehouse site "ÅUS3"`},
+
+		{"empty warehouse site", "site-1=", "empty warehouse site"},
+		{"blank warehouse site", "site-1=  ", "empty warehouse site"},
+		{"empty network site", "=AUS3", "empty network site"},
+		{"blank network site", " =AUS3", "empty network site"},
+		{"only a separator", "=", "empty network site"},
+		{"no separator", "site-1", `"site-1"`},
+		{"no separator in the second entry", "site-1=AUS3,site-2", `"site-2"`},
+		{"trailing comma", "site-1=AUS3,", "empty entry"},
+		{"leading comma", ",site-1=AUS3", "empty entry"},
+		{"doubled comma", "site-1=AUS3,,site-2=DAL1", "empty entry"},
+		{"only a comma", ",", "empty entry"},
+		{"a blank entry between commas", "site-1=AUS3, ,site-2=DAL1", "empty entry"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseNetworkSiteMap(tc.raw)
+			if err == nil {
+				t.Fatalf("parseNetworkSiteMap(%q) = %v, want an error containing %q", tc.raw, got, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), "NETWORK_SITE_MAP") {
+				t.Fatalf("error %q does not name NETWORK_SITE_MAP", err)
+			}
+			if got != nil {
+				t.Fatalf("a refused map must return nothing, got %v", got)
 			}
 		})
 	}
@@ -179,7 +189,7 @@ func TestWirePlanner_AppliesTheSiteMap(t *testing.T) {
 	t.Cleanup(srv.Close)
 	t.Setenv("ORDER_MANAGEMENT_URL", srv.URL)
 
-	planner := wirePlanner(telemetry.NewCircuitBreakerMetrics(), networkSiteMap{"site-1": "AUS3"})
+	planner := wirePlanner(telemetry.NewCircuitBreakerMetrics(), networkSiteMap{"site-1": "AUS3"}, quietLogger())
 	for _, site := range []shared.SiteId{"site-1", "WH1", "site-9"} {
 		if _, err := planner.RaiseHeldOrder(context.Background(), contract.HeldOrderRequest{
 			NetworkRef: shared.NetworkRef("po-" + string(site)), SiteId: site,

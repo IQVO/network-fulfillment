@@ -161,10 +161,13 @@ func loadProductTranslation(logger *slog.Logger) (*producttranslation.Dictionary
 // siteMap is NETWORK_SITE_MAP, validated at boot (ADR 0035): the planner
 // translates the network's site to the warehouse site with it, and holds no
 // other copy of it.
-func wirePlanner(metrics *telemetry.CircuitBreakerMetrics, siteMap networkSiteMap) ports.FulfillmentPlanner {
+func wirePlanner(metrics *telemetry.CircuitBreakerMetrics, siteMap networkSiteMap, logger *slog.Logger) ports.FulfillmentPlanner {
 	omBase := os.Getenv("ORDER_MANAGEMENT_URL")
 	if omBase == "" {
 		omBase = "http://localhost:8080"
+	}
+	if len(siteMap) > 0 {
+		logger.Info("network site map loaded; held orders carry the warehouse site", "entries", len(siteMap))
 	}
 	rawPlanner := ordermanagement.NewPlanner(omBase, nil, ordermanagement.WithSiteMap(siteMap))
 	return ordermanagement.NewBreakerClient(rawPlanner, metrics)
