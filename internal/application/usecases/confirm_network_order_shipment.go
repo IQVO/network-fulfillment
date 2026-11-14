@@ -3,16 +3,20 @@ package usecases
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-// singlePackage is how many packages a confirmed order leaves in. This context
-// holds no package data and the network needs only the count (ADR 0026): a
-// ship-complete order leaves as one package until a fleet fact carries the
-// real number.
+// singlePackage is how many packages a confirmed order leaves in when no
+// fleet fact carries the real number (ADR 0026). The event path keeps this
+// placeholder until outbound-shipping's ShipmentConfirmed carries a
+// per-order package count — an additive producer change that has not landed
+// in the merged contract yet (the ADR 0014 addendum records the gap); the
+// consumer's decode already tolerates the field, so the real count flows
+// the day it ships.
 const singlePackage = 1
 
 // ConfirmNetworkOrderShipment answers the network that one of its orders
@@ -21,18 +25,35 @@ const singlePackage = 1
 //
 // ADR 0001's own Rollout step 6 names the LITERAL trigger as
 // `fulfillment-execution`'s existing PackageManifested event. This use
-// case deliberately does NOT do that (see this package's companion doc
-// note / docs/adr/0014-explicit-shipment-confirmation-endpoint.md for the
-// full reasoning): there is no persisted mapping from a
-// PackageManifested's WorkUnitId back to this context's NetworkRef
-// anywhere in this codebase today, and ADR 0001's own Hard rule 4
-// ("Correlation is a persisted mapping, never a string convention")
-// already forbids inventing one as a fragile string/convention join at
-// the exact moment a cross-context event arrives. An explicit, named
-// trigger — a direct call naming the NetworkRef — is correct NOW; a
-// PackageManifested-driven cache can replace this call's caller later
-// without changing anything below this line, once that persisted
-// correlation exists.
+// case deliberately does NOT do that (see
+// docs/adr/0014-explicit-shipment-confirmation-endpoint.md and its 2026-11
+// addendum for the full reasoning): no persisted mapping from a
+// PackageManifested's WorkUnitId back to this context's NetworkRef exists,
+// and ADR 0001's own Hard rule 4 ("Correlation is a persisted mapping,
+// never a string convention") forbids inventing one as a fragile string
+// join. The correlation that DID land is outbound-shipping's
+// ShipmentConfirmed joining orders[].order_id on
+// NetworkOrder.localOrderId — the mapping ADR 0014 itself named as the
+// natural future trigger.
+//
+// TWO inbound paths route here, and exactly one confirmation may ever
+// reach the network per order (ADR 0014 addendum, D6):
+//
+//   - the EVENT path: the ShipmentConfirmed consumer resolves each
+//     orders[].order_id to its NetworkOrder via FindByLocalOrderId and
+//     calls ExecuteForShipment with the load id as the shipment reference;
+//   - the MANUAL path: ADR 0014's operator endpoint calls Execute with the
+//     NetworkRef in hand, kept for one release as the operator fallback.
+//
+// Idempotency is two-legged, so neither path can double-submit:
+//
+//  1. the (shipment reference, order id) pair in the
+//     ShipmentConfirmationLog: a duplicate submission — the same event
+//     redelivered, or the manual endpoint re-fired for a shipment the
+//     event already confirmed — is a no-op returning the existing
+//     confirmation;
+//  2. the aggregate itself: an order already CONFIRMED is returned as-is,
+//     whichever path confirmed it first (the state is terminal).
 type ConfirmNetworkOrderShipment struct {
 	Orders  ports.NetworkOrderRepo
 	Gateway ports.NetworkGateway
@@ -41,15 +62,32 @@ type ConfirmNetworkOrderShipment struct {
 	// UnitOfWork brackets the Save+Publish pair atomically, exactly like
 	// every other use case in this package (ADR 0003). Optional.
 	UnitOfWork ports.UnitOfWork
+	// Confirmations is the (shipment reference, order id) idempotency
+	// ledger. The composition root MUST set it; a nil value only skips the
+	// ledger leg (the aggregate-state leg still holds) so hand-built test
+	// fixtures without one keep compiling.
+	Confirmations ports.ShipmentConfirmationLog
 }
 
-// Execute confirms shipment for the NetworkOrder identified by ref.
-//
-// Idempotent: an order already CONFIRMED is returned as-is rather than
-// re-confirmed, so a retried call (the caller's own at-least-once
-// delivery, or an operator re-submitting) never double-submits to the
-// network or double-publishes the event.
+// Execute is the MANUAL path (ADR 0014's endpoint): the shipment reference
+// is the network's own ref — the one identifier an operator holding this
+// order's paperwork reliably has — and the label count stays ADR 0026's
+// single-package placeholder.
 func (uc *ConfirmNetworkOrderShipment) Execute(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error) {
+	return uc.ExecuteForShipment(ctx, ref, string(ref), singlePackage)
+}
+
+// ExecuteForShipment is the ONE confirmation path both callers share.
+// shipmentRef is the shipment's reference in the source that knows it left
+// (outbound-shipping's load id on the event path); packageCount is the
+// order's package count when the caller knows it, and <= 0 falls back to
+// singlePackage.
+//
+// Idempotent: an order already CONFIRMED, or a (shipmentRef, order id)
+// pair already recorded, is returned as-is rather than re-confirmed, so a
+// retried call (at-least-once delivery, or an operator re-submitting)
+// never double-submits to the network or double-publishes the event.
+func (uc *ConfirmNetworkOrderShipment) ExecuteForShipment(ctx context.Context, ref shared.NetworkRef, shipmentRef string, packageCount int) (*networkorder.NetworkOrder, error) {
 	o, err := uc.Orders.FindByRef(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -57,8 +95,16 @@ func (uc *ConfirmNetworkOrderShipment) Execute(ctx context.Context, ref shared.N
 	if o == nil {
 		return nil, ErrOrderNotFound
 	}
-	if o.State() == networkorder.StateConfirmed {
+	shipmentRef, orderId := confirmationIds(o, ref, shipmentRef)
+	duplicate, err := uc.alreadyConfirmed(ctx, o, shipmentRef, orderId)
+	if err != nil {
+		return nil, err
+	}
+	if duplicate {
 		return o, nil
+	}
+	if packageCount <= 0 {
+		packageCount = singlePackage
 	}
 
 	// The labels first: the network confirms a shipment only with a label for
@@ -68,7 +114,7 @@ func (uc *ConfirmNetworkOrderShipment) Execute(ctx context.Context, ref shared.N
 	if err := o.CheckConfirmable(); err != nil {
 		return nil, err
 	}
-	if _, err := uc.Gateway.RequestLabel(ctx, o.NetworkRef(), singlePackage); err != nil {
+	if _, err := uc.Gateway.RequestLabel(ctx, o.NetworkRef(), packageCount); err != nil {
 		return nil, fmt.Errorf("request label: %w", err)
 	}
 	if err := o.ConfirmShipment(); err != nil {
@@ -76,14 +122,64 @@ func (uc *ConfirmNetworkOrderShipment) Execute(ctx context.Context, ref shared.N
 	}
 
 	now := uc.Clock.Now()
+	if err := uc.record(ctx, o, shipmentRef, orderId, now); err != nil {
+		return nil, err
+	}
+	if err := uc.Gateway.SubmitShipmentConfirmation(ctx, o.NetworkRef(), now); err != nil {
+		return nil, fmt.Errorf("submit shipment confirmation: %w", err)
+	}
+	return o, nil
+}
+
+// confirmationIds normalizes the idempotency key pair: the order-management
+// OrderId when one is linked (the event's join key), else the NetworkRef the
+// manual path named; an empty shipmentRef falls back to the NetworkRef too.
+func confirmationIds(o *networkorder.NetworkOrder, ref shared.NetworkRef, shipmentRef string) (string, string) {
+	orderId := string(ref)
+	if id := o.LocalOrderId(); id != nil {
+		orderId = string(*id)
+	}
+	if shipmentRef == "" {
+		shipmentRef = string(ref)
+	}
+	return shipmentRef, orderId
+}
+
+// alreadyConfirmed reports whether this confirmation already happened:
+// recorded in the (shipmentRef, order id) ledger, or the aggregate itself
+// is already CONFIRMED — the terminal state, whichever path got there
+// first.
+func (uc *ConfirmNetworkOrderShipment) alreadyConfirmed(ctx context.Context, o *networkorder.NetworkOrder, shipmentRef, orderId string) (bool, error) {
+	if uc.Confirmations != nil {
+		confirmed, err := uc.Confirmations.Exists(ctx, shipmentRef, orderId)
+		if err != nil {
+			return false, err
+		}
+		if confirmed {
+			return true, nil
+		}
+	}
+	return o.State() == networkorder.StateConfirmed, nil
+}
+
+// record persists the confirmation atomically: the CONFIRMED save, the
+// ledger claim and the NetworkOrderShipmentConfirmed outbox write happen
+// in ONE UnitOfWork, so the ledger only ever claims a confirmation that
+// also happened.
+func (uc *ConfirmNetworkOrderShipment) record(ctx context.Context, o *networkorder.NetworkOrder, shipmentRef, orderId string, now time.Time) error {
 	var localOrderId shared.LocalOrderId
 	if id := o.LocalOrderId(); id != nil {
 		localOrderId = *id
 	}
-
-	if err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+	confirmations := uc.Confirmations
+	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
 		if err := uc.Orders.Save(ctx, o); err != nil {
 			return err
+		}
+		if confirmations != nil {
+			if err := confirmations.Record(ctx, shipmentRef, orderId, o.NetworkRef(), now); err != nil {
+				return err
+			}
 		}
 		return uc.Events.Publish(ctx, shared.NetworkOrderShipmentConfirmed{
 			NetworkRef:   o.NetworkRef(),
@@ -91,12 +187,5 @@ func (uc *ConfirmNetworkOrderShipment) Execute(ctx context.Context, ref shared.N
 			LocalOrderId: localOrderId,
 			At:           now,
 		})
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := uc.Gateway.SubmitShipmentConfirmation(ctx, o.NetworkRef(), now); err != nil {
-		return nil, fmt.Errorf("submit shipment confirmation: %w", err)
-	}
-	return o, nil
+	})
 }

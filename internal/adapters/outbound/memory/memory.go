@@ -54,6 +54,31 @@ func (r *NetworkOrderRepo) FindByRef(_ context.Context, ref shared.NetworkRef) (
 	return r.orders[ref], nil
 }
 
+// FindByLocalOrderId returns the NetworkOrder whose demand became this
+// order-management OrderId (the ShipmentConfirmed join key), or (nil, nil)
+// when none does. Deterministic on ref, mirroring the Postgres adapter.
+func (r *NetworkOrderRepo) FindByLocalOrderId(_ context.Context, localOrderId shared.LocalOrderId) (*networkorder.NetworkOrder, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var match *networkorder.NetworkOrder
+	for _, ref := range r.sortedRefs() {
+		if id := r.orders[ref].LocalOrderId(); id != nil && *id == localOrderId {
+			match = r.orders[ref]
+			break
+		}
+	}
+	return match, nil
+}
+
+func (r *NetworkOrderRepo) sortedRefs() []shared.NetworkRef {
+	refs := make([]shared.NetworkRef, 0, len(r.orders))
+	for ref := range r.orders {
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i] < refs[j] })
+	return refs
+}
+
 // ListUnanswered returns every order still in NEW, soonest acknowledgement
 // deadline first (ties broken by networkRef so the order is total and
 // stable). apis/openapi.yaml promises "soonest deadline first" and the

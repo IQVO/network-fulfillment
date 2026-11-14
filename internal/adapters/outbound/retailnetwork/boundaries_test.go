@@ -95,7 +95,7 @@ func TestClient_429ExactlyAtTheCapIsWaitedForNotRefused(t *testing.T) {
 			problem(w, http.StatusTooManyRequests, "rate-limited")
 			return
 		}
-		ok(w, map[string]any{"nodes": []any{}})
+		ok(w, map[string]any{"items": []any{}})
 	})
 	c, sl, _ := testClient(t, f.srv.URL, nil)
 
@@ -111,7 +111,7 @@ func TestClient_AnyStatusUpTo299IsASuccessfulAnswer(t *testing.T) {
 	f := newFake(t, func(n int, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(299)
-		_, _ = w.Write([]byte(`{"nodes":[]}`))
+		_, _ = w.Write([]byte(`{"items":[]}`))
 	})
 	c, _, _ := testClient(t, f.srv.URL, nil)
 

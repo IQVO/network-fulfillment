@@ -280,6 +280,19 @@ func newVendorSim() *vendorSim {
 	}
 }
 
+// nodeListLocked and pageLocked never answer items: null, as the network never does.
+func (v *vendorSim) nodeListLocked() vendorNodeListDTO {
+	return vendorNodeListDTO{Items: append([]vendorNodeDTO{}, v.visibleNodesLocked()...)}
+}
+
+func (v *vendorSim) pageLocked(cursor string) purchaseOrderPageDTO {
+	pg := v.pages[cursor]
+	if pg.Items == nil {
+		pg.Items = []purchaseOrderDTO{}
+	}
+	return pg
+}
+
 func (v *vendorSim) handle(_ int, w http.ResponseWriter, r *http.Request) {
 	if v.inject != nil && v.inject(w, r) {
 		return
@@ -291,7 +304,7 @@ func (v *vendorSim) handle(_ int, w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost || r.Method == http.MethodPut:
 		v.write(w, r)
 	case path == "/vendor/nodes":
-		ok(w, vendorNodeListDTO{Nodes: v.visibleNodesLocked()})
+		ok(w, v.nodeListLocked())
 	case strings.HasPrefix(path, "/vendor/nodes/"):
 		for _, n := range v.visibleNodesLocked() {
 			if n.NodeID == strings.TrimPrefix(path, "/vendor/nodes/") {
@@ -301,7 +314,7 @@ func (v *vendorSim) handle(_ int, w http.ResponseWriter, r *http.Request) {
 		}
 		problem(w, http.StatusNotFound, "not-found")
 	case path == "/vendor/purchase-orders":
-		ok(w, v.pages[r.URL.Query().Get("nextToken")])
+		ok(w, v.pageLocked(r.URL.Query().Get("cursor")))
 	case strings.HasPrefix(path, "/vendor/purchase-orders/"):
 		po, found := v.orders[strings.TrimPrefix(path, "/vendor/purchase-orders/")]
 		if !found {

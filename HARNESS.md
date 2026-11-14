@@ -22,7 +22,7 @@ three regulation categories: **maintainability**, **architecture fitness**,
 | `.claude/rules/domain-model.md` | computational | Ubiquitous language, aggregates, domain events — keeps an agent's vocabulary aligned with the real domain. |
 | `.claude/rules/rest-api.md` | computational | Route → use case mapping, error/auth conventions. |
 | `.claude/rules/integration-events.md` | computational | Kafka publish/consume contract, consumer-group rules. |
-| `.claude/skills/how-to-*.md` | inferential | Reusable how-tos for recurring task shapes (add an endpoint, add an integration event, add a frontend remote, write an ADR, test). |
+| `.claude/skills/how-to-*/SKILL.md` | inferential | Reusable how-tos for recurring task shapes (add an endpoint, add an integration event, add a frontend remote, write an ADR, test). |
 | ADRs (`adr/` or `docs/adr/`) | computational | Point-in-time architecture decisions with rationale — the fleet's real source of truth for "why," not just "what." |
 
 ## Sensors (feedback) — lifecycle position
@@ -31,6 +31,9 @@ three regulation categories: **maintainability**, **architecture fitness**,
 |---|---|---|---|---|---|
 | `make fmt-check` / `lefthook pre-commit` | maintainability | computational | pre-commit | yes (local) | seconds |
 | `lint` (golangci-lint) | maintainability | computational | pre-commit, PR | yes | seconds |
+| `guide-lint` (`scripts/harness/` guide/config lint + self-tests) | maintainability | computational | push, PR | yes | seconds |
+| `complexity` (gocyclo, cyclop, gocognit, nestif, funlen) | maintainability | computational | push, PR | yes | seconds |
+| `file-length` | maintainability | computational | push, PR | yes | seconds |
 | `test` (`go test -race`) | maintainability | computational | pre-commit (fast subset), PR | yes | seconds–minutes |
 | `coverage` (90% gate) | maintainability | computational | pre-push, PR | yes | minutes |
 | `bdd` (godog/Gherkin) | behaviour | computational | pre-push, PR | yes | seconds |
@@ -40,12 +43,13 @@ three regulation categories: **maintainability**, **architecture fitness**,
 | `mutation` (gremlins, full domain) | maintainability | computational | weekly schedule | no (advisory report) | tens of minutes |
 | `vuln` (govulncheck) | maintainability | computational | PR | yes | seconds |
 | `api-lint` (Spectral) | maintainability | computational | PR | yes | seconds |
-| `docs-api-drift` | maintainability | computational | PR | yes | seconds |
+| `pinned-contracts` (`scripts/harness/pinned_contract_gate.py`: pinned contracts equal the producer's develop) | maintainability | computational | push, PR | yes | seconds |
+| `docs-api-drift` | maintainability | computational | push, PR | yes | seconds |
 | `web` (vitest/tsc/eslint) | maintainability | computational | PR | yes | minutes |
-| `helm-lint` | maintainability | computational | PR (targeting main) | yes | seconds |
+| `helm-lint` | maintainability | computational | push, PR | yes | seconds |
+| `chart-tests` (chart render + wiring tests) | maintainability | computational | push, PR | yes | seconds |
 | `trivy-scan` | maintainability | computational | PR (targeting main) | yes (CRITICAL/HIGH w/ fix) | minutes |
 | `CodeQL` | maintainability | computational | PR, schedule | yes (conversation-resolution) | minutes |
-| `Scorecard` | maintainability | computational | schedule | no | minutes |
 | `drift` (deadcode, `go mod tidy -diff`, knip, coverage-quality) | maintainability | computational | weekly schedule | **no — advisory** | minutes |
 | `/code-review`, `/architecture-review`, `/domain-review` | architecture fitness / behaviour | **inferential** | invoked by hand (local-only, per user decision 2026-09-13) | no | LLM cost per invocation |
 
@@ -144,7 +148,7 @@ v3 makes the guides LOAD and puts sensors INSIDE the agent loop, for Claude Code
 | Guide freshness | `scripts/harness/guide_lint.py` / `make guide-lint` (CI job `guide-lint`) | CPU, ms | PR |
 | Red-sensor loop | `scripts/harness/red_issue.py` steps in scheduled jobs -> `harness:red` issue | none | weekly |
 | Advisory AI review | `.github/workflows/ai-review.yml` (needs `ANTHROPIC_API_KEY`; no-ops without it) | API spend | PR into develop |
-| Health report | `scripts/harness-health.py` (does it WORK: skills load, hooks wired, scheduled runs green) | gh calls | weekly cron |
+| Health report | warehouse-harness-template's `scripts/harness-health.py`, run fleet-wide from the template, not shipped in this repo (does it WORK: skills load, hooks wired, scheduled runs green) | gh calls | weekly cron |
 
 Rules live ONLY in `hook.py`; the three adapters translate events and cannot drift. The hooks block
 pushes to develop/main, `--no-verify`, force-push, `rm -rf` on non-scratch paths, destructive git, and

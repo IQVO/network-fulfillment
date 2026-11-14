@@ -10,10 +10,8 @@ Study project, not production (see README.md banner).
 Read `docs/adr/0001-network-fulfillment-bounded-context.md` (companion of
 `order-management` ADR 0020) AND `docs/adr/0009-retail-network-not-a-real-network-counterpart.md`
 (Accepted, amends 0001: the counterpart is the fleet's own `retail-network`,
-not a real retailer's SP-API) before writing network-facing code. That ADR
-was renumbered from 0002 to 0009 on 2026-10-05 to resolve a duplicate
-ADR-0002 (`0002-mcp-and-analytics-data-product.md` keeps 0002); a stub at
-the old 0002 stub was deleted; ADR 0009 is the only home of that decision.
+not a real retailer's SP-API) before writing network-facing code (renumbered
+from 0002, which `0002-mcp-and-analytics-data-product.md` keeps).
 ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/docs/ddd/`.
 
 ## Current state
@@ -127,7 +125,7 @@ fails validation (ADR 0008: `docs/adr/0008-cloudevents-mandatory-event-envelope.
 
 ```bash
 make check-fast   # fmt-check + vet + arch-test: run before saying "done"
-make check-all    # check + coverage (90% gate) + arch-test + bdd (no features/ yet)
+make check-all    # check + coverage (90% gate) + arch-test + bdd (features/)
 make integration  # Postgres and Kafka via testcontainers, never skip-gated
 make mutation     # gremlins on ./internal/domain/networkorder (CI: mutation-fast)
 make guide-lint   # these agent guides: references resolve, context budget

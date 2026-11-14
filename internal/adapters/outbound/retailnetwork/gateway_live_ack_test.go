@@ -22,7 +22,7 @@ var accept = contract.Acknowledgement{Accepted: true}
 func orderFixture(t *testing.T, mutate func(*fixtureCfg)) (*liveFixture, shared.NetworkRef) {
 	t.Helper()
 	f := readyFixture(t, mutate)
-	f.sim.setPage("", purchaseOrderPageDTO{PurchaseOrders: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2, 1)}})
+	f.sim.setPage("", purchaseOrderPageDTO{Items: []purchaseOrderDTO{issuedPO("PO-1", "N-1", 2, 1)}})
 	refs := f.poll(t)
 	if len(refs) != 1 {
 		t.Fatalf("setup: polled %v, want one order", refs)

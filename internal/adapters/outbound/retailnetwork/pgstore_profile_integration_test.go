@@ -228,6 +228,20 @@ func (p *ledgerProbe) orderVersionColumn() int {
 		WHERE table_name = 'network_orders' AND column_name = 'aggregate_version'`)
 }
 
+// shipmentConfirmationsTable counts the (shipment_ref, order_id) confirmation
+// ledger (migration 0014): 1 once 0014 is up, 0 after its DOWN ran.
+func (p *ledgerProbe) shipmentConfirmationsTable() int {
+	p.t.Helper()
+	return p.count(`SELECT count(*) FROM information_schema.tables WHERE table_name = 'shipment_confirmations'`)
+}
+
+// localOrderIdIndex counts the network_orders.local_order_id join index
+// (migration 0014): 1 once 0014 is up, 0 after its DOWN ran.
+func (p *ledgerProbe) localOrderIdIndex() int {
+	p.t.Helper()
+	return p.count(`SELECT count(*) FROM pg_indexes WHERE indexname = 'network_orders_local_order_id_idx'`)
+}
+
 func (p *ledgerProbe) kindRows(kind string) int {
 	p.t.Helper()
 	return p.count(`SELECT count(*) FROM network_submissions WHERE kind = $1`, kind)
@@ -313,53 +327,77 @@ func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
 	if p.orderVersionColumn() != 1 {
 		t.Fatal("after Up the aggregate_version column must exist (migration 0013)")
 	}
+	if p.shipmentConfirmationsTable() != 1 {
+		t.Fatal("after Up the shipment_confirmations ledger must exist (migration 0014)")
+	}
 	five := []string{"ACKNOWLEDGEMENT", "SHIPMENT_CONFIRMATION", "NODE_REGISTRATION", "NODE_PROFILE", "INBOUND_RECEIPT"}
 	six := append(slices.Clone(five), "INVENTORY")
 	p.expectLedgerKinds(six)
 
-	// One step down is 0013: it takes only the aggregate_version column
-	// with it — the optimistic lock is additive, so its removal must
-	// leave every table and ledger kind behind.
+	// One step down is 0014: it takes the confirmation ledger and the
+	// local_order_id join index with it — nothing else, so every table,
+	// column and ledger kind below its number survives.
 	p.step(-1)
 	if got := p.version(); got != top-1 {
 		t.Fatalf("version after one step down = %d, want %d", got, top-1)
 	}
-	if p.orderVersionColumn() != 0 {
-		t.Fatal("after one step down the aggregate_version column must be gone")
+	if p.shipmentConfirmationsTable() != 0 {
+		t.Fatal("after one step down the shipment_confirmations ledger must be gone")
+	}
+	if p.localOrderIdIndex() != 0 {
+		t.Fatal("after one step down the local_order_id join index must be gone")
+	}
+	if p.orderVersionColumn() != 1 {
+		t.Fatal("after one step down the aggregate_version column must survive (0013 stays)")
 	}
 	if p.idempotencyTable() != 1 {
 		t.Fatal("after one step down the idempotency_keys table must survive (0012 stays)")
 	}
 	p.expectLedgerKinds(six)
 
-	// A second step down is 0012: it takes only the idempotency key store with it.
+	// A second step down is 0013: it takes only the aggregate_version column
+	// with it — the optimistic lock is additive, so its removal must
+	// leave every table and ledger kind behind.
 	p.step(-1)
 	if got := p.version(); got != top-2 {
 		t.Fatalf("version after two steps down = %d, want %d", got, top-2)
 	}
-	if p.idempotencyTable() != 0 {
-		t.Fatal("after two steps down the idempotency_keys table must be gone")
+	if p.orderVersionColumn() != 0 {
+		t.Fatal("after two steps down the aggregate_version column must be gone")
 	}
-	if p.inventoryTables() != 2 {
-		t.Fatal("after two steps down the inventory feed tables must survive (0011 stays)")
+	if p.idempotencyTable() != 1 {
+		t.Fatal("after two steps down the idempotency_keys table must survive (0012 stays)")
 	}
 	p.expectLedgerKinds(six)
 
-	// A third step down is 0011: it takes INVENTORY and its tables with it
-	// and leaves the five kinds of 0008 admitted.
+	// A third step down is 0012: it takes only the idempotency key store with it.
 	p.step(-1)
 	if got := p.version(); got != top-3 {
 		t.Fatalf("version after three steps down = %d, want %d", got, top-3)
 	}
+	if p.idempotencyTable() != 0 {
+		t.Fatal("after three steps down the idempotency_keys table must be gone")
+	}
+	if p.inventoryTables() != 2 {
+		t.Fatal("after three steps down the inventory feed tables must survive (0011 stays)")
+	}
+	p.expectLedgerKinds(six)
+
+	// A fourth step down is 0011: it takes INVENTORY and its tables with it
+	// and leaves the five kinds of 0008 admitted.
+	p.step(-1)
+	if got := p.version(); got != top-4 {
+		t.Fatalf("version after four steps down = %d, want %d", got, top-4)
+	}
 	if p.inventoryTables() != 0 {
-		t.Fatal("after three steps down the inventory feed tables must be gone")
+		t.Fatal("after four steps down the inventory feed tables must be gone")
 	}
 	p.expectLedgerKinds(five)
 	p.expectLedgerRefuses("INVENTORY")
 
 	p.step(1)
-	if got := p.version(); got != top-2 {
-		t.Fatalf("version after the second up = %d, want %d", got, top-2)
+	if got := p.version(); got != top-3 {
+		t.Fatalf("version after the second up = %d, want %d", got, top-3)
 	}
 	if p.inventoryTables() != 2 {
 		t.Fatal("after the second up the inventory feed tables must exist")
@@ -367,8 +405,8 @@ func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
 	p.expectLedgerKinds(six)
 
 	p.step(1)
-	if got := p.version(); got != top-1 {
-		t.Fatalf("version after the third up = %d, want %d", got, top-1)
+	if got := p.version(); got != top-2 {
+		t.Fatalf("version after the third up = %d, want %d", got, top-2)
 	}
 	if p.idempotencyTable() != 1 {
 		t.Fatal("after the third up the idempotency_keys table must exist again")
@@ -376,11 +414,23 @@ func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
 	p.expectLedgerKinds(six)
 
 	p.step(1)
-	if got := p.version(); got != top {
-		t.Fatalf("version after the fourth up = %d, want %d", got, top)
+	if got := p.version(); got != top-1 {
+		t.Fatalf("version after the fourth up = %d, want %d", got, top-1)
 	}
 	if p.orderVersionColumn() != 1 {
 		t.Fatal("after the fourth up the aggregate_version column must exist again")
+	}
+	p.expectLedgerKinds(six)
+
+	p.step(1)
+	if got := p.version(); got != top {
+		t.Fatalf("version after the fifth up = %d, want %d", got, top)
+	}
+	if p.shipmentConfirmationsTable() != 1 {
+		t.Fatal("after the fifth up the shipment_confirmations ledger must exist again")
+	}
+	if p.localOrderIdIndex() != 1 {
+		t.Fatal("after the fifth up the local_order_id join index must exist again")
 	}
 	p.expectLedgerKinds(six)
 }

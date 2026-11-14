@@ -63,10 +63,7 @@ type inboundShipmentDTO struct {
 	Cartons    []shipmentCartonDTO `json:"cartons"`
 }
 
-type inboundShipmentPageDTO struct {
-	InboundShipments []inboundShipmentDTO `json:"inboundShipments"`
-	NextToken        string               `json:"nextToken,omitempty"`
-}
+type inboundShipmentPageDTO = pageDTO[inboundShipmentDTO]
 
 type receiptItemDTO struct {
 	GTIN      string `json:"gtin"`
@@ -92,16 +89,15 @@ const stateShipped = "SHIPPED"
 
 // ---- client ----
 
-func (c *apiClient) inboundPage(ctx context.Context, nodeID string, createdAfter time.Time, nextToken string) (inboundShipmentPageDTO, error) {
+func (c *apiClient) inboundPage(ctx context.Context, nodeID string, createdAfter time.Time, cursor string) (inboundShipmentPageDTO, error) {
 	q := c.vendorQuery()
 	q.Set("limit", strconv.Itoa(pollPageLimit))
-	if nextToken != "" {
-		q.Set("nextToken", nextToken)
-	} else {
-		q.Set("nodeId", nodeID)
-		if !createdAfter.IsZero() {
-			q.Set("createdAfter", createdAfter.UTC().Format(time.RFC3339Nano))
-		}
+	q.Set("nodeId", nodeID)
+	if !createdAfter.IsZero() {
+		q.Set("createdAfter", createdAfter.UTC().Format(time.RFC3339Nano))
+	}
+	if cursor != "" {
+		q.Set("cursor", cursor)
 	}
 	var page inboundShipmentPageDTO
 	err := c.call(ctx, request{op: "pollInboundShipments", method: http.MethodGet, path: pathInboundShipments, query: q}, &page)
@@ -109,27 +105,11 @@ func (c *apiClient) inboundPage(ctx context.Context, nodeID string, createdAfter
 }
 
 // pollInboundAll pages through every shipment of a node shipped after
-// createdAfter; a repeated token or an absurd page count is an error, not a loop.
+// createdAfter; a repeated cursor or an absurd page count is an error, not a loop.
 func (c *apiClient) pollInboundAll(ctx context.Context, nodeID string, createdAfter time.Time) ([]inboundShipmentDTO, error) {
-	var all []inboundShipmentDTO
-	seen := map[string]bool{}
-	token := ""
-	for range maxPollPages {
-		page, err := c.inboundPage(ctx, nodeID, createdAfter, token)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, page.InboundShipments...)
-		if page.NextToken == "" {
-			return all, nil
-		}
-		if seen[page.NextToken] {
-			return nil, fmt.Errorf("retail-network: pollInboundShipments: the network repeated page token %q", page.NextToken)
-		}
-		seen[page.NextToken] = true
-		token = page.NextToken
-	}
-	return nil, fmt.Errorf("retail-network: pollInboundShipments: more than %d pages", maxPollPages)
+	return collectPages(ctx, "pollInboundShipments", func(ctx context.Context, cursor string) (inboundShipmentPageDTO, error) {
+		return c.inboundPage(ctx, nodeID, createdAfter, cursor)
+	})
 }
 
 // ---- request builder ----

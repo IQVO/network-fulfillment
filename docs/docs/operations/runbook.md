@@ -819,6 +819,8 @@ LIMIT 20;
 Declared in `apis/openapi.yaml` and served by
 `internal/adapters/inbound/http/reports_handler.go`. Through Kong:
 `/api/network-fulfillment/reports/...`.
+The reports HTTPRoute carries `konghq.com/regex-priority: "10"` so it outranks the
+API prefix under Kong's traditional router.
 
 | Route | Query | Response |
 | --- | --- | --- |
