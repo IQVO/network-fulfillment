@@ -38,6 +38,7 @@ type scriptedPlanner struct {
 	smu             sync.Mutex
 	holdAnswers     map[shared.LocalOrderId]error
 	releaseErr      error
+	releaseFails    map[shared.LocalOrderId]error
 	releaseAttempts int
 }
 
@@ -45,6 +46,9 @@ func (p *scriptedPlanner) ReleaseHeldOrder(ctx context.Context, id shared.LocalO
 	p.smu.Lock()
 	p.releaseAttempts++
 	err := p.releaseErr
+	if hold, ok := p.releaseFails[id]; ok {
+		err = hold
+	}
 	p.smu.Unlock()
 	if err != nil {
 		return err
@@ -122,7 +126,11 @@ type rulesWorld struct {
 
 func (r *rulesWorld) reset() {
 	w := r.w
-	r.planner = &scriptedPlanner{fakePlanner: w.planner, holdAnswers: map[shared.LocalOrderId]error{}}
+	r.planner = &scriptedPlanner{
+		fakePlanner:  w.planner,
+		holdAnswers:  map[shared.LocalOrderId]error{},
+		releaseFails: map[shared.LocalOrderId]error{},
+	}
 	r.gateway = &scriptedGateway{NetworkGateway: w.gateway, lookupDown: map[shared.NetworkRef]bool{}}
 	r.holdMetrics = &tallyHoldMetrics{counts: map[contract.HoldSweepOutcome]int{}}
 	r.capacity = &cutoffCapacity{units: map[string]map[int64]int{}}
@@ -187,6 +195,17 @@ func (r *rulesWorld) releaseFails() error {
 	r.planner.smu.Lock()
 	defer r.planner.smu.Unlock()
 	r.planner.releaseErr = errors.New("order-management POST releases: status 503")
+	return nil
+}
+
+func (r *rulesWorld) holdReleaseFails(ctx context.Context, ref string) error {
+	id, err := r.holdOf(ctx, ref)
+	if err != nil {
+		return err
+	}
+	r.planner.smu.Lock()
+	defer r.planner.smu.Unlock()
+	r.planner.releaseFails[id] = errors.New("order-management POST releases: status 503")
 	return nil
 }
 
@@ -415,6 +434,7 @@ func (w *world) registerRuleSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^order-management answers the cancel of the hold of "([^"]*)" with status (\d+)$`, r.holdAnswersCancel)
 	sc.Step(`^order-management cancels the hold of "([^"]*)" again$`, r.holdCancelsAgain)
 	sc.Step(`^order-management fails to release held orders$`, r.releaseFails)
+	sc.Step(`^order-management fails to release the held order of "([^"]*)"$`, r.holdReleaseFails)
 	sc.Step(`^order-management was asked to release (\d+) times? in total$`, r.releaseAttemptsAre)
 	sc.Step(`^order-management knows (\d+) distinct held orders?$`, r.distinctHeldOrders)
 	sc.Step(`^the network cannot be asked about the submission of "([^"]*)"$`, r.statusLookupFails)

@@ -66,22 +66,92 @@ Feature: Reconciliation, documented rules
     And order-management was asked to cancel 0 times in total
 
   @bdd
-  Scenario: A transaction-status lookup that fails for one order does not stop the pass and is retried
+  Scenario: A transaction-status lookup that fails for some orders does not stop the pass and is retried
     Given a network order "po-1" in state "SUBMITTED"
     And a network order "po-2" in state "SUBMITTED"
+    And a network order "po-3" in state "SUBMITTED"
+    And a network order "po-4" in state "SUBMITTED"
+    And a network order "po-5" in state "SUBMITTED"
+    And a network order "po-6" in state "SUBMITTED"
     And the network cannot be asked about the submission of "po-1"
+    And the network cannot be asked about the submission of "po-3"
+    And the network cannot be asked about the submission of "po-5"
     When the acknowledgement reconciliation runs
     And I request network order "po-2"
     Then the network order state is "ACKNOWLEDGED"
+    When I request network order "po-4"
+    Then the network order state is "ACKNOWLEDGED"
+    When I request network order "po-6"
+    Then the network order state is "ACKNOWLEDGED"
     When I request network order "po-1"
     Then the network order state is "SUBMITTED"
+    And order-management had 3 held orders released
     When the network can be asked about the submission of "po-1" again
+    And the network can be asked about the submission of "po-3" again
+    And the network can be asked about the submission of "po-5" again
     And the acknowledgement reconciliation runs
     And I request network order "po-1"
     Then the network order state is "ACKNOWLEDGED"
     And the domain event "NetworkOrderAcknowledged" was published 1 time for "po-1"
-    And the domain event "NetworkOrderAcknowledged" was published 1 time for "po-2"
-    And order-management had 2 held orders released
+    And the domain event "NetworkOrderAcknowledged" was published 1 time for "po-4"
+    And order-management had 6 held orders released
+
+  @bdd
+  Scenario: A refusal whose hold cannot be cancelled for some orders does not stop the pass
+    Given a network order "po-1" in state "SUBMITTED"
+    And a network order "po-2" in state "SUBMITTED"
+    And a network order "po-3" in state "SUBMITTED"
+    And a network order "po-4" in state "SUBMITTED"
+    And a network order "po-5" in state "SUBMITTED"
+    And a network order "po-6" in state "SUBMITTED"
+    And the network will refuse the submission for "po-1"
+    And the network will refuse the submission for "po-2"
+    And the network will refuse the submission for "po-3"
+    And the network will refuse the submission for "po-4"
+    And the network will refuse the submission for "po-5"
+    And the network will refuse the submission for "po-6"
+    And order-management answers the cancel of the hold of "po-1" with status 503
+    And order-management answers the cancel of the hold of "po-3" with status 503
+    And order-management answers the cancel of the hold of "po-5" with status 503
+    When the acknowledgement reconciliation runs
+    And I request network order "po-2"
+    Then the network order state is "REJECTED"
+    When I request network order "po-4"
+    Then the network order state is "REJECTED"
+    When I request network order "po-6"
+    Then the network order state is "REJECTED"
+    When I request network order "po-1"
+    Then the network order state is "SUBMITTED"
+    And the hold of network order "po-1" is open
+    When order-management cancels the hold of "po-1" again
+    And order-management cancels the hold of "po-3" again
+    And order-management cancels the hold of "po-5" again
+    And the acknowledgement reconciliation runs
+    And I request network order "po-1"
+    Then the network order state is "REJECTED"
+    And the domain event "NetworkOrderRejected" was published 1 time for "po-1"
+    And the domain event "NetworkOrderRejected" was published 1 time for "po-2"
+
+  @bdd
+  Scenario: A release that fails for some orders does not stop the pass, and those orders stay ACKNOWLEDGED
+    Given a network order "po-1" in state "SUBMITTED"
+    And a network order "po-2" in state "SUBMITTED"
+    And a network order "po-3" in state "SUBMITTED"
+    And a network order "po-4" in state "SUBMITTED"
+    And a network order "po-5" in state "SUBMITTED"
+    And a network order "po-6" in state "SUBMITTED"
+    And order-management fails to release the held order of "po-1"
+    And order-management fails to release the held order of "po-3"
+    And order-management fails to release the held order of "po-5"
+    When the acknowledgement reconciliation runs
+    And the acknowledgement reconciliation runs
+    Then order-management had 3 held orders released
+    And order-management was asked to release 6 times in total
+    When I request network order "po-1"
+    Then the network order state is "ACKNOWLEDGED"
+    When I request network order "po-6"
+    Then the network order state is "ACKNOWLEDGED"
+    And the domain event "NetworkOrderAcknowledged" was published 1 time for "po-6"
 
   @bdd
   Scenario Outline: Reconciliation looks only at SUBMITTED orders
