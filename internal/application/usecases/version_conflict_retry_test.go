@@ -32,6 +32,9 @@ func copyOrder(o *networkorder.NetworkOrder) *networkorder.NetworkOrder {
 	if outcome := o.HoldOutcome(); outcome != "" {
 		dup.RestoreHold(outcome, o.HoldSettledAt())
 	}
+	if pending, ok := o.PendingShipment(); ok {
+		dup.RestorePendingShipment(pending)
+	}
 	dup.RestoreVersion(o.Version())
 	return dup
 }
