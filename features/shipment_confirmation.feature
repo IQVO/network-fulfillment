@@ -81,3 +81,60 @@ Feature: Shipment confirmation
     When I confirm shipment of network order ""
     Then the response status is 422
     And the problem detail type is "empty-network-ref"
+
+  # ADR 0014 addendum D7. A load can depart while the network has not settled
+  # the acknowledgement. outbound-shipping's ShipmentConfirmed reaches the
+  # consumer: for a SUBMITTED order that is a race, not a broken contract, so
+  # the shipment is recorded on the order and confirmed once it is ACKNOWLEDGED.
+  # (The REST route above is unchanged: it still answers 409 for SUBMITTED.)
+  @bdd
+  Scenario: A shipment reported before the acknowledgement is confirmed once, after it
+    Given a network order "po-1" in state "SUBMITTED"
+    When outbound-shipping reports load "load-1" shipped carrying network order "po-1"
+    Then the shipment report is committed without a dead letter
+    And network order "po-1" is waiting for the shipment of load "load-1"
+    And the network was asked to confirm shipment of 0 times for "po-1"
+    When pending shipment confirmations run
+    Then the network was asked to confirm shipment of 0 times for "po-1"
+    When the acknowledgement reconciliation runs
+    And pending shipment confirmations run
+    And pending shipment confirmations run
+    Then the network accepted 1 shipment confirmation for "po-1"
+    And the domain event "NetworkOrderShipmentConfirmed" was published 1 time for "po-1"
+    And network order "po-1" is waiting for no shipment
+    When I request network order "po-1"
+    Then the network order state is "CONFIRMED"
+
+  @bdd
+  Scenario: A shipment reported again for the same load changes nothing
+    Given a network order "po-1" in state "SUBMITTED"
+    When outbound-shipping reports load "load-1" shipped carrying network order "po-1"
+    And outbound-shipping reports load "load-1" shipped carrying network order "po-1"
+    Then the shipment report is committed without a dead letter
+    When the acknowledgement reconciliation runs
+    And pending shipment confirmations run
+    Then the network accepted 1 shipment confirmation for "po-1"
+    And the domain event "NetworkOrderShipmentConfirmed" was published 1 time for "po-1"
+
+  @bdd
+  Scenario: A shipment reported before the network refuses the order is dropped, never confirmed
+    Given a network order "po-1" in state "SUBMITTED"
+    And the network will refuse the submission for "po-1"
+    When outbound-shipping reports load "load-1" shipped carrying network order "po-1"
+    And the acknowledgement reconciliation runs
+    And pending shipment confirmations run
+    Then network order "po-1" is waiting for no shipment
+    And the network was asked to confirm shipment of 0 times for "po-1"
+    And the domain event "NetworkOrderShipmentConfirmed" was not published for "po-1"
+    When I request network order "po-1"
+    Then the network order state is "REJECTED"
+
+  # A shipped order the network never took is a genuine anomaly for an operator:
+  # the consumer's confirm error stands, so it is retried and then dead-lettered.
+  @bdd
+  Scenario: A shipment reported for a refused order still fails
+    Given a network order "po-1" in state "REJECTED"
+    When outbound-shipping reports load "load-1" shipped carrying network order "po-1"
+    Then the shipment report fails with "cannot confirm shipment before acknowledgement"
+    And network order "po-1" is waiting for no shipment
+    And the network was asked to confirm shipment of 0 times for "po-1"

@@ -253,6 +253,7 @@ sequenceDiagram
     participant SC as ShipmentConfirmedConsumer
     participant R as NetworkOrderRepo
     participant UC as ConfirmNetworkOrderShipment
+    participant D as DeferShipmentConfirmation
     K->>SC: ShipmentConfirmed (load_id, orders[])
     loop each orders[].order_id
         SC->>R: FindByLocalOrderId(order_id)
@@ -261,9 +262,41 @@ sequenceDiagram
         else found
             SC->>UC: ExecuteForShipment(ref, load_id, package_count)
             Note right of UC: the steps of the diagram above, from FindByRef on
+            opt ErrConfirmBeforeAcknowledge
+                SC->>D: Execute(ref, load_id, package_count)
+                alt the order is SUBMITTED
+                    D->>R: Save the order with the pending shipment
+                    SC->>SC: log "deferred" and go on to the next order
+                else any other state
+                    D-->>SC: ErrConfirmBeforeAcknowledge (retried, then the .dlq)
+                end
+            end
         end
     end
     SC->>K: commit the offset (a message that keeps failing goes to the .dlq first)
+```
+
+The pending shipment is settled by a ticker, once the order is `ACKNOWLEDGED`:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as runConfirmPending ticker
+    participant P as ConfirmPendingShipments
+    participant R as NetworkOrderRepo
+    participant UC as ConfirmNetworkOrderShipment
+    T->>P: Execute() every POLL_INTERVAL
+    P->>R: ListPendingShipments(100)
+    loop each order that carries a pending shipment
+        alt ACKNOWLEDGED
+            P->>UC: ExecuteForShipment(ref, shipment_ref, package_count)
+            Note right of UC: the steps of the first diagram; the confirm clears the shipment
+        else SUBMITTED
+            P->>P: skip, the shipment waits
+        else CONFIRMED or REJECTED
+            P->>R: Save with the shipment dropped
+        end
+    end
 ```
 
 Source: `internal/application/usecases/confirm_network_order_shipment.go`,
@@ -275,8 +308,9 @@ Omitted: an empty `networkRef` returns 422 (`ErrEmptyNetworkRef`). The label is
 requested before `ConfirmShipment`, so a failed label leaves the order
 `ACKNOWLEDGED` and the call retryable. A failed `SubmitShipmentConfirmation`
 returns 500 after the record has committed; a retry is then a no-op that
-returns 204 without re-submitting. On the event path the same error is retried
-and then dead-lettered. The 409 for `ErrConfirmBeforeAcknowledge` is a case in
+returns 204 without re-submitting. On the event path the same error, for an order still `SUBMITTED`, defers the
+shipment onto the order (ADR 0014 addendum D7); for a `NEW` or `REJECTED` order it is
+retried and then dead-lettered. The 409 for `ErrConfirmBeforeAcknowledge` is a case in
 `statusFor`/`problemFor` (`errors.go`), pinned by
 `TestHandleConfirmShipment_BeforeAcknowledgeReturns409`. The route is registered
 only when `ConfirmShipment` is wired, which `cmd/netfulfil` always does. CORS

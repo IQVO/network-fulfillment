@@ -28,14 +28,17 @@ tools read the repositories directly (`internal/adapters/inbound/http/server.go`
 | `RejectOverdueOrders` | ticker | every `SWEEP_INTERVAL` (its own ticker) | `cmd/netfulfil/workers.go` |
 | `SweepOrphanedHolds` | ticker | every `SWEEP_INTERVAL` (its own ticker, the same interval as the two passes above); not started when `ORPHAN_HOLD_SWEEP_ENABLED=false` | `cmd/netfulfil/workers.go` (`runSweepOrphanedHolds`), built in `cmd/netfulfil/wiring.go` (`wireOrphanHoldSweep`) |
 | `ConfirmNetworkOrderShipment` | Kafka (primary) or REST (operator fallback) | a `ShipmentConfirmed` event on `warehouse.outbound-shipping.events`, in every mode; or `POST /network-orders/{networkRef}/shipment-confirmation` | `internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`, `cmd/netfulfil/outbound_shipping.go`; `internal/adapters/inbound/http/server.go` |
+| `DeferShipmentConfirmation` | Kafka (fallback of the `ShipmentConfirmed` consumer) | a `ShipmentConfirmed` whose order is not `ACKNOWLEDGED` yet | `internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`, `cmd/netfulfil/outbound_shipping.go` (`wireDeferShipment`) |
+| `ConfirmPendingShipments` | ticker | every `POLL_INTERVAL`, always | `cmd/netfulfil/workers.go` (`runConfirmPending`), built in `cmd/netfulfil/wiring.go` (`wireConfirmPending`) |
 | `RecomputeCapabilityOffers` | ticker | every `RECOMPUTE_INTERVAL`, always | `cmd/netfulfil/capability.go` |
 | `DeclareNodeProfiles` | worker | live mode only: once at start, then every `NETWORK_PROFILE_INTERVAL` (`0` disables) | `cmd/netfulfil/profile.go` (`wireNodeProfiles`, `startProfileWorker`) |
 | `FeedInventory` | worker | live mode only: once at start, then every `NETWORK_INVENTORY_INTERVAL` (default `5m`, `0` disables) | `cmd/netfulfil/inventory_feed.go` (`wireInventoryFeed`, `startInventoryWorker`) |
 | `IntakeInboundShipments` | ticker | live mode only: at once, then every `INBOUND_INTAKE_INTERVAL` (default `30s`) | `cmd/netfulfil/inbound.go` (`wireInboundLoop`, `tick`) |
 | `ReturnInboundReceipts` | ticker | the same tick as the intake, run before it | `cmd/netfulfil/inbound.go` (`tickReturn`) |
 
-One use case is driven by Kafka: `ConfirmNetworkOrderShipment`, by the
-`ShipmentConfirmed` consumer. No use case is driven by MCP. Apart from that
+Two use cases are driven by Kafka: `ConfirmNetworkOrderShipment`, by the
+`ShipmentConfirmed` consumer, and `DeferShipmentConfirmation`, the same consumer's
+fallback for an order that is not `ACKNOWLEDGED` yet. No use case is driven by MCP. Apart from that
 consumer, `netfulfil` runs three more Kafka consumers, and none calls a use
 case: two fill the process-path and path-capacity caches that
 `RecomputeCapabilityOffers` and `DeclareNodeProfiles` read, and, in live mode only,
@@ -271,10 +274,51 @@ neither can double-submit (ADR 0014 and its 2026-11-06 addendum):
   `ACKNOWLEDGED` and the call retryable. If the gateway call fails after the commit
   the REST route answers `500 internal-error`; the order is already `CONFIRMED`, so a
   retry returns `204` without calling the gateway again. On the event path a handler
-  error, `ErrConfirmBeforeAcknowledge` included, is retried and then the message is
-  dead-lettered to `warehouse.outbound-shipping.events.dlq` and committed past
-  (`handleWithDeadLetter`); the REST route closes that gap. A message that is not a
-  CloudEvent or breaks outbound-shipping's contract is dead-lettered without retry.
+  error is retried and then the message is dead-lettered to
+  `warehouse.outbound-shipping.events.dlq` and committed past
+  (`handleWithDeadLetter`); the REST route closes that gap. `ErrConfirmBeforeAcknowledge`
+  is the exception for an order that is still `SUBMITTED`: the consumer calls
+  `DeferShipmentConfirmation` (below) and commits with no dead letter. For a `NEW` or
+  `REJECTED` order the error is retried and dead-lettered as above. A message that is
+  not a CloudEvent or breaks outbound-shipping's contract is dead-lettered without
+  retry.
+
+## DeferShipmentConfirmation
+
+`defer_shipment_confirmation.go` (ADR 0014 addendum D7). A load can depart while its
+order is still `SUBMITTED`, because the network has not settled the acknowledgement
+(a 24 h window). The consumer calls this when `ExecuteForShipment` fails with
+`ErrConfirmBeforeAcknowledge`, so the shipment is kept and not dead-lettered.
+
+- **Input**: the `NetworkRef` of the order, the shipment reference (the load id) and the
+  package count (0 when the event carries none).
+- **Steps**: load the order fresh (`ErrOrderNotFound` if absent), call
+  `NoteShipmentBeforeAcknowledge`, and save in one unit of work. The first shipment
+  noted wins: the same shipment again, or a different one while one is pending,
+  returns nil without writing (a different one is logged at Warn). A version conflict
+  reloads and retries (`withVersionRetry`).
+- **Invariant**: only a `SUBMITTED` order is deferred. Any other state returns
+  `ErrConfirmBeforeAcknowledge`, so the consumer's retry-then-DLQ stays for `NEW`
+  and `REJECTED`, and an order settled `ACKNOWLEDGED` in between is confirmed by the
+  retry.
+- **Events**: none.
+
+## ConfirmPendingShipments
+
+`confirm_pending_shipments.go` (ADR 0014 addendum D7). Settles the shipments recorded
+by `DeferShipmentConfirmation`. `runConfirmPending` runs it every `POLL_INTERVAL`,
+always on (no flag, no variable), next to `runReconcile`.
+
+- **Input**: none. It lists up to 100 orders (`ListPendingShipments`: those no longer
+  `SUBMITTED` first, then the oldest noted first).
+- **Steps**, per order: `ACKNOWLEDGED` calls `ExecuteForShipment` with the noted
+  shipment reference and package count (the same path, ledger and event as the
+  consumer and the REST route); `SUBMITTED` is skipped and keeps its shipment;
+  `CONFIRMED` or `REJECTED` has the shipment dropped (`DropPendingShipment`) and saved.
+- **Result**: `ConfirmPendingShipmentsResult` counts `Examined`, `Confirmed`, `Dropped`
+  and `Failed`. One order's failure is logged and counted and never aborts the pass;
+  the order is tried again on the next tick.
+- **Events**: `NetworkOrderShipmentConfirmed`, through `ExecuteForShipment`, once per order.
 
 ## RecomputeCapabilityOffers
 

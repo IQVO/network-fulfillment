@@ -94,6 +94,7 @@ type world struct {
 	recompute     *usecases.RecomputeCapabilityOffers
 	poller        *poller.Poller
 	inboundW      *inboundWorld
+	shipping      shippingWorld
 
 	// offersEnabled mirrors CAPABILITY_OFFER_ENABLED: when false the route is
 	// not registered at all.
@@ -152,6 +153,7 @@ func (w *world) reset() {
 		Offers: w.offers, Clock: w.clock, Logger: logger, SiteId: "site-1",
 	}
 	w.poller = poller.New(w.gateway, w.receive, w.clock, poller.Config{Interval: time.Hour}, logger)
+	w.resetShipping(logger)
 
 	w.offersEnabled = true
 	w.demands = map[string]contract.InboundDemand{}
@@ -349,4 +351,5 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w.registerReportSteps(sc)
 	w.registerHardeningSteps(sc)
 	w.registerInboundSteps(sc)
+	w.registerDeferredShipmentSteps(sc)
 }

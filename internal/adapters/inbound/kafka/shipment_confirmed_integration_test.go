@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +95,26 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 	if err := orders.Save(ctx, seeded); err != nil {
 		t.Fatalf("seed order: %v", err)
 	}
+	// Two more orders, for ADR 0014 addendum D7: po-2 is still SUBMITTED when
+	// its load departs (the race: the shipment is recorded, not dead-lettered),
+	// po-3 is REJECTED (a shipped order the network never took: dead-lettered).
+	for ref, seed := range map[shared.NetworkRef]struct {
+		local string
+		state networkorder.State
+	}{
+		"po-2": {"ord-88422", networkorder.StateSubmitted},
+		"po-3": {"ord-88423", networkorder.StateRejected},
+	} {
+		id := shared.LocalOrderId(seed.local)
+		o := networkorder.Rehydrate(ref, "site-1",
+			time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC),
+			time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC),
+			time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC),
+			nil, seed.state, &id)
+		if err := orders.Save(ctx, o); err != nil {
+			t.Fatalf("seed %s: %v", ref, err)
+		}
+	}
 
 	// The ONE confirm use case, wired exactly like the composition root
 	// (wireConfirmShipment): real ledger, real unit of work, real outbox
@@ -129,6 +150,8 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 		{Key: []byte("load-7f3a"), Value: []byte(`{"not":"a cloudevent"}`)},
 		{Key: []byte("load-7f3a"), Value: eventBytes},
 		{Key: []byte("load-7f3a"), Value: eventBytes},
+		{Key: []byte("load-9b1c"), Value: shipmentConfirmedFor(t, "evt-early", "load-9b1c", "ord-88422", 2)},
+		{Key: []byte("load-5d2e"), Value: shipmentConfirmedFor(t, "evt-anomaly", "load-5d2e", "ord-88423", 0)},
 	}
 	if err := writer.WriteMessages(ctx, msgs...); err != nil {
 		t.Fatalf("produce: %v", err)
@@ -157,6 +180,43 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 			t.Fatalf("order po-1 not CONFIRMED within 60s (state %v)", o.State())
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+	// po-2's load departed while the order was SUBMITTED: the shipment is
+	// recorded on the order, not dead-lettered and not confirmed.
+	for {
+		o, err := orders.FindByRef(ctx, "po-2")
+		if err != nil || o == nil {
+			t.Fatalf("FindByRef po-2: %v %v", o, err)
+		}
+		if _, ok := o.PendingShipment(); ok {
+			break
+		}
+		if time.Now().After(deadline.Add(60 * time.Second)) {
+			runCancel()
+			t.Fatalf("po-2 carries no pending shipment within the deadline (state %v)", o.State())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// The dead letters, read BEFORE the consumer stops so the wait is on the
+	// topic and not on a sleep: the malformed message, then po-3's confirmation
+	// (retried, then dead-lettered, as before). po-2's early shipment is not
+	// among them, and it was committed past: nothing follows.
+	dlqReader := kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers: brokers, Topic: topic + ".dlq", Partition: 0,
+		MinBytes: 1, MaxBytes: 10e6,
+	})
+	defer func() { _ = dlqReader.Close() }()
+	var dlqMsgs []kafkago.Message
+	for range 2 {
+		dlqCtx, dlqCancel := context.WithTimeout(ctx, 30*time.Second)
+		m, err := dlqReader.ReadMessage(dlqCtx)
+		dlqCancel()
+		if err != nil {
+			runCancel()
+			t.Fatalf("read DLQ message %d (the malformed one and po-3's must be dead-lettered): %v", len(dlqMsgs)+1, err)
+		}
+		dlqMsgs = append(dlqMsgs, m)
 	}
 	// Give the consumer a moment to commit past the messages, then stop.
 	time.Sleep(2 * time.Second)
@@ -203,17 +263,7 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 
 	// The malformed message is on the dead-letter topic, committed past,
 	// and did not block the confirmation behind it.
-	dlqReader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers: brokers, Topic: topic + ".dlq", Partition: 0,
-		MinBytes: 1, MaxBytes: 10e6,
-	})
-	defer func() { _ = dlqReader.Close() }()
-	dlqCtx, dlqCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer dlqCancel()
-	dlqMsg, err := dlqReader.ReadMessage(dlqCtx)
-	if err != nil {
-		t.Fatalf("read DLQ message (the malformed one must be dead-lettered): %v", err)
-	}
+	dlqMsg := dlqMsgs[0]
 	if string(dlqMsg.Value) != `{"not":"a cloudevent"}` {
 		t.Errorf("DLQ payload = %s, want the raw malformed bytes for manual replay", dlqMsg.Value)
 	}
@@ -221,6 +271,66 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 		if h.Key == "x-dlq-source-topic" && string(h.Value) != topic {
 			t.Errorf("DLQ x-dlq-source-topic = %s, want %s", h.Value, topic)
 		}
+	}
+
+	// ADR 0014 addendum D7. po-3 (REJECTED) was a genuine anomaly: dead-lettered
+	// with the confirm error, verbatim payload for replay.
+	if !strings.Contains(string(dlqMsgs[1].Value), "load-5d2e") {
+		t.Errorf("second DLQ payload = %s, want po-3's ShipmentConfirmed (load-5d2e)", dlqMsgs[1].Value)
+	}
+	var dlqErr string
+	for _, h := range dlqMsgs[1].Headers {
+		if h.Key == "x-dlq-error" {
+			dlqErr = string(h.Value)
+		}
+	}
+	if !strings.Contains(dlqErr, "cannot confirm shipment before acknowledgement") {
+		t.Errorf("x-dlq-error = %q, want the confirm-before-acknowledge error", dlqErr)
+	}
+	// po-2's early shipment produced NO dead letter: nothing else is on the topic.
+	extraCtx, extraCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer extraCancel()
+	if m, err := dlqReader.ReadMessage(extraCtx); err == nil {
+		t.Errorf("a third dead letter exists (%s): po-2's early shipment must be committed, not dead-lettered", m.Value)
+	}
+
+	// po-2 waits SUBMITTED with the shipment recorded, and nothing was
+	// confirmed or published for it yet.
+	po2, _ := orders.FindByRef(ctx, "po-2")
+	if pending, ok := po2.PendingShipment(); !ok || pending.ShipmentRef != "load-9b1c" || pending.PackageCount != 2 || po2.State() != networkorder.StateSubmitted {
+		t.Fatalf("po-2 = %v pending %+v ok=%v, want SUBMITTED carrying {load-9b1c 2}", po2.State(), pending, ok)
+	}
+	var po2Ledger int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM shipment_confirmations WHERE order_id = 'ord-88422'`).Scan(&po2Ledger); err != nil || po2Ledger != 0 {
+		t.Fatalf("po-2 ledger rows = %d, %v, want 0 before it is acknowledged", po2Ledger, err)
+	}
+
+	// The network settles the acknowledgement; the confirm-pending pass
+	// confirms the order once, through the real ledger and outbox.
+	if err := po2.ConfirmAcknowledgement(); err != nil {
+		t.Fatalf("ConfirmAcknowledgement: %v", err)
+	}
+	if err := orders.Save(ctx, po2); err != nil {
+		t.Fatalf("save po-2 ACKNOWLEDGED: %v", err)
+	}
+	pass := &usecases.ConfirmPendingShipments{Orders: orders, Confirm: confirm, UnitOfWork: postgres.NewUnitOfWork(pool)}
+	for range 2 { // the second pass must find nothing to do
+		if _, err := pass.Execute(ctx); err != nil {
+			t.Fatalf("ConfirmPendingShipments: %v", err)
+		}
+	}
+	po2, _ = orders.FindByRef(ctx, "po-2")
+	if _, ok := po2.PendingShipment(); ok || po2.State() != networkorder.StateConfirmed {
+		t.Fatalf("po-2 after the pass = %v (pending cleared: %v), want CONFIRMED with the fact used", po2.State(), !ok)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM shipment_confirmations WHERE shipment_ref = 'load-9b1c' AND order_id = 'ord-88422'`).Scan(&po2Ledger); err != nil || po2Ledger != 1 {
+		t.Errorf("po-2 ledger rows = %d, %v, want exactly 1", po2Ledger, err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM outbox_events
+		WHERE event_type LIKE '%NetworkOrderShipmentConfirmed' AND topic = 'warehouse.network-fulfillment.events'
+	`).Scan(&outboxRows); err != nil || outboxRows != 2 {
+		t.Errorf("NetworkOrderShipmentConfirmed outbox rows = %d, %v, want 2 (po-1 and po-2, once each)", outboxRows, err)
 	}
 }
 
@@ -243,6 +353,40 @@ func shipmentConfirmedFixture(t *testing.T) []byte {
 		"seal_number": "SL-4471",
 		"departed_at": "2026-11-06T16:01:30Z",
 		"orders":      []map[string]any{{"order_id": "ord-88421"}},
+		"version":     6,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := e.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// shipmentConfirmedFor is shipmentConfirmedFixture for one load carrying one
+// order, with an optional per-order package count.
+func shipmentConfirmedFor(t *testing.T, id, loadId, orderId string, packageCount int) []byte {
+	t.Helper()
+	order := map[string]any{"order_id": orderId}
+	if packageCount > 0 {
+		order["package_count"] = packageCount
+	}
+	e := ce.New("1.0")
+	e.SetID(id)
+	e.SetSource("/warehouse/outbound-shipping")
+	e.SetType("com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed")
+	e.SetSubject(loadId)
+	e.SetTime(time.Date(2026, 11, 6, 16, 2, 0, 0, time.UTC))
+	if err := e.SetData("application/json", map[string]any{
+		"load_id":     loadId,
+		"site_id":     "SITE-1",
+		"cpt_id":      "cpt-1600",
+		"carrier":     "STDOUT",
+		"trailer_id":  "trl-91",
+		"seal_number": "SL-4471",
+		"departed_at": "2026-11-06T16:01:30Z",
+		"orders":      []map[string]any{order},
 		"version":     6,
 	}); err != nil {
 		t.Fatal(err)
