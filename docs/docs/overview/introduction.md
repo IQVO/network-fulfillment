@@ -36,7 +36,7 @@ quantities, a site and a deadline.
 - **`CapabilityOffer`** (always on): the quantity per SKU and site this context
   would advertise, `min(physicalAvailable, throughputFeasible)`, so the
   network is never offered more than the building can move before the next
-  cutoff. Computed and stored, not yet sent to the network.
+  cutoff. Computed and stored; in live mode `FeedInventory` sends it to the network as a per-site inventory feed (ADR 0027 part 2).
 - **The product dictionary**: network product id to SKU, loaded from
   `PRODUCT_TRANSLATION_FILE`. An order with one unknown product is rejected.
 
@@ -51,7 +51,7 @@ of `order-management` through a held order (ADR 0001 §7).
 | Settle answers | reconcile each `SUBMITTED` order with the network's transaction status, then release or cancel the hold | [use cases](/docs/ddd/use-cases#reconcilesubmittedorders) |
 | Guard the SLA | report and reject orders still unanswered after 24 h | [use cases](/docs/ddd/use-cases#sweepacknowledgementdeadlines) |
 | Free orphaned holds | cancel the order-management hold of an order nobody decided, after `acknowledgeBy + ORPHAN_HOLD_GRACE` | [use cases](/docs/ddd/use-cases#sweeporphanedholds), [runbook](/docs/operations/runbook#a-held-order-is-stuck-in-order-management) |
-| Confirm shipment | `POST /network-orders/{networkRef}/shipment-confirmation` | [use cases](/docs/ddd/use-cases#confirmnetworkordershipment) |
+| Confirm shipment | a `ShipmentConfirmed` event from outbound-shipping (primary), or `POST /network-orders/{networkRef}/shipment-confirmation` (operator fallback) | [use cases](/docs/ddd/use-cases#confirmnetworkordershipment) |
 | Advertise capability | recompute offers from inventory-storage stock and path capacity | [use cases](/docs/ddd/use-cases#recomputecapabilityoffers) |
 | Publish facts | seven CloudEvents types on `warehouse.network-fulfillment.events` | [integration](/docs/ecosystem/integration#events-published) |
 | Report | acknowledgement and translation report from an analytics data product | [runbook](/docs/operations/runbook#reports-api-netfulfil-reports) |

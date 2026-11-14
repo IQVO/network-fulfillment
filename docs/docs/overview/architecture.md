@@ -78,12 +78,12 @@ internal/
   application/
     contract/                  plain data crossing the ports (InboundDemand, HeldOrderRequest, NextCutoff, ...)
     ports/                     OUT ports, interfaces only
-    usecases/                  the six application services
+    usecases/                  the eleven application services
   adapters/
     inbound/http/              REST routes, RFC 7807 errors, readiness, reports router
     inbound/poller/            the inbound leg: polls the gateway, feeds ReceiveNetworkDemand
     inbound/mcp/               MCP tools, resource, prompt
-    inbound/kafka/             analytics consumer (own topic) + DLQ
+    inbound/kafka/             analytics consumer (own topic), ShipmentConfirmed consumer (outbound-shipping), receipt consumer (inbound-receiving, live mode) + DLQ
     kafka/cloudevents/         the CloudEvents 1.0 envelope, shared by every publisher and consumer
     outbound/retailnetwork/    NETWORK_MODE switch, stub gateway, seed file, live Vendor API gateway (ADR 0026)
     outbound/ordermanagement/  held-order REST client + circuit breaker
@@ -153,16 +153,18 @@ Column-level ER diagrams: [ddd/entity-relationship.md](/docs/ddd/entity-relation
 **Kafka** (one fleet broker): produces `warehouse.network-fulfillment.events`
 and `warehouse.network-fulfillment.analytics`, the projector produces
 `warehouse.network-fulfillment.analytics.dlq`, and `netfulfil` consumes
-`warehouse.process-path-management.events` and
-`warehouse.work-planning.events` when capability offers are on. Topics and
+`warehouse.process-path-management.events`,
+`warehouse.work-planning.events` and `warehouse.outbound-shipping.events` in
+every mode, plus `warehouse.inbound-receiving.events` in live mode. Topics and
 group ids: [runbook](/docs/operations/runbook#kafka).
 
 ## Request and event flows
 
 - Demand: poller -> `ReceiveNetworkDemand` -> order-management held order ->
   answer to the network. Settlement by `ReconcileSubmittedOrders`.
-- Shipment: `POST /network-orders/{networkRef}/shipment-confirmation` ->
-  `ConfirmNetworkOrderShipment`.
+- Shipment: a `ShipmentConfirmed` event from outbound-shipping (primary), or
+  `POST /network-orders/{networkRef}/shipment-confirmation` (operator fallback)
+  -> `ConfirmNetworkOrderShipment`.
 - Events: use case -> `outbox_events` (same transaction) -> relay -> both
   topics -> projector -> analytical tables -> reports API -> MCP report tool.
 
