@@ -19,8 +19,7 @@ ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/docs/ddd/`.
 Built: `NetworkOrder` aggregate, ACL boundary, use cases
 `ReceiveNetworkDemand` / `SweepAcknowledgementDeadlines` /
 `RejectOverdueOrders` / `ReconcileSubmittedOrders` (SUBMITTED state,
-ADR 0001 §5) / `ConfirmNetworkOrderShipment` (driven by outbound-shipping's `ShipmentConfirmed`
-consumer; the REST endpoint is the operator fallback, ADR 0014 addendum),
+ADR 0001 §5) / `ConfirmNetworkOrderShipment` (`ShipmentConfirmed` consumer; REST is the operator fallback, ADR 0014),
 in-memory and Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to
 boot, never a silent fallback), stub gateway (the default) and the live
 demand-loop gateway for the retail network's Vendor API (ADR 0026:
@@ -36,8 +35,7 @@ inventory-storage REST read (see the `ports.InventoryAvailability` doc
 comment for why inventory is REST, not a cache), and the
 `GET /capability-offers` / `list_capability_offers` read surface, always on
 (`CAPABILITY_OFFER_ENABLED=false` is refused at boot). The offer is persisted,
-then `FeedInventory` sends it to the network in live mode, one feed per site
-(ADR 0027 part 2).
+then `FeedInventory` sends it to the network in live mode (ADR 0027).
 Not built: a real package count (labels use one
 package), reconciling a shipment confirmation (a FAILURE is logged at ERROR only).
 Operations: `docs/docs/operations/runbook.md` (plus configuration, observability,
