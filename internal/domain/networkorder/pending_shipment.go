@@ -52,10 +52,7 @@ func (o *NetworkOrder) NoteShipmentBeforeAcknowledge(shipmentRef string, package
 	if o.pendingShipment != nil {
 		return nil
 	}
-	if packageCount < 0 {
-		packageCount = 0
-	}
-	o.pendingShipment = &PendingShipment{ShipmentRef: shipmentRef, PackageCount: packageCount, NotedAt: now}
+	o.pendingShipment = &PendingShipment{ShipmentRef: shipmentRef, PackageCount: max(packageCount, 0), NotedAt: now}
 	return nil
 }
 
