@@ -19,26 +19,26 @@ ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/docs/ddd/`.
 Built: `NetworkOrder` aggregate, ACL boundary, use cases
 `ReceiveNetworkDemand` / `SweepAcknowledgementDeadlines` /
 `RejectOverdueOrders` / `ReconcileSubmittedOrders` (SUBMITTED state,
-ADR 0001 §5) / `ConfirmNetworkOrderShipment` (explicit endpoint, ADR 0014),
+ADR 0001 §5) / `ConfirmNetworkOrderShipment` (driven by outbound-shipping's `ShipmentConfirmed`
+consumer; the REST endpoint is the operator fallback, ADR 0014 addendum),
 in-memory and Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to
 boot, never a silent fallback), stub gateway (the default) and the live
 demand-loop gateway for the retail network's Vendor API (ADR 0026:
 `NETWORK_MODE=live` with `NETWORK_BASE_URL` and `NETWORK_VENDOR_ID`; node map,
 submission ledger and labels in migration 0006;
-`DeclareCapability`/`SubmitAvailability` are logged no-ops until the supply
-loop, ADR 0027), poller (inbound
-leg), READ-ONLY REST plus the one explicit write endpoint above, CloudEvents
+the supply loop of ADR 0027 is built: `DeclareNodeProfiles` and `FeedInventory`),
+poller (inbound leg), READ-ONLY REST plus the one explicit write endpoint above, CloudEvents
 Kafka publishers + outbox, analytics projector, MCP adapter, `web/` remote,
 Helm chart. Also built (ADR 0001 §8): the `CapabilityOffer` aggregate and
 `RecomputeCapabilityOffers`, its two Kafka-fed caches (process-path-management
 paths + CPT schedule, wes-work-planning path capacity) plus a synchronous
 inventory-storage REST read (see the `ports.InventoryAvailability` doc
 comment for why inventory is REST, not a cache), and the
-`GET /capability-offers` / `list_capability_offers` read surface, opt-in via
-`CAPABILITY_OFFER_ENABLED`. The offer is persisted, not yet submitted to
-the network (`SubmitAvailability` has no caller).
-Not built: the supply loop (ADR 0027, reserved: node profile, `DeclareCapability`,
-`SubmitAvailability`, inventory feed), a real package count (labels use one
+`GET /capability-offers` / `list_capability_offers` read surface, always on
+(`CAPABILITY_OFFER_ENABLED=false` is refused at boot). The offer is persisted,
+then `FeedInventory` sends it to the network in live mode, one feed per site
+(ADR 0027 part 2).
+Not built: a real package count (labels use one
 package), reconciling a shipment confirmation (a FAILURE is logged at ERROR only).
 Operations: `docs/docs/operations/runbook.md` (plus configuration, observability,
 troubleshooting); CI jobs and gremlins thresholds: `docs/docs/development/testing.md`;
@@ -108,7 +108,9 @@ internal/adapters/outbound/{network,ordermanagement,inventoryclient,processpathc
 Every Kafka message produced (`warehouse.network-fulfillment.events` and
 `.analytics`) or consumed (our own `.analytics`, plus
 `warehouse.process-path-management.events` and
-`warehouse.work-planning.events` for the opt-in capability caches) is a
+`warehouse.work-planning.events` for the always-on capability caches,
+`warehouse.outbound-shipping.events` in every mode and
+`warehouse.inbound-receiving.events` in live mode) is a
 CloudEvents 1.0 structured-mode event: no flat
 envelope, no dual-write/read, no toggle. Use `github.com/cloudevents/sdk-go/v2/event`
 via `internal/adapters/kafka/cloudevents/`; header `content-type:
