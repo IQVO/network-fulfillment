@@ -92,6 +92,7 @@ type world struct {
 	sweepHolds    *usecases.SweepOrphanedHolds
 	rejectOverdue *usecases.RejectOverdueOrders
 	recompute     *usecases.RecomputeCapabilityOffers
+	confirm       *usecases.ConfirmNetworkOrderShipment
 	poller        *poller.Poller
 	inboundW      *inboundWorld
 
@@ -152,6 +153,12 @@ func (w *world) reset() {
 		Offers: w.offers, Clock: w.clock, Logger: logger, SiteId: "site-1",
 	}
 	w.poller = poller.New(w.gateway, w.receive, w.clock, poller.Config{Interval: time.Hour}, logger)
+	// One confirmation use case for the REST route and the shipment consumer,
+	// wired as cmd/netfulfil wires it, ledger included (ADR 0014 addendum).
+	w.confirm = &usecases.ConfirmNetworkOrderShipment{
+		Orders: w.orders, Gateway: w.gateway, Events: w.bus, Clock: w.clock,
+		Confirmations: memory.NewShipmentConfirmationLog(),
+	}
 
 	w.offersEnabled = true
 	w.demands = map[string]contract.InboundDemand{}
@@ -173,10 +180,8 @@ func (w *world) apiServer() *httptest.Server {
 			NetworkMode:     string(retailnetwork.ModeStub),
 			Readiness:       w.readiness,
 			MetricsRegistry: w.metrics.Registry,
-			ConfirmShipment: &usecases.ConfirmNetworkOrderShipment{
-				Orders: w.orders, Gateway: w.gateway, Events: w.bus, Clock: w.clock,
-			},
-			Idempotency: memory.NewIdempotencyStore(),
+			ConfirmShipment: w.confirm,
+			Idempotency:     memory.NewIdempotencyStore(),
 		}
 		if w.offersEnabled {
 			s.Offers = w.offers
@@ -349,4 +354,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w.registerReportSteps(sc)
 	w.registerHardeningSteps(sc)
 	w.registerInboundSteps(sc)
+	w.registerRuleSteps(sc)
+	w.registerSupplySteps(sc)
+	w.registerShipmentSteps(sc)
 }

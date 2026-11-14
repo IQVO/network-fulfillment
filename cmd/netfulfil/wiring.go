@@ -254,6 +254,24 @@ func wireReconcile(
 	}
 }
 
+// wireConfirmPending builds the pass that confirms the shipments noted before
+// their order was ACKNOWLEDGED (ADR 0014 addendum D7). It confirms through the
+// ONE shared ConfirmNetworkOrderShipment, so the (shipment-ref, order-id)
+// ledger keeps it exactly-once next to the event and manual paths.
+func wireConfirmPending(
+	orders ports.NetworkOrderRepo,
+	confirm *usecases.ConfirmNetworkOrderShipment,
+	pool *pgxpool.Pool,
+	logger *slog.Logger,
+) *usecases.ConfirmPendingShipments {
+	return &usecases.ConfirmPendingShipments{
+		Orders:     orders,
+		Confirm:    confirm,
+		UnitOfWork: postgres.NewUnitOfWork(pool),
+		Logger:     logger,
+	}
+}
+
 // apiDeps are the collaborators wireAPI assembles the REST server from.
 type apiDeps struct {
 	orders      ports.NetworkOrderRepo

@@ -41,6 +41,14 @@ type NetworkOrderRepo interface {
 	// rule: the use case still asks the domain (NetworkOrder.HoldOrphaned)
 	// whether acknowledgeBy plus the grace has passed.
 	ListOpenHolds(ctx context.Context) ([]*networkorder.NetworkOrder, error)
+	// ListPendingShipments returns at most limit orders that carry a shipment
+	// confirmation noted before their acknowledgement (ADR 0014 addendum D7):
+	// the candidates of ConfirmPendingShipments. Orders no longer SUBMITTED come
+	// first, because a SUBMITTED one is skipped by the pass and must never crowd
+	// out an order that can be settled; within each group, the oldest noted
+	// shipment first, ties by network ref. It is a narrowing, not the rule: the
+	// use case still decides per state what to do.
+	ListPendingShipments(ctx context.Context, limit int) ([]*networkorder.NetworkOrder, error)
 	// ListUnansweredPage is one keyset page of ListUnanswered for the REST
 	// surface: ordered by (acknowledgeBy, networkRef), rows strictly after
 	// `after` (nil = first page), at most limit rows.

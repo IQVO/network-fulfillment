@@ -156,6 +156,38 @@ func (r *NetworkOrderRepo) ListOpenHolds(_ context.Context) ([]*networkorder.Net
 	return out, nil
 }
 
+// ListPendingShipments returns up to limit orders carrying a shipment noted
+// before their acknowledgement: those no longer SUBMITTED first, then the
+// oldest noted first, ties by ref. It matches the Postgres query's ORDER BY.
+func (r *NetworkOrderRepo) ListPendingShipments(_ context.Context, limit int) ([]*networkorder.NetworkOrder, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*networkorder.NetworkOrder
+	for _, o := range r.orders {
+		if _, ok := o.PendingShipment(); ok {
+			out = append(out, o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if si, sj := out[i].State() == networkorder.StateSubmitted, out[j].State() == networkorder.StateSubmitted; si != sj {
+			return sj
+		}
+		pi, _ := out[i].PendingShipment()
+		pj, _ := out[j].PendingShipment()
+		if !pi.NotedAt.Equal(pj.NotedAt) {
+			return pi.NotedAt.Before(pj.NotedAt)
+		}
+		return out[i].NetworkRef() < out[j].NetworkRef()
+	})
+	if limit < 0 {
+		limit = 0
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // CapabilityOfferRepo is an in-memory ports.CapabilityOfferRepo, keyed
 // by (SKU, SiteId) so Save genuinely upserts the one current snapshot
 // per pair rather than accumulating history.

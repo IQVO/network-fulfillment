@@ -98,6 +98,16 @@ func (r *NetworkOrderRepo) writeOrder(ctx context.Context, tx pgx.Tx, o *network
 		holdSettledAt = &at
 	}
 
+	// The pending shipment's three columns travel together (a CHECK in migration
+	// 0015 enforces it); all NULL when no shipment is waiting for the order's
+	// acknowledgement.
+	var pendingRef *string
+	var pendingCount *int
+	var pendingNotedAt *time.Time
+	if p, ok := o.PendingShipment(); ok {
+		pendingRef, pendingCount, pendingNotedAt = &p.ShipmentRef, &p.PackageCount, &p.NotedAt
+	}
+
 	// The row is written at the NEXT version ($10 + 1) on both branches:
 	// the update takes the row from the loaded version ($10) to loaded+1,
 	// and an insert starts the row at loaded+1 — so the version RETURNed
@@ -118,14 +128,18 @@ func (r *NetworkOrderRepo) writeOrder(ctx context.Context, tx pgx.Tx, o *network
 		INSERT INTO network_orders (
 			network_ref, site_id, required_ship_by, acknowledge_by,
 			state, local_order_id, received_at, hold_outcome, hold_settled_at,
+			pending_shipment_ref, pending_package_count, pending_shipment_noted_at,
 			aggregate_version
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10 + 1)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $12, $13, $14, $10 + 1)
 		ON CONFLICT (network_ref) DO UPDATE SET
 			state = EXCLUDED.state,
 			local_order_id = EXCLUDED.local_order_id,
 			hold_outcome = EXCLUDED.hold_outcome,
 			hold_settled_at = EXCLUDED.hold_settled_at,
+			pending_shipment_ref = EXCLUDED.pending_shipment_ref,
+			pending_package_count = EXCLUDED.pending_package_count,
+			pending_shipment_noted_at = EXCLUDED.pending_shipment_noted_at,
 			aggregate_version = network_orders.aggregate_version + 1
 		WHERE network_orders.aggregate_version = $10 OR NOT $11
 		RETURNING aggregate_version
@@ -133,6 +147,7 @@ func (r *NetworkOrderRepo) writeOrder(ctx context.Context, tx pgx.Tx, o *network
 		string(o.NetworkRef()), string(o.SiteId()), o.RequiredShipBy(), o.AcknowledgeBy(),
 		string(o.State()), localOrderId, o.ReceivedAt(), holdOutcome, holdSettledAt,
 		o.Version(), o.LoadedFromStorage(),
+		pendingRef, pendingCount, pendingNotedAt,
 	).Scan(&rowVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The WHERE rejected the update: the stored row moved on to a
@@ -153,7 +168,8 @@ func (r *NetworkOrderRepo) writeOrder(ctx context.Context, tx pgx.Tx, o *network
 func (r *NetworkOrderRepo) FindByRef(ctx context.Context, ref shared.NetworkRef) (*networkorder.NetworkOrder, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT site_id, required_ship_by, acknowledge_by, state, local_order_id, received_at,
-		       hold_outcome, hold_settled_at, aggregate_version
+		       hold_outcome, hold_settled_at, aggregate_version,
+		       pending_shipment_ref, pending_package_count, pending_shipment_noted_at
 		FROM network_orders WHERE network_ref = $1
 	`, string(ref))
 
@@ -206,9 +222,12 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 		holdOutcomeRaw  *string
 		holdSettledAt   *time.Time
 		version         int
+		pendingRef      *string
+		pendingCount    *int
+		pendingNotedAt  *time.Time
 	)
 	if err := row.Scan(&siteId, &requiredShipBy, &acknowledgeBy, &stateRaw, &localOrderIdRaw, &receivedAt,
-		&holdOutcomeRaw, &holdSettledAt, &version); err != nil {
+		&holdOutcomeRaw, &holdSettledAt, &version, &pendingRef, &pendingCount, &pendingNotedAt); err != nil {
 		return nil, err
 	}
 
@@ -249,6 +268,11 @@ func (r *NetworkOrderRepo) scanOrder(ctx context.Context, ref shared.NetworkRef,
 			settledAt = *holdSettledAt
 		}
 		o.RestoreHold(outcome, settledAt)
+	}
+	if pendingRef != nil && pendingCount != nil && pendingNotedAt != nil {
+		o.RestorePendingShipment(networkorder.PendingShipment{
+			ShipmentRef: *pendingRef, PackageCount: *pendingCount, NotedAt: *pendingNotedAt,
+		})
 	}
 	return o, nil
 }

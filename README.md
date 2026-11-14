@@ -301,6 +301,7 @@ NetworkOrder      networkRef, siteId, requiredShipBy, acknowledgeBy, lines,
                   invariant: acknowledged in full or rejected in full
                   localOrderId = the order-management hold, recorded at raise;
                   holdOutcome = CANCELLED | ALREADY_RELEASED, unset while open
+                  pendingShipment = a shipment that left while SUBMITTED, confirmed once ACKNOWLEDGED
 
 CapabilityOffer   (sku, siteId) -> advertisedQuantity + basis + computedAt
                   PHYSICAL | THROUGHPUT_CONSTRAINED
