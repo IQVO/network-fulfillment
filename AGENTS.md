@@ -16,16 +16,16 @@ ADR index: `docs/adr/README.md`. ddd-crew artifact pack: `docs/docs/ddd/`.
 
 ## Current state
 
-Built: `NetworkOrder` aggregate, ACL boundary, use cases
-`ReceiveNetworkDemand` / `SweepAcknowledgementDeadlines` /
-`RejectOverdueOrders` / `ReconcileSubmittedOrders` (SUBMITTED state,
-ADR 0001 §5) / `ConfirmNetworkOrderShipment` (`ShipmentConfirmed` consumer; REST is the operator fallback, ADR 0014),
-in-memory and Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to
-boot, never a silent fallback), stub gateway (the default) and the live
-demand-loop gateway for the retail network's Vendor API (ADR 0026:
-`NETWORK_MODE=live` with `NETWORK_BASE_URL` and `NETWORK_VENDOR_ID`; node map,
-submission ledger and labels in migration 0006;
-the supply loop of ADR 0027 is built: `DeclareNodeProfiles` and `FeedInventory`),
+Built: `NetworkOrder` aggregate, ACL boundary, use cases `ReceiveNetworkDemand` /
+`SweepAcknowledgementDeadlines` / `RejectOverdueOrders` / `ReconcileSubmittedOrders` (SUBMITTED
+state, ADR 0001 §5) / `ConfirmNetworkOrderShipment` (`ShipmentConfirmed` consumer; REST is the
+operator fallback, ADR 0014) / `DeferShipmentConfirmation` + `ConfirmPendingShipments` (a shipment
+that arrives before the acknowledgement is noted on the order and confirmed once ACKNOWLEDGED, ADR
+0014 D7), in-memory and Postgres repos (`DATABASE_URL` set means Postgres or REFUSE to boot, never a
+silent fallback), stub gateway (the default) and the live demand-loop gateway for the retail
+network's Vendor API (ADR 0026: `NETWORK_MODE=live` with `NETWORK_BASE_URL` and `NETWORK_VENDOR_ID`;
+node map, submission ledger and labels in migration 0006; the supply loop of ADR 0027 is built:
+`DeclareNodeProfiles` and `FeedInventory`),
 poller (inbound leg), READ-ONLY REST plus the one explicit write endpoint above, CloudEvents
 Kafka publishers + outbox, analytics projector, MCP adapter, `web/` remote,
 Helm chart. Also built (ADR 0001 §8): the `CapabilityOffer` aggregate and

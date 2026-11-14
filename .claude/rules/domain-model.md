@@ -43,6 +43,9 @@ with the code — never describe a planned concept as if it exists.
     and only once (`ErrLocalOrderAlreadyLinked`).
   - `ConfirmShipment` only from `ACKNOWLEDGED`
     (`ErrConfirmBeforeAcknowledge`); `ConfirmNetworkOrderShipment` calls it.
+  - A shipment that arrives while `SUBMITTED` is kept on the order (`pending_shipment.go`, ADR 0014 D7):
+    `NoteShipmentBeforeAcknowledge` only in `SUBMITTED` (else `ErrConfirmBeforeAcknowledge`), the first
+    one wins; `ConfirmShipment` clears it, `DropPendingShipment` clears it without confirming.
   - The hold on the local order is tracked in `hold.go` (`RecordHold`,
     `SettleHold`, `HoldOrphaned(now, grace)`).
   - `AcknowledgementOverdue(now)` — still `NEW` and past `acknowledgeBy`.
@@ -77,6 +80,10 @@ Seven, published through `ports.EventPublisher`: `NetworkOrderReceived`,
   it and raises `NetworkOrderShipmentConfirmed`. Driven by outbound-shipping's
   `ShipmentConfirmed` consumer (primary); the REST endpoint is the operator
   fallback (ADR 0014 addendum).
+- `DeferShipmentConfirmation` — the consumer's fallback when the order is still `SUBMITTED`: records the
+  shipment on the order instead of dead-lettering it (ADR 0014 D7).
+- `ConfirmPendingShipments` — a `POLL_INTERVAL` ticker: confirms a recorded shipment once the order is
+  `ACKNOWLEDGED`, drops it for a `CONFIRMED` or `REJECTED` order.
 - `SweepOrphanedHolds` — frees order-management holds nobody decided (ADR 0024).
 - `RecomputeCapabilityOffers` — recomputes and persists the `CapabilityOffer`s
   on a schedule (ADR 0001 §8); `FeedInventory` sends them to the network, one
