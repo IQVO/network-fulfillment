@@ -109,6 +109,12 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 		Confirmations: postgres.NewShipmentConfirmationLog(pool),
 	}
 
+	deferShipment := &usecases.DeferShipmentConfirmation{
+		Orders:     orders,
+		Clock:      fixedClock{time.Date(2026, 11, 6, 16, 5, 0, 0, time.UTC)},
+		UnitOfWork: postgres.NewUnitOfWork(pool),
+	}
+
 	topic := fmt.Sprintf("warehouse.outbound-shipping.events.itest-%d", time.Now().UnixNano())
 	createTopic(t, ctx, brokers, topic)
 	createTopic(t, ctx, brokers, topic+".dlq")
@@ -132,7 +138,7 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 	runCtx, runCancel := context.WithCancel(ctx)
 	consumer := inboundkafka.NewShipmentConfirmedConsumer(brokers, topic,
 		fmt.Sprintf("nf-shipment-confirmed-itest-%d", time.Now().UnixNano()),
-		orders, confirm, nil)
+		orders, confirm, deferShipment, nil)
 	errCh := make(chan error, 1)
 	go func() { errCh <- consumer.Run(runCtx) }()
 

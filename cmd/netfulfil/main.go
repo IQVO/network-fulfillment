@@ -120,6 +120,7 @@ func run(ctx context.Context) int {
 
 	receive, sweep, rejectOverdue := wireUseCases(in.orders, in.gateway, planner, in.translation, eventPublisher, in.pool)
 	reconcile := wireReconcile(in.orders, in.gateway, planner, eventPublisher, in.pool)
+	confirmPending := wireConfirmPending(in.orders, confirmShipment, in.pool, logger)
 	orphanHolds := wireOrphanHoldSweep(in.orders, planner, eventPublisher, in.pool, logger)
 	profiles, inventory := wireSupplyLoop(logger, in)
 
@@ -147,7 +148,7 @@ func run(ctx context.Context) int {
 	// runs in EVERY mode — the topic is a fleet integration topic, not a
 	// network-adapter leg — stopped before the pool closes like the loops.
 	shipmentLoop, stopShipmentLoop := startShipmentConfirmedLoop(ctx, stop,
-		outboundShippingConsumerGroup(os.Getenv), in.orders, confirmShipment, cfg.kafkaBrokers, logger)
+		outboundShippingConsumerGroup(os.Getenv), in.orders, confirmShipment, wireDeferShipment(in, logger), cfg.kafkaBrokers, logger)
 	defer shipmentLoop.stop(stopShipmentLoop, inboundLoopStopBudget)
 
 	// The inbound loop (ADR 0028): live mode only, stopped before the pool closes.
@@ -160,7 +161,7 @@ func run(ctx context.Context) int {
 
 	// The node profile worker (ADR 0027) and the inventory feed worker (part 2),
 	// also live mode only, run inside serve with the poller and the sweeps.
-	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, profiles, inventory, inbound, relay, readiness, in.recompute, in.capDone)
+	code := serve(ctx, logger, newHTTPServer(api), sweep, rejectOverdue, orphanHolds, reconcile, confirmPending, profiles, inventory, inbound, relay, readiness, in.recompute, in.capDone)
 	if loop.failed() && code == 0 {
 		code = 1 // a dead receipt consumer is a failure, whatever the signal said
 	}
