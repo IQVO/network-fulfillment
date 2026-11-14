@@ -72,6 +72,7 @@ why it is not a state.
 | A hold has at most one outcome, from a closed vocabulary, and needs a hold | `SettleHold` → `ErrNoHold`, `ErrUnknownHoldOutcome`, `ErrHoldAlreadySettled`; DB `CHECK`s `hold_outcome_vocabulary`, `hold_outcome_has_settled_at`, `hold_outcome_requires_hold` |
 | A hold is orphaned only past `acknowledgeBy` plus the grace, and only for `NEW` or `REJECTED` | `HoldOrphaned(now, grace)` (a query, the sweep's rule) |
 | No shipment confirmation before acknowledgement | `ConfirmShipment` → `ErrConfirmBeforeAcknowledge` |
+| A shipment that leaves before the acknowledgement is recorded, once, and only while `SUBMITTED` | `NoteShipmentBeforeAcknowledge` → `ErrConfirmBeforeAcknowledge` in any other state, `ErrEmptyShipmentRef` for a blank reference; the first shipment wins (the same or another ref is a no-op); `ConfirmShipment` clears it, `DropPendingShipment` clears it without confirming; DB `CHECK`s `pending_shipment_all_or_none`, `pending_package_count_not_negative`, `pending_shipment_ref_not_blank` (migration 0015, ADR 0014 addendum D7) |
 | `acknowledgeBy = receivedAt + 24h`, fixed at receipt | `Receive`/`ReceiveUntranslatable` compute it from `AcknowledgementWindow`; it is persisted and never recomputed |
 | The line set cannot be mutated from outside | `Lines()` returns a copy |
 | No network identifier crosses to `order-management` | `SKUQuantities()` returns only `map[SKU]int` |

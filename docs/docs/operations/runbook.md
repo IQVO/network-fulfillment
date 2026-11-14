@@ -229,8 +229,12 @@ pile up on the broker; they hold no partitions and can be deleted.
 - **`ShipmentConfirmed` consumer** (`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`):
   a message that is not a CloudEvent, or whose data breaks outbound-shipping's contract,
   goes to `warehouse.outbound-shipping.events.dlq` at once; any other handler error
-  (an order not yet `ACKNOWLEDGED`, a failed label request or a database error) is retried
-  3 times and then goes there too. The offset is committed either way. The way to close a
+  (an order that is `NEW` or `REJECTED`, a failed label request or a database error) is retried
+  3 times and then goes there too. A load that departs while its order is still `SUBMITTED`
+  (the network has not settled the acknowledgement) is not an error: the consumer records the
+  shipment on the order, logs `shipment confirmed before the order was acknowledged; deferred`
+  and commits, and `ConfirmPendingShipments` confirms it once the order is `ACKNOWLEDGED` (ADR 0014
+  addendum D7). The offset is committed either way. The way to close a
   confirmation that was dead-lettered is the REST route (see
   [Confirm a shipment](#confirm-a-shipment)). If the consumer stops on its own the process
   exits with code 1.
@@ -307,6 +311,7 @@ for the same `networkRef` may already have been delivered.
 | `RecomputeCapabilityOffers` | every `RECOMPUTE_INTERVAL`, only when enabled | upserts one `capability_offers` row per known SKU. |
 | `DeclareNodeProfiles` | live mode only: immediately at start, then every `NETWORK_PROFILE_INTERVAL` (default `5m`; `0` disables) | derives each site's operational profile from the schedule, cycle-time and capacity caches and declares it to the network when its content changed (ADR 0027). See [the node profile](#the-node-profile). |
 | `FeedInventory` | live mode only: immediately at start, then every `NETWORK_INVENTORY_INTERVAL` (default `5m`; `0` disables) | plans one inventory feed per site from the persisted capability offers and the product dictionary and sends it when its content changed (an unchanged one at most hourly) (ADR 0027 part 2). See [the inventory feed](#the-inventory-feed). |
+| `ConfirmPendingShipments` | every `POLL_INTERVAL`, own ticker, always on | confirms the shipments that arrived while their order was still `SUBMITTED`, once it is `ACKNOWLEDGED`; drops the ones whose order is already `CONFIRMED` or `REJECTED`; skips a `SUBMITTED` order. Logs `pending shipments settled` (Info) when it confirmed, dropped or failed any (ADR 0014 addendum D7). |
 | `ShipmentConfirmed` consumer | continuous, every mode | confirms the network orders of a departed load through `ConfirmNetworkOrderShipment` (ADR 0014 addendum). See [Dead letters](#dead-letters). |
 | `IntakeInboundShipments`, `ReturnInboundReceipts` | live mode only: at once, then every `INBOUND_INTAKE_INTERVAL` (default `30s`) | register polled seller shipments as ASNs and report closed receipts to the network (ADR 0028). See [the inbound loop](#the-inbound-loop-adr-0028). |
 | Outbox relay | continuous | see above. |
@@ -365,7 +370,10 @@ curl -i -X POST -H "Idempotency-Key: $(uuidgen)" http://localhost:8000/api/netwo
 
 `204` on success or when the order is already `CONFIRMED`; `409
 confirm-before-acknowledge` unless the order is `ACKNOWLEDGED`; `404` for an
-unknown ref (ADR 0014).
+unknown ref (ADR 0014). A load that departed while the order was still `SUBMITTED`
+needs no manual call: the consumer recorded the shipment and the next
+`ConfirmPendingShipments` pass confirms it once the order is `ACKNOWLEDGED`. The
+route does not record a shipment itself, so on a `SUBMITTED` order it still answers 409.
 
 ### Change the product dictionary, the stub demand or the node definitions
 

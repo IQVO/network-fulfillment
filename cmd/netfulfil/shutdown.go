@@ -41,6 +41,7 @@ func serve(
 	rejectOverdue *usecases.RejectOverdueOrders,
 	orphanHolds *usecases.SweepOrphanedHolds,
 	reconcile *usecases.ReconcileSubmittedOrders,
+	confirmPending *usecases.ConfirmPendingShipments,
 	profiles *profileWorker,
 	inventory *inventoryWorker,
 	inbound *poller.Poller,
@@ -62,6 +63,7 @@ func serve(
 		go runSweepOrphanedHolds(ctx, orphanHolds, logger)
 	}
 	go runReconcile(ctx, reconcile, logger)
+	go runConfirmPending(ctx, confirmPending, logger)
 	go runRecompute(ctx, recompute, logger)
 
 	pollerDone := startPoller(ctx, inbound)

@@ -139,8 +139,12 @@ func newShipmentConsumerFixture(t *testing.T) *shipmentConsumerFixture {
 	f.consumer = &ShipmentConfirmedConsumer{
 		Orders:  f.orders,
 		Confirm: f.confirm,
-		Logger:  slog.New(slog.NewTextHandler(f.logs, nil)),
-		Now:     func() time.Time { return time.Date(2026, 11, 6, 16, 5, 0, 0, time.UTC) },
+		Defer: &usecases.DeferShipmentConfirmation{
+			Orders: f.orders,
+			Clock:  fixedTime{time.Date(2026, 11, 6, 16, 5, 0, 0, time.UTC)},
+		},
+		Logger: slog.New(slog.NewTextHandler(f.logs, nil)),
+		Now:    func() time.Time { return time.Date(2026, 11, 6, 16, 5, 0, 0, time.UTC) },
 	}
 	return f
 }

@@ -144,3 +144,62 @@ so the real count flows the day the producer ships it — until then the
 single-package behavior stands, and the spike's evidence (one package per
 order is structural today) keeps that honest.
 
+
+## Addendum D7 (2026-11-14): a confirmation that arrives before the acknowledgement is deferred, not dead-lettered
+
+**The defect.** The Primary path above says the consumer "confirms through the
+ONE use case". That holds only for an order that is `ACKNOWLEDGED`.
+`ConfirmNetworkOrderShipment` refuses any other state
+(`ErrConfirmBeforeAcknowledge`), and an order stays `SUBMITTED` until
+`ReconcileSubmittedOrders` hears the network's verdict, inside a 24 h
+acknowledgement window. A load can legitimately depart in that window. The
+consumer retried the confirmation three times, dead-lettered the message to
+`warehouse.outbound-shipping.events.dlq`, committed past it, and the
+confirmation was lost until an operator replayed it with the manual POST. The
+DLQ is for messages that break the contract, not for this race.
+
+**Decision.** The shipment is recorded on the order and confirmed once the order
+is `ACKNOWLEDGED`. No new topic, no new environment variable, no event schema
+change.
+
+1. **The order carries one pending shipment.** `NetworkOrder.pendingShipment`
+   is the shipment reference (the load id), the package count (`0` when the
+   event carried none) and when it was noted. `NoteShipmentBeforeAcknowledge`
+   accepts it only in `SUBMITTED`; the first shipment noted wins (the same ref
+   again, or a different one while one is pending, is a no-op success).
+   `ConfirmShipment` clears it, and `DropPendingShipment` clears it without
+   confirming. It is persisted by migration 0015 (three nullable columns on
+   `network_orders`, a `CHECK` that they are all `NULL` or all set, and a
+   partial index on the rows that carry one).
+2. **The consumer defers.** When `ExecuteForShipment` fails with
+   `ErrConfirmBeforeAcknowledge`, the consumer calls
+   `DeferShipmentConfirmation`. For a `SUBMITTED` order that records the
+   shipment, the consumer logs `shipment confirmed before the order was
+   acknowledged; deferred` at Info (`ce_id`, `load_id`, `order_id`), goes on to
+   the next order of the load, and the offset is committed with no dead letter.
+   For any other state, deferring returns `ErrConfirmBeforeAcknowledge`
+   unchanged, so `NEW` and `REJECTED` keep the retry-then-DLQ path: a shipped
+   order the network never took is a genuine anomaly for an operator.
+3. **A ticker settles it.** `ConfirmPendingShipments` (`runConfirmPending`, every
+   `POLL_INTERVAL` like `runReconcile`, always on) lists the orders that carry a
+   shipment and, per order: `ACKNOWLEDGED` is confirmed through the same
+   `ExecuteForShipment` (so the `(shipment reference, order id)` ledger still
+   keeps it to one label request, one network submission and one
+   `NetworkOrderShipmentConfirmed`); `SUBMITTED` is skipped; `CONFIRMED` or
+   `REJECTED` has its shipment dropped. One order's failure is logged and
+   counted, and never aborts the pass.
+4. **The manual endpoint is unchanged.** `POST .../shipment-confirmation` on a
+   `SUBMITTED` order still answers `409 confirm-before-acknowledge`; it records
+   nothing.
+
+**Why not the alternatives.** Retrying longer in the consumer would hold the
+partition (and every load behind it) for up to 24 h. Letting the manual path
+confirm a `SUBMITTED` order would tell the network a shipment left for an order
+it has not accepted yet, which is what `ErrConfirmBeforeAcknowledge` exists to
+prevent.
+
+**Consequences.** A shipment noted for an order that is later `REJECTED` is
+dropped, not confirmed. A second load noted while one is pending is logged and
+ignored: an order is confirmed once, by whichever shipment is noted first.
+Rolling back migration 0015 drops any shipment still pending; the
+operator replays it with the manual POST once the order is `ACKNOWLEDGED`.

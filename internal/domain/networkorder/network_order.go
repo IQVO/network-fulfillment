@@ -153,6 +153,11 @@ type NetworkOrder struct {
 	holdOutcome   HoldOutcome
 	holdSettledAt time.Time
 
+	// pendingShipment is a shipment confirmation that arrived while the order
+	// was still SUBMITTED, kept until the order is ACKNOWLEDGED and it can be
+	// confirmed (ADR 0014 addendum D7, see pending_shipment.go). Nil when none.
+	pendingShipment *PendingShipment
+
 	// version is the optimistic-locking version (see version.go):
 	// loaded by the repository, checked by its conditional UPDATE.
 	version int
@@ -343,12 +348,14 @@ func (o *NetworkOrder) LinkLocalOrder(id shared.LocalOrderId) error {
 }
 
 // ConfirmShipment records that the shipment has been confirmed to the
-// network, closing the order.
+// network, closing the order. A shipment noted before the acknowledgement
+// (NoteShipmentBeforeAcknowledge) has now been used and is cleared.
 func (o *NetworkOrder) ConfirmShipment() error {
 	if err := o.CheckConfirmable(); err != nil {
 		return err
 	}
 	o.state = StateConfirmed
+	o.pendingShipment = nil
 	return nil
 }
 

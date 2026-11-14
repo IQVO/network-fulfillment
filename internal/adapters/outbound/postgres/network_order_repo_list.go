@@ -13,12 +13,13 @@ import (
 //
 // Refs are collected and the rows closed before any load, because each load
 // runs its own queries on the same pool and holding these rows open across
-// them can exhaust a small pool under concurrency. A ref whose order vanished
+// them can exhaust a small pool under concurrency. args bind the query's
+// placeholders. A ref whose order vanished
 // between the two queries is skipped, not an error: a concurrent answer or
 // settle simply removes the candidate the sweep would have skipped anyway.
 // keep is then consulted for each order that did load.
-func (r *NetworkOrderRepo) listOrders(ctx context.Context, query string, keep func(*networkorder.NetworkOrder) bool) ([]*networkorder.NetworkOrder, error) {
-	rows, err := r.pool.Query(ctx, query)
+func (r *NetworkOrderRepo) listOrders(ctx context.Context, query string, keep func(*networkorder.NetworkOrder) bool, args ...any) ([]*networkorder.NetworkOrder, error) {
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -108,4 +109,22 @@ func (r *NetworkOrderRepo) ListOpenHolds(ctx context.Context) ([]*networkorder.N
 		  AND state IN ('NEW', 'REJECTED')
 		ORDER BY acknowledge_by, network_ref
 	`, (*networkorder.NetworkOrder).HoldOpen)
+}
+
+// ListPendingShipments returns the candidates of ConfirmPendingShipments
+// (ADR 0014 addendum D7): the orders carrying a shipment noted before their
+// acknowledgement, at most limit. Like ListOpenHolds it narrows and never
+// decides: what to do with an order of each state is the use case's rule.
+// Orders no longer SUBMITTED come first (the pass skips a SUBMITTED one, so it
+// must not crowd out an order that can be settled), then the oldest noted
+// shipment, then the ref. Served by the partial index
+// network_orders_pending_shipments; the set is tiny, so the sort is free.
+func (r *NetworkOrderRepo) ListPendingShipments(ctx context.Context, limit int) ([]*networkorder.NetworkOrder, error) {
+	return r.listOrders(ctx, `
+		SELECT network_ref
+		FROM network_orders
+		WHERE pending_shipment_ref IS NOT NULL
+		ORDER BY (state = 'SUBMITTED'), pending_shipment_noted_at, network_ref
+		LIMIT $1
+	`, every, max(limit, 0))
 }

@@ -106,18 +106,83 @@ Feature: Shipment confirmation by event, documented rules
 
   # ---- the order of the steps and the two triggers --------------------------------
 
+  # ADR 0014 addendum D7. A load can depart while the network has not settled the
+  # acknowledgement: for a SUBMITTED order that is a race, not a broken contract, so
+  # the consumer records the shipment on the order and commits the message (no dead
+  # letter); ConfirmPendingShipments confirms it once the order is ACKNOWLEDGED.
   @bdd
-  Scenario: A load carrying an order not yet acknowledged is refused and nothing is sent
+  Scenario: A load carrying an order not yet acknowledged is deferred, and nothing is sent
     Given a network order "po-1" in state "SUBMITTED"
     When outbound-shipping confirms load "load-9" carrying:
       | order              | packages |
-      | held order of po-1 |          |
-    Then the shipment consumer refused the message as "before acknowledgement"
+      | held order of po-1 | 3        |
+    Then the shipment consumer handled the message
+    And network order "po-1" is waiting for the shipment of load "load-9"
     And the network was asked for labels 0 times for "po-1"
     And the network was asked to confirm shipment of 0 times for "po-1"
     And the domain event "NetworkOrderShipmentConfirmed" was not published for "po-1"
     When I request network order "po-1"
     Then the network order state is "SUBMITTED"
+
+  @bdd
+  Scenario: A deferred shipment is confirmed once, after the acknowledgement, with its package count
+    Given a network order "po-1" in state "SUBMITTED"
+    When outbound-shipping confirms load "load-9" carrying:
+      | order              | packages |
+      | held order of po-1 | 3        |
+    And pending shipment confirmations run
+    Then the network was asked for labels 0 times for "po-1"
+    When the acknowledgement reconciliation runs
+    And pending shipment confirmations run
+    And pending shipment confirmations run
+    Then the network accepted 1 shipment confirmation for "po-1"
+    And the network was asked for labels 1 time for "po-1"
+    And the network was asked for 3 labels for "po-1"
+    And the domain event "NetworkOrderShipmentConfirmed" was published 1 time for "po-1"
+    And network order "po-1" is waiting for no shipment
+    When I request network order "po-1"
+    Then the network order state is "CONFIRMED"
+
+  @bdd
+  Scenario: The same early event delivered again changes nothing, and the order is confirmed once
+    Given a network order "po-1" in state "SUBMITTED"
+    When outbound-shipping confirms load "load-9" carrying:
+      | order              | packages |
+      | held order of po-1 |          |
+    And that shipment event is delivered again
+    Then the shipment consumer handled the message
+    When the acknowledgement reconciliation runs
+    And pending shipment confirmations run
+    Then the network accepted 1 shipment confirmation for "po-1"
+    And the domain event "NetworkOrderShipmentConfirmed" was published 1 time for "po-1"
+
+  @bdd
+  Scenario: A deferred shipment of an order the network then refuses is dropped, never confirmed
+    Given a network order "po-1" in state "SUBMITTED"
+    And the network will refuse the submission for "po-1"
+    When outbound-shipping confirms load "load-9" carrying:
+      | order              | packages |
+      | held order of po-1 |          |
+    And the acknowledgement reconciliation runs
+    And pending shipment confirmations run
+    Then network order "po-1" is waiting for no shipment
+    And the network was asked to confirm shipment of 0 times for "po-1"
+    And the domain event "NetworkOrderShipmentConfirmed" was not published for "po-1"
+    When I request network order "po-1"
+    Then the network order state is "REJECTED"
+
+  # A shipped order the network never took is a genuine anomaly for an operator:
+  # the confirm error stands, so the consumer retries and then dead-letters.
+  @bdd
+  Scenario: A load carrying an order the network refused is still refused
+    Given a network order "po-1" in state "REJECTED"
+    When outbound-shipping confirms load "load-9" carrying:
+      | order              | packages |
+      | held order of po-1 |          |
+    Then the shipment consumer refused the message as "before acknowledgement"
+    And network order "po-1" is waiting for no shipment
+    And the network was asked for labels 0 times for "po-1"
+    And the domain event "NetworkOrderShipmentConfirmed" was not published for "po-1"
 
   @bdd
   Scenario: A label that cannot be issued leaves the order ACKNOWLEDGED and the event retryable

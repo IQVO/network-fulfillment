@@ -66,7 +66,7 @@ inside the diagram for `{id}` / `{sku}`.
 | `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | always on | SKU skipped for that recompute pass |
 | `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | always on | bad message logged and skipped, no DLQ |
 | `wes-work-planning` | upstream | Kafka, CloudEvents | `PathCapacityChanged` on `warehouse.work-planning.events` | always on | bad message logged and skipped, no DLQ |
-| `outbound-shipping` | upstream | Kafka, CloudEvents | `ShipmentConfirmed` on `warehouse.outbound-shipping.events` (ADR 0014 addendum) | always on, every mode | handler retried, then `warehouse.outbound-shipping.events.dlq` |
+| `outbound-shipping` | upstream | Kafka, CloudEvents | `ShipmentConfirmed` on `warehouse.outbound-shipping.events` (ADR 0014 addendum) | always on, every mode | handler retried, then `warehouse.outbound-shipping.events.dlq`; an order still `SUBMITTED` is not an error: the shipment is recorded on the order and confirmed once it is `ACKNOWLEDGED` (ADR 0014 addendum D7) |
 | any subscriber | downstream | Kafka, CloudEvents | 7 event types on `warehouse.network-fulfillment.events` | always on (outbox relay) | outbox keeps unsent rows |
 | own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | always on | retry 3 times, then `.dlq` |
 | `warehouse-console` (via `web/` remote) | downstream | REST | `GET /network-orders`, `GET /inbound-status` | on | n/a |

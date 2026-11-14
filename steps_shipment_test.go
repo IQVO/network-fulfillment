@@ -16,6 +16,7 @@ import (
 	inboundkafka "github.com/claudioed/network-fulfillment/internal/adapters/inbound/kafka"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
+	"github.com/claudioed/network-fulfillment/internal/application/usecases"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -52,23 +53,28 @@ type shipmentWorld struct {
 
 	labels   *labelGateway
 	consumer *inboundkafka.ShipmentConfirmedConsumer
-	lastRaw  []byte
-	lastKey  string
-	lastErr  error
-	handled  bool
-	seq      int
+	// confirmPending settles what the consumer deferred (ADR 0014 addendum D7).
+	confirmPending *usecases.ConfirmPendingShipments
+	lastRaw        []byte
+	lastKey        string
+	lastErr        error
+	handled        bool
+	seq            int
 }
 
 func (s *shipmentWorld) reset() {
 	w := s.w
 	s.labels = &labelGateway{NetworkGateway: w.gateway, asks: map[shared.NetworkRef][]int{}}
 	w.confirm.Gateway = s.labels
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	s.consumer = &inboundkafka.ShipmentConfirmedConsumer{
 		Orders:  w.orders,
 		Confirm: w.confirm,
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Defer:   &usecases.DeferShipmentConfirmation{Orders: w.orders, Clock: w.clock, Logger: logger},
+		Logger:  logger,
 		Now:     w.clock.Now,
 	}
+	s.confirmPending = &usecases.ConfirmPendingShipments{Orders: w.orders, Confirm: w.confirm, Logger: logger}
 	s.lastRaw, s.lastKey, s.lastErr, s.handled = nil, "", nil, false
 	s.seq = 0
 }
@@ -250,4 +256,5 @@ func (w *world) registerShipmentSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the shipment consumer refused the message as "([^"]*)"$`, s.refusedWith)
 	sc.Step(`^the network was asked for labels (\d+) times? for "([^"]*)"$`, func(times int, ref string) error { return s.labelsAsked(ref, times) })
 	sc.Step(`^the network was asked for (\d+) labels? for "([^"]*)"$`, func(count int, ref string) error { return s.lastLabelCount(ref, count) })
+	s.registerDeferredSteps(sc)
 }

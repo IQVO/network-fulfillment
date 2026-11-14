@@ -44,6 +44,9 @@ func (r *failingRepo) ListAll(context.Context) ([]*networkorder.NetworkOrder, er
 func (r *failingRepo) ListOpenHolds(context.Context) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.listErr
 }
+func (r *failingRepo) ListPendingShipments(context.Context, int) ([]*networkorder.NetworkOrder, error) {
+	return nil, r.listErr
+}
 
 func TestReceive_RepositoryLookupFailureAborts(t *testing.T) {
 	f := newFixture(true)

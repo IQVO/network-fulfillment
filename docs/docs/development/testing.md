@@ -172,6 +172,7 @@ that (`TestPostgresIntegrationTestsUseTestcontainers`,
 | `internal/adapters/outbound/postgres/integration_test.go` | shared fixtures, migrations against a real Postgres |
 | `.../postgres/network_order_repo_integration_test.go` | the order repository |
 | `.../postgres/hold_integration_test.go` | the hold (ADR 0024): `TestNetworkOrderRepo_SavesEveryStateTheAggregateCanReach` (a `REJECTED` order that keeps its id is saved, which the dropped CHECK used to refuse), `TestNetworkOrderRepo_HoldOutcomeRoundTrips`, `TestNetworkOrderRepo_SettlingAnOpenHoldIsPersisted`, `TestNetworkOrderRepo_ListOpenHoldsReturnsOnlyOpenHoldsOfDecidedOrOverdueCandidates` |
+| `.../postgres/pending_shipment_integration_test.go` | the pending shipment (ADR 0014 addendum D7, migration `0015`): `TestNetworkOrderRepo_PendingShipmentRoundTripsAndIsHeldByTheSchema` (the three columns round-trip and are cleared by the confirmation, a stale writer still gets `ErrVersionConflict`, the `CHECK`s refuse a half-written shipment), `TestNetworkOrderRepo_ListPendingShipments` (order, limit) |
 | `.../postgres/migration_0005_integration_test.go` | `TestMigration0005_UpDownUp`: migration `0005` up, down (clears the ids the restored CHECK would refuse, `SUBMITTED` data survives) and up again, on a bare Postgres |
 | `.../postgres/capability_offer_repo_integration_test.go` | the offer repository |
 | `.../postgres/outbox_integration_test.go` | outbox write and relay |

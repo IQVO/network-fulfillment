@@ -13,6 +13,7 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 	"github.com/claudioed/network-fulfillment/internal/application/usecases"
+	"github.com/claudioed/network-fulfillment/internal/domain/networkorder"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
@@ -43,15 +44,26 @@ const TypeShipmentConfirmed = "com.warehouse.wms.outbound-shipping.outboundload.
 // (shipment-ref, order-id) idempotency key — load id plus order id — which
 // subsumes the CloudEvents id as the dedupe key (a replayed event re-runs
 // the same key, a re-published one carries new ids but the same load).
-// Like the receipt consumer, a message that is not a CloudEvent, or whose
-// data breaks outbound-shipping's contract, is dead-lettered to
-// topic+".dlq" so one poison message never blocks the partition; the
+// A load can depart while its order is still SUBMITTED (the network has
+// not settled the acknowledgement yet): that is a race, not a broken
+// contract, so the shipment is recorded on the order through Defer and
+// confirmed once the order is ACKNOWLEDGED (ADR 0014 addendum D7) — the
+// message is committed, never dead-lettered. For an order in any other state
+// the confirm error stands (NEW or REJECTED is a shipped order the network
+// never took, an anomaly for an operator). Like the receipt consumer, a
+// message that is not a CloudEvent, or whose data breaks outbound-shipping's
+// contract, is dead-lettered to topic+".dlq" so one poison message never
+// blocks the partition, and so is a confirmation that keeps failing; the
 // manual endpoint is the operator's way to close the gap a dead-lettered
 // confirmation left.
 type ShipmentConfirmedConsumer struct {
-	Reader    *kafkago.Reader
-	Orders    ports.NetworkOrderRepo
-	Confirm   *usecases.ConfirmNetworkOrderShipment
+	Reader  *kafkago.Reader
+	Orders  ports.NetworkOrderRepo
+	Confirm *usecases.ConfirmNetworkOrderShipment
+	// Defer records a shipment that arrived before its order was ACKNOWLEDGED.
+	// The composition root sets it; without one such a shipment fails like any
+	// other confirmation error.
+	Defer     *usecases.DeferShipmentConfirmation
 	Logger    *slog.Logger
 	Now       func() time.Time
 	dlqWriter *kafkago.Writer
@@ -66,7 +78,13 @@ const shipmentConfirmedReadMaxWait = 500 * time.Millisecond
 // groupID. A new group starts at the earliest offset: a load that departed
 // while the service was down must still confirm its orders; every
 // redelivered event is a no-op through the idempotency key.
-func NewShipmentConfirmedConsumer(brokers []string, topic, groupID string, orders ports.NetworkOrderRepo, confirm *usecases.ConfirmNetworkOrderShipment, logger *slog.Logger) *ShipmentConfirmedConsumer {
+func NewShipmentConfirmedConsumer(
+	brokers []string, topic, groupID string,
+	orders ports.NetworkOrderRepo,
+	confirm *usecases.ConfirmNetworkOrderShipment,
+	deferShipment *usecases.DeferShipmentConfirmation,
+	logger *slog.Logger,
+) *ShipmentConfirmedConsumer {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -77,6 +95,7 @@ func NewShipmentConfirmedConsumer(brokers []string, topic, groupID string, order
 		}),
 		Orders:    orders,
 		Confirm:   confirm,
+		Defer:     deferShipment,
 		Logger:    logger,
 		Now:       time.Now,
 		dlqWriter: newDLQWriter(brokers, topic+dlqTopicSuffix),
@@ -187,8 +206,8 @@ func (c *ShipmentConfirmedConsumer) confirm(ctx context.Context, key string, env
 				"ce_id", env.ID(), "load_id", loadId, "order_id", order.OrderId)
 			continue
 		}
-		if _, err := c.Confirm.ExecuteForShipment(ctx, o.NetworkRef(), loadId, order.PackageCount); err != nil {
-			return fmt.Errorf("confirm %s for load %s: %w", o.NetworkRef(), loadId, err)
+		if err := c.confirmOrder(ctx, env, loadId, order.OrderId, o.NetworkRef(), order.PackageCount); err != nil {
+			return err
 		}
 	}
 	if len(d.Orders) == 0 {
@@ -197,4 +216,24 @@ func (c *ShipmentConfirmedConsumer) confirm(ctx context.Context, key string, env
 		c.Logger.Info("shipment-confirmed consumer: ShipmentConfirmed carries no orders", "ce_id", env.ID(), "load_id", loadId)
 	}
 	return nil
+}
+
+// confirmOrder confirms one order of the load. An order still SUBMITTED is
+// not ready to be confirmed yet (ErrConfirmBeforeAcknowledge): the shipment is
+// deferred onto the order and the next order is handled. When deferring is
+// refused too, which is the case for every state but SUBMITTED, its error is
+// returned and the retry-then-dead-letter path applies as it always did.
+func (c *ShipmentConfirmedConsumer) confirmOrder(ctx context.Context, env ce.Event, loadId, orderId string, ref shared.NetworkRef, packageCount int) error {
+	_, err := c.Confirm.ExecuteForShipment(ctx, ref, loadId, packageCount)
+	if err == nil {
+		return nil
+	}
+	if c.Defer != nil && errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge) {
+		if err = c.Defer.Execute(ctx, ref, loadId, packageCount); err == nil {
+			c.Logger.Info("shipment-confirmed consumer: shipment confirmed before the order was acknowledged; deferred",
+				"ce_id", env.ID(), "load_id", loadId, "order_id", orderId)
+			return nil
+		}
+	}
+	return fmt.Errorf("confirm %s for load %s: %w", ref, loadId, err)
 }

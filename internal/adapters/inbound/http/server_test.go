@@ -56,6 +56,9 @@ func (r failingRepo) ListAll(context.Context) ([]*networkorder.NetworkOrder, err
 func (r failingRepo) ListOpenHolds(context.Context) ([]*networkorder.NetworkOrder, error) {
 	return nil, r.err
 }
+func (r failingRepo) ListPendingShipments(context.Context, int) ([]*networkorder.NetworkOrder, error) {
+	return nil, r.err
+}
 
 type testEnv struct {
 	orders  *memory.NetworkOrderRepo

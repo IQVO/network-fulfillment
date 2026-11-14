@@ -111,3 +111,28 @@ func runReconcile(ctx context.Context, reconcile *usecases.ReconcileSubmittedOrd
 		}
 	}
 }
+
+// runConfirmPending drives the pass that confirms the shipments noted before
+// their order was ACKNOWLEDGED (ADR 0014 addendum D7), on POLL_INTERVAL like
+// runReconcile: the reconcile pass is what makes such an order confirmable, so
+// there is nothing to gain by looking faster, and no new knob is added. It is
+// always on. A failed order is counted and tried again on the next tick.
+func runConfirmPending(ctx context.Context, confirmPending *usecases.ConfirmPendingShipments, logger *slog.Logger) {
+	ticker := time.NewTicker(pollInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := confirmPending.Execute(ctx)
+			if err != nil {
+				logger.Error("pending shipment confirmation failed", "err", err)
+				continue
+			}
+			if res.Confirmed > 0 || res.Dropped > 0 || res.Failed > 0 {
+				logger.Info("pending shipments settled", "examined", res.Examined, "confirmed", res.Confirmed, "dropped", res.Dropped, "failed", res.Failed)
+			}
+		}
+	}
+}
