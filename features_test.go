@@ -349,4 +349,6 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w.registerReportSteps(sc)
 	w.registerHardeningSteps(sc)
 	w.registerInboundSteps(sc)
+	w.registerRuleSteps(sc)
+	w.registerSupplySteps(sc)
 }
