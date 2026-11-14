@@ -1,0 +1,1960 @@
+asyncapi: 2.6.0
+
+info:
+  title: inbound-receiving Domain Events
+  version: "1.0.0"
+  contact:
+    name: inbound-receiving maintainers
+    url: https://github.com/IQVO/inbound-receiving
+    email: inbound-receiving@iqvo.example.com
+  license:
+    name: UNLICENSED
+  description: |
+    Event catalog for the **inbound-receiving** bounded context (WMS subdomain):
+    the inbound dock workflow of ASNs, dock appointments and receipts
+    (ADR 0001, ADR 0002).
+
+    **Published.** The `Asn` and `Receipt` aggregates raise eight events,
+    published to `warehouse.inbound-receiving.events` through a
+    **transactional outbox**: the aggregate row and its already-encoded events
+    are written in ONE database transaction and a relay drains them to Kafka
+    (at-least-once; the CloudEvents `id` is stored with the outbox row, so a
+    retry republishes the same `id`). Consumers dedupe on `id`.
+    The four `dockappointment` types (Booked, CheckedIn, Cancelled, Completed)
+    are **RETIRED**: the DockAppointment moved to dock-scheduling (ADR 0019,
+    plan YD-0002), the backfill command that republished them is gone and
+    this service raises none (ADR 0022), so they are no longer declared. Read
+    dock-scheduling's events instead.
+    `ReceiptLineReceived` is the **handover event**: inventory-storage consumes
+    it and books `condition=Good` quantities into stock (ADR 0003); Damaged
+    quantities are recorded here and not booked.
+
+    **Consumed (ADR 0003).** `ProductRegistered` from
+    `warehouse.product-master.events` feeds the `known_skus` local copy
+    (group from env `PRODUCT_CONSUMER_GROUP`); `ProductPackLevelDeclared` and
+    `ProductPackLevelRetired` from the same topic feed the packaging view
+    (group from env `PACKAGING_CONSUMER_GROUP`).
+    `LocationSlotRegistered` and `LocationSlotDecommissioned` from
+    `warehouse.facility.events` feed the `dock_doors` local copy
+    (group from env `DOCK_DOOR_CONSUMER_GROUP`). The three consumers always
+    run: `PRODUCT_MODE` / `DOCK_DOOR_MODE` accept only `kafka` (or unset) and
+    `permissive` / `off` are boot errors, as is an unset group variable.
+    `DockAppointmentBooked` and `DockAppointmentCancelled` from
+    `warehouse.dock-scheduling.events` feed the `appointments` local copy
+    (group from env `DOCK_APPOINTMENT_CONSUMER_GROUP`, ADR 0019), and
+    `DockAppointmentRescheduled` / `DockAppointmentDoorReassigned` keep its
+    door and window current (ADR 0020): inbound appointments only, guarded by
+    dock-scheduling's `version`; applying them publishes nothing. Receipts
+    validate their appointment against that copy and take its door when they
+    open; an open receipt keeps its door.
+
+    **Analytics (ADR 0006).** The eleven events are ALSO written, in the
+    same transaction, to `warehouse.inbound-receiving.analytics` with the same
+    `type` and the same `id` per occurrence, `dataschema`
+    `urn:warehouse:inbound-receiving:analytics:<EventName>:v1` and payloads
+    equal to the integration payloads. Only this service's `inbound-projector`
+    consumes it; it is not an integration contract. The retired
+    `dockappointment` events already on that stream stay projected (ADR 0022).
+
+    **Planned.** warehouse-planning reads appointments from dock-scheduling
+    (companion of plan YD-0002).
+
+    **Envelope (mandatory).** CloudEvents 1.0, structured content mode, Kafka
+    header `content-type: application/cloudevents+json; charset=UTF-8`.
+    Optional W3C trace-context headers (`traceparent`, and `tracestate` /
+    `baggage` when present) carry the trace of the request that wrote the
+    outbox row (ADR 0009); consumers may extract them, and must not require
+    them.
+    `specversion`, `id`, `source` (`/warehouse/inbound-receiving`), `type`,
+    `subject` (the aggregate instance id), `time`, `datacontenttype`
+    (`application/json`) and `dataschema`
+    (`urn:warehouse:inbound-receiving:events:<EventName>:v1`) are all required.
+    `type` = `com.warehouse.wms.inbound-receiving.<entity>.<EventName>` with
+    `<entity>` one of `asn`, `receipt`. Kafka key:
+    `asn_number` for `asn.*` and `receipt.*`. `data` is snake_case, optional fields are omitted when
+    unset, timestamps are RFC 3339 UTC. A breaking payload change is a new
+    `.v2` type, never a mutation.
+
+servers:
+  production:
+    url: "{brokers}"
+    protocol: kafka
+    description: Fleet-shared Kafka broker (host supplied by the deployment environment).
+    variables:
+      brokers:
+        default: "kafka.warehouse-systems.internal:9092"
+
+defaultContentType: application/cloudevents+json
+
+tags:
+  - name: inbound-receiving
+    description: The inbound-receiving bounded context (WMS subdomain).
+  - name: asn
+    description: Events raised by the Asn aggregate.
+  - name: receipt
+    description: Events raised by the Receipt aggregate.
+  - name: consumed
+    description: Events produced by sibling contexts that this service consumes.
+  - name: analytics
+    description: This service's own analytics stream, consumed only by its projector (ADR 0006).
+
+channels:
+  warehouse.inbound-receiving.events:
+    description: |
+      This service's integration topic. Written by the outbox relay; every
+      message carries the CloudEvents content-type header (plus the optional
+      W3C `traceparent` of the writing request). Key = `asn_number`
+      for ASN and receipt events. Dispatch on the full `type`, ignore unknown types, dedupe on
+      `id`. The first consumer is inventory-storage (`ReceiptLineReceived`).
+    subscribe:
+      operationId: receiveInboundReceivingEvents
+      summary: Receive ASN and receipt events.
+      description: |
+        Subscribe to the inbound dock workflow. Route on the full `type`
+        (`com.warehouse.wms.inbound-receiving.<entity>.<EventName>`).
+      tags:
+        - name: asn
+        - name: receipt
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ASNRegistered"
+          - $ref: "#/components/messages/ASNCancelled"
+          - $ref: "#/components/messages/AsnLateForArrival"
+          - $ref: "#/components/messages/ReceiptOpened"
+          - $ref: "#/components/messages/ReceiptLineReceived"
+          - $ref: "#/components/messages/ReceiptCartonReceived"
+          - $ref: "#/components/messages/CartonDiscrepancyRaised"
+          - $ref: "#/components/messages/ReceiptClosed"
+          - $ref: "#/components/messages/ReceiptStowCompleted"
+          - $ref: "#/components/messages/ReceivingAdviceIssued"
+          - $ref: "#/components/messages/ReceivingAdviceOverdue"
+
+  warehouse.inbound-receiving.analytics:
+    description: |
+      This service's analytics topic (`AnalyticsTopic` in
+      `internal/adapters/outbound/kafka/analytics_encoder.go`; ADR 0006).
+      Written by the SAME outbox relay, from rows inserted in the same
+      transaction as the integration rows (one CloudEvents `id` per occurrence
+      on both topics); key as on the integration topic. Consumed ONLY by this
+      service's `inbound-projector` under a fixed consumer group read from env
+      `ANALYTICS_CONSUMER_GROUP` (at-least-once; the offset is committed after
+      the projection and the dedupe mark committed together in the analytical
+      database). The projector dedupes on `id`, ignores unknown types, skips
+      (with a rate-limited WARN) anything that is not CloudEvents 1.0, and
+      dead-letters a known type with an unusable payload to
+      `warehouse.inbound-receiving.analytics.dlq` (raw bytes plus `x-dlq-*`
+      headers). Not an integration contract: other contexts consume
+      `warehouse.inbound-receiving.events`.
+    subscribe:
+      operationId: receiveInboundReceivingAnalyticsEvents
+      summary: Receive the inbound-receiving analytics events.
+      description: |
+        Route on the full `type`; the payloads equal the integration payloads
+        (no analytics-only fields in v1). `dataschema` is
+        `urn:warehouse:inbound-receiving:analytics:<EventName>:v1`.
+      tags:
+        - name: analytics
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ASNRegisteredAnalytics"
+          - $ref: "#/components/messages/ASNCancelledAnalytics"
+          - $ref: "#/components/messages/AsnLateForArrivalAnalytics"
+          - $ref: "#/components/messages/ReceiptOpenedAnalytics"
+          - $ref: "#/components/messages/ReceiptLineReceivedAnalytics"
+          - $ref: "#/components/messages/ReceiptCartonReceivedAnalytics"
+          - $ref: "#/components/messages/CartonDiscrepancyRaisedAnalytics"
+          - $ref: "#/components/messages/ReceiptClosedAnalytics"
+          - $ref: "#/components/messages/ReceiptStowCompletedAnalytics"
+          - $ref: "#/components/messages/ReceivingAdviceIssuedAnalytics"
+          - $ref: "#/components/messages/ReceivingAdviceOverdueAnalytics"
+
+  warehouse.product-master.events:
+    description: |
+      product-master's integration topic. `ProductRegistered` feeds the
+      `known_skus` local copy (ADR 0003, group from env `PRODUCT_CONSUMER_GROUP`,
+      always running); `ProductPackLevelDeclared` and
+      `ProductPackLevelRetired` feed the packaging view (group from env
+      `PACKAGING_CONSUMER_GROUP`). Every other type on the topic is ignored.
+    publish:
+      operationId: consumeProductRegistered
+      summary: Consume product-master's ProductRegistered.
+      description: |
+        Upserts the SKU into `known_skus`. The CloudEvents `id` claim and the
+        effect commit in one transaction; the offset is committed afterwards.
+        Anything that is not a valid CloudEvent is skipped with a WARN.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ProductRegistered"
+          - $ref: "#/components/messages/ProductPackLevelDeclared"
+          - $ref: "#/components/messages/ProductPackLevelRetired"
+
+  warehouse.facility.events:
+    description: |
+      facility-layout's integration topic. Consumed ONLY for
+      `LocationSlotRegistered` and `LocationSlotDecommissioned` (ADR 0003),
+      into the `dock_doors` local copy, with a stable consumer group read from
+      env `DOCK_DOOR_CONSUMER_GROUP`; the consumer always runs. Every other type on the topic is ignored. Key =
+      `locationCode`.
+    publish:
+      operationId: consumeDockDoorEvents
+      summary: Consume facility-layout's slot registrations and decommissions.
+      description: |
+        A registration with `role=Dock` and `dockFlow` of `Inbound` or `Both`
+        upserts a door; any other registration is ignored. A decommission
+        deletes the door of that `locationCode` (a no-op for any other slot).
+        The CloudEvents `id` claim and the effect commit in one transaction;
+        the offset is committed afterwards.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: "#/components/messages/LocationSlotRegistered"
+          - $ref: "#/components/messages/LocationSlotDecommissioned"
+
+  warehouse.dock-scheduling.events:
+    description: |
+      dock-scheduling's integration topic (ADR 0019, 0020, plan YD-0002).
+      Consumed ONLY for `DockAppointmentBooked`, `DockAppointmentCancelled`,
+      `DockAppointmentRescheduled` and `DockAppointmentDoorReassigned`, into
+      the `appointments` local copy, with a stable consumer group read from
+      env `DOCK_APPOINTMENT_CONSUMER_GROUP`; the consumer always runs. Every
+      other type on the topic (`DockAppointmentNoShow`, check-in, door
+      closures, ...) is committed past untouched. Key = `appointment_id`.
+      `DockAppointmentDoorReassigned` may not be published on this topic yet;
+      the consumer does not depend on it arriving.
+    publish:
+      operationId: consumeDockAppointmentEvents
+      summary: Consume dock-scheduling's appointment bookings, cancellations, reschedules and door reassignments.
+      description: |
+        A `DockAppointmentBooked` with `direction=INBOUND` upserts the
+        appointment (door, carrier, window, ASN numbers); an `OUTBOUND` one is
+        ignored. A `DockAppointmentCancelled` marks the stored appointment
+        cancelled. A `DockAppointmentRescheduled` moves the stored
+        appointment's door and window; a `DockAppointmentDoorReassigned` moves
+        its door (ADR 0020). All four are guarded by `version`: an event is
+        applied only if its `version` is greater than the stored one (a legacy
+        row has version 0, so any dock-scheduling version wins), and no later
+        event revives a cancelled appointment. A reschedule or reassignment
+        of an appointment that is not in the copy (an `OUTBOUND` one, or one
+        not seen yet) is ignored and logged at DEBUG. Receipts already open
+        keep their door; receipts opened afterwards take the new one. The
+        CloudEvents `id` claim and the effect commit in one transaction; the
+        offset is committed afterwards. NO-LOOP: applying an event writes
+        nothing to the outbox. A payload that breaks a rule of this context
+        is skipped with a WARN, a transient error is retried.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: "#/components/messages/DockSchedulingAppointmentBooked"
+          - $ref: "#/components/messages/DockSchedulingAppointmentCancelled"
+          - $ref: "#/components/messages/DockSchedulingAppointmentRescheduled"
+          - $ref: "#/components/messages/DockSchedulingAppointmentDoorReassigned"
+
+  warehouse.yard-management.events:
+    description: |
+      yard-management's integration topic (ADR 0021). Consumed ONLY for
+      `VisitCheckedIn`, into the `visit_arrivals` local copy, with a stable
+      consumer group read from env `VISIT_ARRIVAL_CONSUMER_GROUP`; the
+      consumer always runs. Every other type on the topic (`VisitRejected`,
+      `TrailerDocked`, `TrailerDeparted`, ...) is committed past untouched.
+      Key = `visit_id`.
+    publish:
+      operationId: consumeYardVisitEvents
+      summary: Consume yard-management's gate arrivals.
+      description: |
+        A `VisitCheckedIn` carrying an `appointment_id` stores the earliest
+        `arrived_at` seen for that appointment (idempotent, order-independent;
+        a redelivery or a later duplicate never moves it). A walk-in visit
+        (`appointment_id` null) is ignored: there is no receipt to join it
+        to. After storing, the use case evaluates the dock-to-stock fact of
+        the receipt opened from that appointment (ADR 0021) and may raise
+        `ReceiptStowCompleted` through this service's outbox, never anything
+        towards yard-management. The CloudEvents `id` claim and the effect
+        commit in one transaction; the offset is committed afterwards. A
+        payload that breaks a rule of this context is skipped with a WARN, a
+        transient error is retried.
+      tags:
+        - name: consumed
+      message:
+        $ref: "#/components/messages/VisitCheckedIn"
+
+  warehouse.inventory.events:
+    description: |
+      inventory-storage's integration topic (ADR 0021). Consumed ONLY for
+      `ContainerStowed`, into the `carton_stows` local copy, with a stable
+      consumer group read from env `CARTON_STOW_CONSUMER_GROUP`; the consumer
+      always runs. Every other type on the topic (`ItemStowed`, which has no
+      license plate and so cannot be joined to a carton, `CaseBroken`, ...)
+      is committed past untouched. Key and subject of `ContainerStowed` = the
+      LPN.
+    publish:
+      operationId: consumeInventoryContainerStowed
+      summary: Consume inventory-storage's container stows.
+      description: |
+        A `ContainerStowed` stores the earliest `at` seen for its `lpn`
+        (idempotent, order-independent: a later move of the container to
+        another bin is not a new stow). A receipt carton is joined to it by
+        its SSCC, which is the `lpn`. After storing, the use case evaluates
+        the dock-to-stock fact of the receipts holding that carton (ADR 0021)
+        and may raise `ReceiptStowCompleted` through this service's outbox,
+        never anything towards inventory-storage. Claim, effect and offset
+        follow the same rules as the dock-scheduling consumer.
+      tags:
+        - name: consumed
+      message:
+        $ref: "#/components/messages/ContainerStowed"
+
+components:
+  messages:
+    DockSchedulingAppointmentBooked:
+      name: DockAppointmentBooked
+      title: dock-scheduling DockAppointmentBooked (consumed)
+      summary: dock-scheduling booked (or imported) a dock appointment.
+      description: |
+        `type` = `com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentBooked`,
+        source `/warehouse/dock-scheduling`; key and subject = `appointment_id`.
+        `data` is snake_case. Only the fields in the schema are read; the rest
+        of dock-scheduling's payload (`site_id`, `carrier_scac`, `cpt_id`,
+        `shipment_refs`, `expected_seal_number`, `provenance`,
+        `arrival_tolerance_minutes`, ...) is ignored.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/DockSchedulingAppointmentBookedEvent"
+      examples:
+        - name: inbound
+          summary: An inbound appointment covering ASN-1001.
+          payload:
+            specversion: "1.0"
+            id: "0b6d1c4e-7a2f-4d83-9e15-3c8a5f7b9d21"
+            source: "/warehouse/dock-scheduling"
+            type: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentBooked"
+            subject: "appt-123e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-08T12:05:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:dock-scheduling:events:DockAppointmentBooked:v1"
+            data:
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              site_id: "WH1"
+              direction: "INBOUND"
+              door_code: "WH1-DOCK-IN-01"
+              carrier: "ACME Freight"
+              carrier_scac: "ACMF"
+              window_start: "2026-10-09T08:00:00Z"
+              window_end: "2026-10-09T10:00:00Z"
+              asn_numbers: ["ASN-1001"]
+              shipment_refs: []
+              provenance: "native"
+              version: 1
+    DockSchedulingAppointmentCancelled:
+      name: DockAppointmentCancelled
+      title: dock-scheduling DockAppointmentCancelled (consumed)
+      summary: dock-scheduling cancelled a dock appointment.
+      description: |
+        `type` = `com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentCancelled`,
+        source `/warehouse/dock-scheduling`; key and subject = `appointment_id`.
+        Only `appointment_id` and `version` are read.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/DockSchedulingAppointmentCancelledEvent"
+      examples:
+        - name: cancelled
+          summary: The carrier asked to cancel.
+          payload:
+            specversion: "1.0"
+            id: "5e9a3b7c-1d4f-4a60-8b2e-7c0d9f1a3e45"
+            source: "/warehouse/dock-scheduling"
+            type: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentCancelled"
+            subject: "appt-123e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-08T13:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:dock-scheduling:events:DockAppointmentCancelled:v1"
+            data:
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              site_id: "WH1"
+              door_code: "WH1-DOCK-IN-01"
+              reason: "CARRIER_REQUEST"
+              version: 2
+    DockSchedulingAppointmentRescheduled:
+      name: DockAppointmentRescheduled
+      title: dock-scheduling DockAppointmentRescheduled (consumed)
+      summary: dock-scheduling moved a dock appointment to a new window and possibly a new door.
+      description: |
+        `type` = `com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentRescheduled`,
+        source `/warehouse/dock-scheduling`; key and subject = `appointment_id`.
+        `data` is snake_case. The copy takes `door_code`, `window_start` and
+        `window_end` at `version` (ADR 0020); `previous_door_code` is logged,
+        and `site_id`, `previous_window_*` and `arrival_tolerance_minutes` are
+        ignored. Receipts already open keep their door.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/DockSchedulingAppointmentRescheduledEvent"
+      examples:
+        - name: rescheduled
+          summary: The carrier is two hours late and is moved to another door.
+          payload:
+            specversion: "1.0"
+            id: "8c2f4a1e-3b5d-4e7f-9a60-1d2c3b4a5e6f"
+            source: "/warehouse/dock-scheduling"
+            type: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentRescheduled"
+            subject: "appt-123e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T07:30:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:dock-scheduling:events:DockAppointmentRescheduled:v1"
+            data:
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              site_id: "WH1"
+              door_code: "WH1-DOCK-IN-03"
+              previous_door_code: "WH1-DOCK-IN-01"
+              window_start: "2026-10-09T10:00:00Z"
+              window_end: "2026-10-09T12:00:00Z"
+              previous_window_start: "2026-10-09T08:00:00Z"
+              previous_window_end: "2026-10-09T10:00:00Z"
+              arrival_tolerance_minutes: 15
+              version: 2
+    DockSchedulingAppointmentDoorReassigned:
+      name: DockAppointmentDoorReassigned
+      title: dock-scheduling DockAppointmentDoorReassigned (consumed)
+      summary: The appointment's door was reassigned (the window is unchanged).
+      description: |
+        `type` = `com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentDoorReassigned`,
+        source `/warehouse/dock-scheduling`; key and subject = `appointment_id`.
+        The copy takes `to_door_code` at `version` (ADR 0020);
+        `from_door_code` is logged, not checked. dock-scheduling is moving this
+        type onto its integration topic; until then it never arrives and the
+        consumer does not depend on it. Receipts already open keep their door.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/DockSchedulingAppointmentDoorReassignedEvent"
+      examples:
+        - name: reassigned
+          summary: The booked door is blocked; the yard sends the truck to door 04.
+          payload:
+            specversion: "1.0"
+            id: "2a7e9c4b-6d1f-4b38-8e25-9f0a1b2c3d4e"
+            source: "/warehouse/dock-scheduling"
+            type: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentDoorReassigned"
+            subject: "appt-123e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T07:50:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:dock-scheduling:events:DockAppointmentDoorReassigned:v1"
+            data:
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              site_id: "WH1"
+              from_door_code: "WH1-DOCK-IN-01"
+              to_door_code: "WH1-DOCK-IN-04"
+              version: 3
+    ASNRegistered:
+      x-no-consumer-reason: "planned warehouse-planning consumer not built (K28)"
+      name: ASNRegistered
+      title: ASN registered
+      summary: A supplier's advance ship notice was registered.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.asn.ASNRegistered`; subject and key = the ASN number."
+      contentType: application/cloudevents+json
+      tags:
+        - name: asn
+      payload:
+        $ref: "#/components/schemas/ASNRegisteredEvent"
+      examples:
+        - name: registered
+          summary: ASN-1001 with two lines.
+          payload:
+            specversion: "1.0"
+            id: "7c1f3a52-0d4e-4b8a-9e61-2a5d8f0c3b14"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.asn.ASNRegistered"
+            subject: "ASN-1001"
+            time: "2026-10-08T12:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ASNRegistered:v1"
+            data:
+              asn_number: "ASN-1001"
+              supplier_ref: "ACME"
+              registered_at: "2026-10-08T12:00:00Z"
+              expected_arrival: "2026-10-09T08:00:00Z"
+              lines:
+                - { line_no: 1, sku: "SKU-1", expected_qty: 40 }
+                - { line_no: 2, sku: "SKU-2", expected_qty: 5 }
+
+    ASNCancelled:
+      x-no-consumer-reason: "planned warehouse-planning consumer not built (K28)"
+      name: ASNCancelled
+      title: ASN cancelled
+      summary: A Registered ASN was cancelled.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.asn.ASNCancelled`; subject and key = the ASN number."
+      contentType: application/cloudevents+json
+      tags:
+        - name: asn
+      payload:
+        $ref: "#/components/schemas/ASNCancelledEvent"
+      examples:
+        - name: cancelled
+          summary: ASN-1001 cancelled by the supplier.
+          payload:
+            specversion: "1.0"
+            id: "1e9b4d70-3c2a-4f5d-8b17-6a0c9d2e7f31"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.asn.ASNCancelled"
+            subject: "ASN-1001"
+            time: "2026-10-08T12:30:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ASNCancelled:v1"
+            data:
+              asn_number: "ASN-1001"
+              reason: "Supplier cancelled the shipment"
+
+    AsnLateForArrival:
+      x-no-consumer-reason: "read only by this service's own analytics projector (the asn_timeliness KPI, ADR 0025); no other consumer built yet"
+      name: AsnLateForArrival
+      title: ASN late for arrival
+      summary: An ASN was registered after the visit it was received under had already arrived.
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.asn.AsnLateForArrival`; subject and key = the ASN number.
+        Raised once per ASN, at `OpenReceipt` and only there (the only place an ASN and an
+        appointment meet), when `asn_registered_at > arrived_at` of the appointment's earliest
+        yard visit (ADR 0025); `lateness_seconds` = `asn_registered_at - arrived_at`, whole
+        seconds, >= 1 by construction. An on-time ASN, a walk-in receipt, an appointment with
+        no arrival seen yet and a legacy ASN with an unknown registration raise nothing.
+      contentType: application/cloudevents+json
+      tags:
+        - name: asn
+      payload:
+        $ref: "#/components/schemas/AsnLateForArrivalEvent"
+      examples:
+        - name: late
+          summary: ASN-1001 registered two minutes after the gate arrival of the visit it was received under.
+          payload:
+            specversion: "1.0"
+            id: "5b7c1e93-4a0b-4c6d-9e82-3f1a2b4c5d63"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.asn.AsnLateForArrival"
+            subject: "ASN-1001"
+            time: "2026-10-09T08:05:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:AsnLateForArrival:v1"
+            data:
+              asn_number: "ASN-1001"
+              supplier_ref: "ACME"
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              visit_id: "visit-9f1c2a34-5b6d-4e7f-8a90-b1c2d3e4f5a6"
+              asn_registered_at: "2026-10-09T08:02:00Z"
+              arrived_at: "2026-10-09T08:00:00Z"
+              lateness_seconds: 120
+
+    ReceiptOpened:
+      x-no-consumer-reason: "planned warehouse-planning consumer not built (K28)"
+      name: ReceiptOpened
+      title: Receipt opened
+      summary: Receiving of an ASN started.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptOpened`; subject = the receipt id, key = the ASN number."
+      contentType: application/cloudevents+json
+      tags:
+        - name: receipt
+      payload:
+        $ref: "#/components/schemas/ReceiptOpenedEvent"
+      examples:
+        - name: opened
+          summary: A receipt opened from a checked-in appointment.
+          payload:
+            specversion: "1.0"
+            id: "d4e6f8a0-3b5c-4d7e-9f1a-2b3c4d5e6f70"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptOpened"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T08:05:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ReceiptOpened:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              door_code: "WH1-DOCK-IN-01"
+              opened_at: "2026-10-09T08:05:00Z"
+
+    ReceiptLineReceived:
+      name: ReceiptLineReceived
+      title: Receipt line received
+      summary: A quantity was received against a line (the handover event).
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptLineReceived`;
+        subject = the receipt id, key = the ASN number. inventory-storage
+        books `condition=Good` quantities with its ReceiveStock use case and
+        ignores `Damaged`; it dedupes on the CloudEvents `id`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: receipt
+      payload:
+        $ref: "#/components/schemas/ReceiptLineReceivedEvent"
+      examples:
+        - name: good
+          summary: 40 good units of SKU-1 received.
+          payload:
+            specversion: "1.0"
+            id: "3f8f6c2e-9b1a-4d6e-8a52-0c7d1e4b9a10"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptLineReceived"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T08:10:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ReceiptLineReceived:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              line_no: 1
+              sku: "SKU-1"
+              quantity: 40
+              condition: "Good"
+              received_at: "2026-10-09T08:10:00Z"
+
+    ReceiptCartonReceived:
+      name: ReceiptCartonReceived
+      title: Receipt carton received
+      summary: "A carton (or one case) was received - identity only."
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptCartonReceived`;
+        subject = the receipt id, key = the ASN number.
+        IDENTITY ONLY: it never books quantity (`ReceiptLineReceived` stays the
+        sole quantity authority, in eaches). inventory-storage uses it to
+        create or link a Container keyed (receipt_id, line_no, lpn), in either
+        arrival order. `lpn` is the SSCC, or an internal `LPN-<ulid>` for a
+        case received without one. There is no site: the site is derived by
+        inventory-storage at stow (ADR 0013).
+      contentType: application/cloudevents+json
+      tags:
+        - name: receipt
+      payload:
+        $ref: "#/components/schemas/ReceiptCartonReceivedEvent"
+      examples:
+        - name: example
+          payload:
+            specversion: "1.0"
+            id: "4a9f6c2e-9b1a-4d6e-8a52-0c7d1e4b9a11"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptCartonReceived"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T08:10:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ReceiptCartonReceived:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              sscc: "340123450000000017"
+              sealed: true
+              lpn: "340123450000000017"
+              contents:
+                - { line_no: 1, sku: "SKU-1", gtin: "13041090004824", qty: 24, condition: "Good" }
+              received_at: "2026-10-09T08:10:00Z"
+
+    CartonDiscrepancyRaised:
+      name: CartonDiscrepancyRaised
+      title: Carton discrepancy raised
+      summary: A finding about a physical carton.
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.CartonDiscrepancyRaised`;
+        subject = the receipt id, key = the ASN number.
+        Carton discrepancies travel ONLY on this event; `ReceiptClosed` keeps
+        its three v1 kinds. A refused scan books nothing and raises this
+        event; an accepted carton can raise it too (for example
+        `UnlabelledCarton`).
+      contentType: application/cloudevents+json
+      tags:
+        - name: receipt
+      payload:
+        $ref: "#/components/schemas/CartonDiscrepancyRaisedEvent"
+      examples:
+        - name: example
+          payload:
+            specversion: "1.0"
+            id: "5b0a7d3f-0c2b-4e7f-9b63-1d8e2f5c0b22"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.CartonDiscrepancyRaised"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T08:10:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:CartonDiscrepancyRaised:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              sscc: "340123450000000017"
+              kind: "UnexpectedCarton"
+              at: "2026-10-09T08:10:00Z"
+
+    ReceiptClosed:
+      x-no-consumer-reason: "planned warehouse-planning consumer not built (K28)"
+      name: ReceiptClosed
+      title: Receipt closed
+      summary: Receiving ended, with the discrepancies against the ASN.
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptClosed`;
+        subject = the receipt id, key = the ASN number. `discrepancies` is
+        present and empty when everything matched; a line can appear once per
+        kind (`Short`, `Over`, `Damaged`); each carries `w13_code` and
+        `cbv_disposition` (ADR 0023).
+      contentType: application/cloudevents+json
+      tags:
+        - name: receipt
+      payload:
+        $ref: "#/components/schemas/ReceiptClosedEvent"
+      examples:
+        - name: closedWithDiscrepancies
+          summary: Line 1 short and with damage, line 2 over-received.
+          payload:
+            specversion: "1.0"
+            id: "e5f7a9b1-4c6d-4e8f-a02b-3c4d5e6f7a81"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptClosed"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T09:30:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ReceiptClosed:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              closed_at: "2026-10-09T09:30:00Z"
+              discrepancies:
+                - { line_no: 1, sku: "SKU-1", kind: "Short", expected_qty: 40, received_qty: 34, damaged_qty: 4 }
+                - { line_no: 1, sku: "SKU-1", kind: "Damaged", expected_qty: 40, received_qty: 34, damaged_qty: 4 }
+                - { line_no: 2, sku: "SKU-2", kind: "Over", expected_qty: 5, received_qty: 7, damaged_qty: 0 }
+
+    VisitCheckedIn:
+      name: VisitCheckedIn
+      title: yard-management VisitCheckedIn (consumed)
+      summary: A carrier physically arrived at the gate.
+      description: |
+        `type` = `com.warehouse.wms.yard-management.yardvisit.VisitCheckedIn`,
+        source `/warehouse/yard-management`. `data` is snake_case. Only the
+        fields in the schema are read; the rest of yard-management's payload
+        (`site_id`, `carrier`, `carrier_scac`, `purpose`, `trailers`, ...) is
+        ignored.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/VisitCheckedInEvent"
+      examples:
+        - name: scheduled
+          payload:
+            specversion: "1.0"
+            id: "7d1c9e2a-3b4f-4a60-8c15-9e2f0a1b3c44"
+            source: "/warehouse/yard-management"
+            type: "com.warehouse.wms.yard-management.yardvisit.VisitCheckedIn"
+            subject: "visit-5b1f0c3e"
+            time: "2026-10-09T05:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:yard-management:events:VisitCheckedIn:v1"
+            data:
+              visit_id: "visit-5b1f0c3e"
+              site_id: "WH1"
+              purpose: "LIVE_UNLOAD"
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              arrived_at: "2026-10-09T05:00:00Z"
+              version: 1
+
+    ContainerStowed:
+      name: ContainerStowed
+      title: inventory-storage ContainerStowed (consumed)
+      summary: A container (license plate) was put away into a bin.
+      description: |
+        `type` = `com.warehouse.wms.inventory-storage.container.ContainerStowed`,
+        source `/warehouse/inventory-storage`. `data` is snake_case. Only
+        `lpn` and `at` are read; the rest (`sku`, `qty_eaches`, `owner_ref`,
+        `site_id`, `bin`) is ignored.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/ContainerStowedEvent"
+      examples:
+        - name: stowed
+          payload:
+            specversion: "1.0"
+            id: "2c8e4f6a-91b0-4d37-a5e2-6b7c8d9e0f11"
+            source: "/warehouse/inventory-storage"
+            type: "com.warehouse.wms.inventory-storage.container.ContainerStowed"
+            subject: "340123450000000017"
+            time: "2026-10-09T07:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inventory-storage:events:ContainerStowed:v1"
+            data:
+              lpn: "340123450000000017"
+              sku: "SKU-1"
+              qty_eaches: 20
+              site_id: "WH1"
+              bin: "WH1-STOR-A01"
+              at: "2026-10-09T07:00:00Z"
+
+    ReceiptStowCompleted:
+      x-no-consumer-reason: "read by this service's own analytics report; no other consumer built yet"
+      name: ReceiptStowCompleted
+      title: Receipt stow completed
+      summary: The dock-to-stock fact of a receipt (ADR 0021).
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptStowCompleted`;
+        subject = the receipt id, key = the ASN number. Raised exactly once,
+        for a Closed receipt opened from an appointment, when every Good
+        carton has a stow from inventory-storage and the gate arrival from
+        yard-management is known, whatever order those facts and the close
+        arrive in. `dock_to_stock_seconds` is `stowed_at - arrived_at` in
+        whole seconds, never negative; `stowed_at` is the latest stow of a
+        Good carton and `carton_count` how many Good cartons that is. `At`
+        (the CloudEvents `time`) is when the completion was observed.
+      contentType: application/cloudevents+json
+      tags:
+        - name: receipt
+      payload:
+        $ref: "#/components/schemas/ReceiptStowCompletedEvent"
+      examples:
+        - name: example
+          payload:
+            specversion: "1.0"
+            id: "9a3b5c7d-1e2f-4a8b-b6c4-0d1e2f3a4b55"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptStowCompleted"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T07:00:01Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ReceiptStowCompleted:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              arrived_at: "2026-10-09T05:00:00Z"
+              closed_at: "2026-10-09T06:30:00Z"
+              stowed_at: "2026-10-09T07:00:00Z"
+              dock_to_stock_seconds: 7200
+              carton_count: 12
+
+    ReceiptStowCompletedAnalytics:
+      name: ReceiptStowCompleted
+      title: Receipt stow completed (analytics)
+      summary: The dock-to-stock fact of a receipt, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptStowCompleted` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ReceiptStowCompleted:v1`; payload equal to the integration payload. The projector folds it into `dock_to_stock_facts`, one row per receipt."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ReceiptStowCompletedEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "9a3b5c7d-1e2f-4a8b-b6c4-0d1e2f3a4b55"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptStowCompleted"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T07:00:01Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ReceiptStowCompleted:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              arrived_at: "2026-10-09T05:00:00Z"
+              closed_at: "2026-10-09T06:30:00Z"
+              stowed_at: "2026-10-09T07:00:00Z"
+              dock_to_stock_seconds: 7200
+              carton_count: 12
+
+    ReceivingAdviceIssued:
+      x-no-consumer-reason: "none yet: partner-connectivity renders it as EANCOM RECADV / X12 861 / 944 later (D-3 not taken)"
+      name: ReceivingAdviceIssued
+      title: Receiving advice issued
+      summary: What was received and accepted per line, with W13/CBV-coded discrepancies, for the supplier or the 3PL depositor (ADR 0023).
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.ReceivingAdviceIssued`;
+        subject = the receipt id, key = the ASN number. The domain fact only: this
+        service renders no EANCOM, X12 or transport. Raised exactly once per
+        receipt, in the same transaction as `ReceiptClosed` (right after it), for a
+        receipt closed after this event existed; a receipt closed earlier gets no
+        advice. `despatch_advice_ref` is the ASN number (the reference to the
+        despatch advice), `supplier_ref` the supplier as the ASN knows it and
+        `owner_ref` the 3PL depositor (omitted for fleet-owned stock). `last_carton_at`
+        is when the last unit was received (the receipt's opening when nothing
+        was); `within_sla` is `issued_at - last_carton_at <= sla_seconds`
+        (`RECEIVING_ADVICE_SLA`, default 24 h). Per line the three quantities are
+        exclusive: `accepted_qty` is the Good units not held, `rejected_qty` the
+        Damaged ones and `held_qty` the Good units declared held; `received_qty`
+        is their sum. `discrepancies` carry the line kinds `Short`, `Over`, `Damaged`,
+        `IncorrectProduct` and `Hold` with `w13_code` and `cbv_disposition`.
+        The payload is bounded because a message the broker refuses blocks the
+        outbox (ADR 0007): at most 1000 lines (lines with exceptions first, then
+        in line order; `lines_total` is the real count and `lines_truncated` is
+        true when some are left out), at most 1000 SSCCs per line (`sscc_count` is
+        the real count, `ssccs_truncated` is true when listed ones are fewer) and
+        at most 200 carton findings (`carton_findings_total`). A consumer that
+        needs the full list reads the receipt over REST.
+      contentType: application/cloudevents+json
+      tags:
+        - name: receipt
+      payload:
+        $ref: "#/components/schemas/ReceivingAdviceIssuedEvent"
+      examples:
+        - name: example
+          payload:
+            specversion: "1.0"
+            id: "7c1d9e3f-5a2b-4c8d-9e0f-1a2b3c4d5e66"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceivingAdviceIssued"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T09:30:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ReceivingAdviceIssued:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              despatch_advice_ref: "ASN-1001"
+              supplier_ref: "ACME"
+              owner_ref: "tenant-7f3a"
+              issued_at: "2026-10-09T09:30:00Z"
+              last_carton_at: "2026-10-09T09:10:00Z"
+              sla_seconds: 86400
+              within_sla: true
+              lines:
+                - line_no: 1
+                  sku: "SKU-1"
+                  gtin: "13041090004824"
+                  expected_qty: 40
+                  received_qty: 34
+                  accepted_qty: 25
+                  rejected_qty: 4
+                  held_qty: 5
+                  sscc_count: 2
+                  ssccs: ["340123450000000017", "340123450000000024"]
+                  discrepancies:
+                    - { kind: "Short", quantity: 6, w13_code: "02", cbv_disposition: "mismatch_quantity" }
+                    - { kind: "Hold", quantity: 5, w13_code: "09", cbv_disposition: "non_conformant" }
+              lines_total: 1
+              carton_findings:
+                - { kind: "UnexpectedCarton", sscc: "340123450000000031", at: "2026-10-09T09:05:00Z", w13_code: "05", cbv_disposition: "mismatch_instance" }
+              carton_findings_total: 1
+
+    ReceivingAdviceIssuedAnalytics:
+      name: ReceivingAdviceIssued
+      title: Receiving advice issued (analytics)
+      summary: The receiving advice, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.receipt.ReceivingAdviceIssued` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ReceivingAdviceIssued:v1`; payload equal to the integration payload. The projector folds `within_sla` into `advice_facts`, one row per receipt (ADR 0023)."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ReceivingAdviceIssuedEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "7c1d9e3f-5a2b-4c8d-9e0f-1a2b3c4d5e66"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceivingAdviceIssued"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T09:30:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ReceivingAdviceIssued:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              despatch_advice_ref: "ASN-1001"
+              supplier_ref: "ACME"
+              owner_ref: "tenant-7f3a"
+              issued_at: "2026-10-09T09:30:00Z"
+              last_carton_at: "2026-10-09T09:10:00Z"
+              sla_seconds: 86400
+              within_sla: true
+              lines:
+                - line_no: 1
+                  sku: "SKU-1"
+                  gtin: "13041090004824"
+                  expected_qty: 40
+                  received_qty: 34
+                  accepted_qty: 25
+                  rejected_qty: 4
+                  held_qty: 5
+                  sscc_count: 2
+                  ssccs: ["340123450000000017", "340123450000000024"]
+                  discrepancies:
+                    - { kind: "Short", quantity: 6, w13_code: "02", cbv_disposition: "mismatch_quantity" }
+                    - { kind: "Hold", quantity: 5, w13_code: "09", cbv_disposition: "non_conformant" }
+              lines_total: 1
+              carton_findings:
+                - { kind: "UnexpectedCarton", sscc: "340123450000000031", at: "2026-10-09T09:05:00Z", w13_code: "05", cbv_disposition: "mismatch_instance" }
+              carton_findings_total: 1
+
+    ReceivingAdviceOverdue:
+      x-no-consumer-reason: "none yet: an alarm for the planned partner-connectivity and warehouse-ops consumers (D-3)"
+      name: ReceivingAdviceOverdue
+      title: Receiving advice overdue
+      summary: An Open receipt is past the advice SLA since its last unit was received (ADR 0023).
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.ReceivingAdviceOverdue`;
+        subject = the receipt id, key = the ASN number. Raised by the housekeeping
+        sweep exactly once per receipt that is still Open when
+        `last_carton_at + sla_seconds` (`due_at`) is in the past. It does not stop
+        the receipt: closing it later still issues the advice, with `within_sla`
+        false. `overdue_at` (the CloudEvents `time`) is when the sweep saw it.
+      contentType: application/cloudevents+json
+      tags:
+        - name: receipt
+      payload:
+        $ref: "#/components/schemas/ReceivingAdviceOverdueEvent"
+      examples:
+        - name: example
+          payload:
+            specversion: "1.0"
+            id: "8d2e0f4a-6b3c-4d9e-af10-2b3c4d5e6f77"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceivingAdviceOverdue"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-10T10:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ReceivingAdviceOverdue:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              last_carton_at: "2026-10-09T09:10:00Z"
+              due_at: "2026-10-10T09:10:00Z"
+              sla_seconds: 86400
+              overdue_at: "2026-10-10T10:00:00Z"
+
+    ReceivingAdviceOverdueAnalytics:
+      name: ReceivingAdviceOverdue
+      title: Receiving advice overdue (analytics)
+      summary: The overdue alarm, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.receipt.ReceivingAdviceOverdue` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ReceivingAdviceOverdue:v1`; payload equal to the integration payload. The projector acknowledges and ignores it: the KPI reads the advices issued, not the alarms."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ReceivingAdviceOverdueEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "8d2e0f4a-6b3c-4d9e-af10-2b3c4d5e6f77"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceivingAdviceOverdue"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-10T10:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ReceivingAdviceOverdue:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              last_carton_at: "2026-10-09T09:10:00Z"
+              due_at: "2026-10-10T09:10:00Z"
+              sla_seconds: 86400
+              overdue_at: "2026-10-10T10:00:00Z"
+
+    ASNRegisteredAnalytics:
+      name: ASNRegistered
+      title: ASN registered (analytics)
+      summary: A supplier's advance ship notice was registered, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.asn.ASNRegistered` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ASNRegistered:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ASNRegisteredEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "7c1f3a52-0d4e-4b8a-9e61-2a5d8f0c3b14"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.asn.ASNRegistered"
+            subject: "ASN-1001"
+            time: "2026-10-08T12:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ASNRegistered:v1"
+            data:
+              asn_number: "ASN-1001"
+              supplier_ref: "ACME"
+              registered_at: "2026-10-08T12:00:00Z"
+              expected_arrival: "2026-10-09T08:00:00Z"
+              lines:
+                - { line_no: 1, sku: "SKU-1", expected_qty: 40 }
+                - { line_no: 2, sku: "SKU-2", expected_qty: 5 }
+
+    ASNCancelledAnalytics:
+      name: ASNCancelled
+      title: ASN cancelled (analytics)
+      summary: A Registered ASN was cancelled, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.asn.ASNCancelled` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ASNCancelled:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ASNCancelledEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "1e9b4d70-3c2a-4f5d-8b17-6a0c9d2e7f31"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.asn.ASNCancelled"
+            subject: "ASN-1001"
+            time: "2026-10-08T12:30:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ASNCancelled:v1"
+            data:
+              asn_number: "ASN-1001"
+              reason: "Supplier cancelled the shipment"
+
+    AsnLateForArrivalAnalytics:
+      name: AsnLateForArrival
+      title: ASN late for arrival (analytics)
+      summary: An ASN was registered after its visit had arrived, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.asn.AsnLateForArrival` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:AsnLateForArrival:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/AsnLateForArrivalEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "5b7c1e93-4a0b-4c6d-9e82-3f1a2b4c5d63"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.asn.AsnLateForArrival"
+            subject: "ASN-1001"
+            time: "2026-10-09T08:05:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:AsnLateForArrival:v1"
+            data:
+              asn_number: "ASN-1001"
+              supplier_ref: "ACME"
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              visit_id: "visit-9f1c2a34-5b6d-4e7f-8a90-b1c2d3e4f5a6"
+              asn_registered_at: "2026-10-09T08:02:00Z"
+              arrived_at: "2026-10-09T08:00:00Z"
+              lateness_seconds: 120
+
+    ReceiptOpenedAnalytics:
+      name: ReceiptOpened
+      title: Receipt opened (analytics)
+      summary: Receiving of an ASN started, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptOpened` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ReceiptOpened:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ReceiptOpenedEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "d4e6f8a0-3b5c-4d7e-9f1a-2b3c4d5e6f70"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptOpened"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T08:05:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ReceiptOpened:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              door_code: "WH1-DOCK-IN-01"
+              opened_at: "2026-10-09T08:05:00Z"
+
+    ReceiptLineReceivedAnalytics:
+      name: ReceiptLineReceived
+      title: Receipt line received (analytics)
+      summary: A quantity was received against a line (the handover event), on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptLineReceived` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ReceiptLineReceived:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ReceiptLineReceivedEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "3f8f6c2e-9b1a-4d6e-8a52-0c7d1e4b9a10"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptLineReceived"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T08:10:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ReceiptLineReceived:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              line_no: 1
+              sku: "SKU-1"
+              quantity: 40
+              condition: "Good"
+              received_at: "2026-10-09T08:10:00Z"
+
+    ReceiptCartonReceivedAnalytics:
+      name: ReceiptCartonReceived
+      title: Receipt carton received
+      summary: "A carton (or one case) was received - identity only."
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptCartonReceived`;
+        subject = the receipt id, key = the ASN number. Same payload as on the integration topic; dataschema `urn:warehouse:inbound-receiving:analytics:ReceiptCartonReceived:v1`.
+        IDENTITY ONLY: it never books quantity (`ReceiptLineReceived` stays the
+        sole quantity authority, in eaches). inventory-storage uses it to
+        create or link a Container keyed (receipt_id, line_no, lpn), in either
+        arrival order. `lpn` is the SSCC, or an internal `LPN-<ulid>` for a
+        case received without one. There is no site: the site is derived by
+        inventory-storage at stow (ADR 0013).
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ReceiptCartonReceivedEvent"
+      examples:
+        - name: example
+          payload:
+            specversion: "1.0"
+            id: "4a9f6c2e-9b1a-4d6e-8a52-0c7d1e4b9a11"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptCartonReceived"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T08:10:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ReceiptCartonReceived:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              sscc: "340123450000000017"
+              sealed: true
+              lpn: "340123450000000017"
+              contents:
+                - { line_no: 1, sku: "SKU-1", gtin: "13041090004824", qty: 24, condition: "Good" }
+              received_at: "2026-10-09T08:10:00Z"
+
+    CartonDiscrepancyRaisedAnalytics:
+      name: CartonDiscrepancyRaised
+      title: Carton discrepancy raised
+      summary: A finding about a physical carton.
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.receipt.CartonDiscrepancyRaised`;
+        subject = the receipt id, key = the ASN number. Same payload as on the integration topic; dataschema `urn:warehouse:inbound-receiving:analytics:CartonDiscrepancyRaised:v1`.
+        Carton discrepancies travel ONLY on this event; `ReceiptClosed` keeps
+        its three v1 kinds. A refused scan books nothing and raises this
+        event; an accepted carton can raise it too (for example
+        `UnlabelledCarton`).
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/CartonDiscrepancyRaisedEvent"
+      examples:
+        - name: example
+          payload:
+            specversion: "1.0"
+            id: "5b0a7d3f-0c2b-4e7f-9b63-1d8e2f5c0b22"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.CartonDiscrepancyRaised"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T08:10:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:CartonDiscrepancyRaised:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              sscc: "340123450000000017"
+              kind: "UnexpectedCarton"
+              at: "2026-10-09T08:10:00Z"
+
+    ReceiptClosedAnalytics:
+      name: ReceiptClosed
+      title: Receipt closed (analytics)
+      summary: Receiving ended, with the discrepancies against the ASN, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.receipt.ReceiptClosed` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ReceiptClosed:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ReceiptClosedEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "e5f7a9b1-4c6d-4e8f-a02b-3c4d5e6f7a81"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.receipt.ReceiptClosed"
+            subject: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T09:30:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ReceiptClosed:v1"
+            data:
+              receipt_id: "rcpt-223e4567-e89b-12d3-a456-426614174000"
+              asn_number: "ASN-1001"
+              closed_at: "2026-10-09T09:30:00Z"
+              discrepancies:
+                - { line_no: 1, sku: "SKU-1", kind: "Short", expected_qty: 40, received_qty: 34, damaged_qty: 4 }
+                - { line_no: 1, sku: "SKU-1", kind: "Damaged", expected_qty: 40, received_qty: 34, damaged_qty: 4 }
+                - { line_no: 2, sku: "SKU-2", kind: "Over", expected_qty: 5, received_qty: 7, damaged_qty: 0 }
+
+    ProductRegistered:
+      name: ProductRegistered
+      title: product-master ProductRegistered (consumed)
+      summary: A SKU was registered as a product.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductRegistered`,
+        source `/warehouse/product-master`, dataschema
+        `urn:warehouse:product-master:events:ProductRegistered:v1`; subject and
+        key = the SKU. Produced by product-master; verified against its
+        `origin/develop` contract on 2026-10-08.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/ProductRegisteredEvent"
+      examples:
+        - name: registered
+          summary: SKU-1 registered.
+          payload:
+            specversion: "1.0"
+            id: "1b0c9a4e-2f7d-4a63-9d1e-5a7c3e2b9f10"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductRegistered"
+            subject: "SKU-1"
+            time: "2026-10-06T21:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductRegistered:v1"
+            data:
+              sku: "SKU-1"
+              description: "Lithium battery pack 12V"
+              version: 1
+
+    ProductPackLevelDeclared:
+      name: ProductPackLevelDeclared
+      title: product-master ProductPackLevelDeclared (consumed)
+      summary: A pack level (EACH, INNER, CASE or PALLET) of a SKU was declared, or one of its mutable attributes changed.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductPackLevelDeclared`,
+        source `/warehouse/product-master`, dataschema
+        `urn:warehouse:product-master:events:ProductPackLevelDeclared:v1`; subject and
+        key = the SKU. Produced by product-master; consumed into the local
+        packaging view (pack level -> eaches factor for case-level scans).
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/ProductPackLevelDeclaredEvent"
+    ProductPackLevelRetired:
+      name: ProductPackLevelRetired
+      title: product-master ProductPackLevelRetired (consumed)
+      summary: A pack level of a SKU was retired.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductPackLevelRetired`,
+        source `/warehouse/product-master`, dataschema
+        `urn:warehouse:product-master:events:ProductPackLevelRetired:v1`; subject and
+        key = the SKU. Produced by product-master; consumed into the local
+        packaging view (retired levels are no longer valid scan targets).
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/ProductPackLevelRetiredEvent"
+
+    LocationSlotRegistered:
+      name: LocationSlotRegistered
+      title: facility-layout LocationSlotRegistered (consumed)
+      summary: A coded slot now exists on the warehouse map.
+      description: |
+        `type` = `com.warehouse.wms.facility-layout.locationslot.LocationSlotRegistered`,
+        source `/warehouse/facility-layout`, dataschema
+        `urn:warehouse:facility-layout:events:LocationSlotRegistered:v1`; key =
+        `locationCode`. `data` is camelCase and carries the domain event
+        verbatim (`eventName`, `eventType`, `occurredAt` included). An absent
+        `role` means `Storage`; `dockFlow` is present only for `role=Dock`.
+        Only `role=Dock` with `dockFlow` `Inbound` or `Both` is kept.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/LocationSlotRegisteredEvent"
+      examples:
+        - name: inboundDock
+          summary: An inbound dock door.
+          payload:
+            specversion: "1.0"
+            id: "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d"
+            source: "/warehouse/facility-layout"
+            type: "com.warehouse.wms.facility-layout.locationslot.LocationSlotRegistered"
+            subject: "WH1-DOCK-IN-01"
+            time: "2026-10-01T10:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:facility-layout:events:LocationSlotRegistered:v1"
+            data:
+              eventName: "LocationSlotRegistered"
+              eventType: "com.warehouse.wms.facility-layout.locationslot.LocationSlotRegistered"
+              occurredAt: "2026-10-01T10:00:00Z"
+              locationCode: "WH1-DOCK-IN-01"
+              aisleId: "WH1-DOCK-A01"
+              zoneId: "WH1-DOCK-AMB"
+              locationType: "DockDoor"
+              role: "Dock"
+              dockFlow: "Inbound"
+              maxWeightKg: 0
+              maxVolumeM3: 0
+
+    LocationSlotDecommissioned:
+      name: LocationSlotDecommissioned
+      title: facility-layout LocationSlotDecommissioned (consumed)
+      summary: A coded slot was permanently retired.
+      description: |
+        `type` = `com.warehouse.wms.facility-layout.locationslot.LocationSlotDecommissioned`,
+        source `/warehouse/facility-layout`, dataschema
+        `urn:warehouse:facility-layout:events:LocationSlotDecommissioned:v1`;
+        key = `locationCode`. Removes the door from the local copy when the
+        code is one.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: "#/components/schemas/LocationSlotDecommissionedEvent"
+      examples:
+        - name: decommissioned
+          summary: The door was retired.
+          payload:
+            specversion: "1.0"
+            id: "7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e"
+            source: "/warehouse/facility-layout"
+            type: "com.warehouse.wms.facility-layout.locationslot.LocationSlotDecommissioned"
+            subject: "WH1-DOCK-IN-01"
+            time: "2026-10-05T10:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:facility-layout:events:LocationSlotDecommissioned:v1"
+            data:
+              eventName: "LocationSlotDecommissioned"
+              eventType: "com.warehouse.wms.facility-layout.locationslot.LocationSlotDecommissioned"
+              occurredAt: "2026-10-05T10:00:00Z"
+              locationCode: "WH1-DOCK-IN-01"
+
+  schemas:
+    CloudEventEnvelope:
+      type: object
+      required: [specversion, id, source, type, subject, time, datacontenttype, dataschema, data]
+      properties:
+        specversion: { type: string, const: "1.0" }
+        id: { type: string, format: uuid }
+        source: { type: string }
+        type: { type: string }
+        subject: { type: string, description: The aggregate instance id. }
+        time: { type: string, format: date-time }
+        datacontenttype: { type: string, const: application/json }
+        dataschema: { type: string }
+
+    AsnLineData:
+      type: object
+      required: [line_no, sku, expected_qty]
+      properties:
+        line_no: { type: integer, minimum: 1 }
+        sku: { type: string }
+        expected_qty: { type: integer, minimum: 1 }
+
+    DiscrepancyData:
+      type: object
+      required: [line_no, sku, kind, expected_qty, received_qty, damaged_qty]
+      properties:
+        line_no: { type: integer, minimum: 1 }
+        sku: { type: string }
+        kind: { type: string, enum: [Short, Over, Damaged] }
+        expected_qty: { type: integer, minimum: 1 }
+        received_qty: { type: integer, minimum: 0, description: Good plus damaged. }
+        damaged_qty: { type: integer, minimum: 0 }
+        w13_code: { type: string, enum: ["01", "02", "03"], description: "X12 W13 receiving condition code of the kind (ADR 0023): Damaged 01, Short 02, Over 03." }
+        cbv_disposition: { type: string, enum: [damaged, mismatch_quantity], description: "GS1 CBV disposition of the kind (ADR 0023)." }
+
+    ASNRegisteredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [asn_number, supplier_ref, lines]
+              properties:
+                asn_number: { type: string }
+                supplier_ref: { type: string }
+                registered_at: { type: string, format: date-time, description: When the ASN was registered here (ADR 0025); omitted on events raised before it existed. }
+                expected_arrival: { type: string, format: date-time, description: Omitted when the supplier gave none. }
+                owner_ref: { type: string, description: Optional opaque tenant tag. }
+                lines:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/AsnLineData" }
+                cartons:
+                  type: array
+                  description: Optional announced cartons.
+                  items:
+                    type: object
+                    required: [sscc, kind, contents]
+                    properties:
+                      sscc: { type: string }
+                      parent_sscc: { type: string }
+                      kind: { type: string, enum: [HOMOGENEOUS_CASE, MIXED] }
+                      gross_weight_g: { type: integer }
+                      dims:
+                        type: object
+                        properties:
+                          length_mm: { type: integer }
+                          width_mm: { type: integer }
+                          height_mm: { type: integer }
+                      contents:
+                        type: array
+                        items:
+                          type: object
+                          required: [line_no, sku, gtin, qty]
+                          properties:
+                            line_no: { type: integer }
+                            sku: { type: string }
+                            gtin: { type: string }
+                            qty: { type: integer, description: Eaches. }
+                            lot: { type: string }
+                            expiry: { type: string }
+
+    ASNCancelledEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [asn_number]
+              properties:
+                asn_number: { type: string }
+                reason: { type: string, description: Omitted when none was given. }
+
+    AsnLateForArrivalEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [asn_number, supplier_ref, appointment_id, visit_id, asn_registered_at, arrived_at, lateness_seconds]
+              properties:
+                asn_number: { type: string }
+                supplier_ref: { type: string }
+                appointment_id: { type: string, description: The appointment the receipt was opened from. }
+                visit_id: { type: string, description: The yard visit whose arrival was the earliest seen for the appointment. }
+                asn_registered_at: { type: string, format: date-time, description: When the ASN was registered here (ADR 0025). }
+                arrived_at: { type: string, format: date-time, description: The earliest gate arrival seen for the appointment (the `visit_arrivals` local copy, ADR 0021). }
+                lateness_seconds: { type: integer, format: int64, minimum: 1, description: "`asn_registered_at - arrived_at`, whole seconds; an equal or earlier registration is on time and raises nothing." }
+
+    DockSchedulingAppointmentBookedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              description: The fields this service reads; others are ignored.
+              required: [appointment_id, direction, door_code, carrier, window_start, window_end, version]
+              properties:
+                appointment_id: { type: string }
+                direction: { type: string, enum: [INBOUND, OUTBOUND], description: "Only INBOUND is copied." }
+                door_code: { type: string }
+                carrier: { type: string }
+                window_start: { type: string, format: date-time }
+                window_end: { type: string, format: date-time }
+                asn_numbers:
+                  type: array
+                  description: At least one for an INBOUND appointment.
+                  items: { type: string }
+                version: { type: integer, format: int64, minimum: 1, description: "dock-scheduling's aggregate version; the version guard of the copy." }
+
+    DockSchedulingAppointmentCancelledEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              description: The fields this service reads; others are ignored.
+              required: [appointment_id, version]
+              properties:
+                appointment_id: { type: string }
+                version: { type: integer, format: int64, minimum: 1 }
+
+    DockSchedulingAppointmentRescheduledEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              description: dock-scheduling's payload; only `appointment_id`, `door_code`, `window_start`, `window_end` and `version` change the copy.
+              required: [appointment_id, door_code, window_start, window_end, version]
+              properties:
+                appointment_id: { type: string }
+                site_id: { type: string, description: Ignored. }
+                door_code: { type: string, description: The new door. }
+                previous_door_code: { type: string, description: Logged only. }
+                window_start: { type: string, format: date-time }
+                window_end: { type: string, format: date-time, description: Must be after `window_start`. }
+                previous_window_start: { type: string, format: date-time, description: Ignored. }
+                previous_window_end: { type: string, format: date-time, description: Ignored. }
+                arrival_tolerance_minutes: { type: integer, description: Ignored. }
+                version: { type: integer, format: int64, minimum: 1, description: "dock-scheduling's aggregate version; the version guard of the copy." }
+
+    DockSchedulingAppointmentDoorReassignedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              description: dock-scheduling's payload; only `appointment_id`, `to_door_code` and `version` change the copy.
+              required: [appointment_id, to_door_code, version]
+              properties:
+                appointment_id: { type: string }
+                site_id: { type: string, description: Ignored. }
+                from_door_code: { type: string, description: Logged only. }
+                to_door_code: { type: string, description: The new door. }
+                version: { type: integer, format: int64, minimum: 1 }
+
+    ReceiptOpenedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [receipt_id, asn_number, opened_at]
+              properties:
+                receipt_id: { type: string }
+                asn_number: { type: string }
+                appointment_id: { type: string, description: Omitted for a walk-in delivery. }
+                door_code: { type: string, description: Omitted when the receipt has no appointment. }
+                opened_at: { type: string, format: date-time }
+
+    ReceiptLineReceivedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [receipt_id, asn_number, line_no, sku, quantity, condition, received_at]
+              properties:
+                receipt_id: { type: string }
+                asn_number: { type: string }
+                line_no: { type: integer, minimum: 1 }
+                sku: { type: string }
+                quantity: { type: integer, minimum: 1 }
+                condition: { type: string, enum: [Good, Damaged] }
+                received_at: { type: string, format: date-time }
+                owner_ref: { type: string, description: Optional; omitted for fleet-owned stock. }
+                pack_gtin: { type: string, description: Optional; the CASE GTIN when received as cases or from a homogeneous carton. }
+                cases: { type: integer, minimum: 1, description: Optional; cases booked; `quantity` stays eaches. }
+                sscc: { type: string, description: Optional; the carton the quantity came from. }
+
+    ReceiptCartonReceivedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [receipt_id, asn_number, sealed, lpn, contents, received_at]
+              properties:
+                receipt_id: { type: string }
+                asn_number: { type: string }
+                owner_ref: { type: string, description: Omitted for fleet-owned stock. }
+                sscc: { type: string, description: Omitted for an unlabelled carton. }
+                parent_sscc: { type: string }
+                sealed: { type: boolean }
+                lpn: { type: string, description: "The SSCC, or an internal `LPN-<ulid>`." }
+                contents:
+                  type: array
+                  items:
+                    type: object
+                    required: [line_no, sku, gtin, qty, condition]
+                    properties:
+                      line_no: { type: integer, minimum: 1 }
+                      sku: { type: string }
+                      gtin: { type: string }
+                      qty: { type: integer, minimum: 1, description: Eaches. }
+                      lot: { type: string }
+                      expiry: { type: string }
+                      condition: { type: string, enum: [Good, Damaged] }
+                received_at: { type: string, format: date-time }
+                sscc_source: { type: string, enum: [supplier, receiver], description: "Who gave the carton its SSCC (ADR 0024). `receiver` is an SSCC assigned by AssignSscc under the receiver's own GS1 company prefix. Additive and optional." }
+                best_before: { type: string, format: date, description: "AI 15 of the scanned label, as an ISO date; a day 00 is the last day of the month (ADR 0024). Optional." }
+                expiry: { type: string, format: date, description: "AI 17 of the scanned label (ADR 0024). Optional." }
+                production_date: { type: string, format: date, description: "AI 11 of the scanned label (ADR 0024). Optional." }
+                packaging_date: { type: string, format: date, description: "AI 13 of the scanned label (ADR 0024). Optional." }
+                serial: { type: string, description: "AI 21 of the scanned label (ADR 0024). Optional." }
+                purchase_order: { type: string, description: "AI 400 of the scanned label (ADR 0024). Optional." }
+                ship_to_gln: { type: string, pattern: '^[0-9]{13}$', description: "AI 410 of the scanned label (ADR 0024). Optional." }
+                ship_for_gln: { type: string, pattern: '^[0-9]{13}$', description: "AI 413 of the scanned label; stored, never enforced (ADR 0024). Optional." }
+
+    CartonDiscrepancyRaisedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [receipt_id, kind, at]
+              properties:
+                receipt_id: { type: string }
+                sscc: { type: string, description: Omitted when the finding has no SSCC. }
+                kind:
+                  type: string
+                  enum: [UnexpectedCarton, MissingCarton, DuplicateSscc, UnknownGtin, CaseQtyMismatch, MixedCaseDeclaredAsCasePack, UnlabelledCarton, CartonOverLimit, MixedCartonContentMismatch, LabelNonCompliant, WrongDestination]
+                expected: { type: string, description: "A count, a SKU, or `sku:qty` / `grossWeightG:<n>` pairs (CartonOverLimit: the breached limits; MixedCartonContentMismatch: the manifest; LabelNonCompliant: the reason code, e.g. `conflicting_ais`)." }
+                actual: { type: string, description: "The counterpart of `expected` (LabelNonCompliant: the raw scan; WrongDestination: the GLN the label named)." }
+                at: { type: string, format: date-time }
+                w13_code: { type: string, enum: ["01", "02", "03", "05", "09"], description: "X12 W13 receiving condition code (ADR 0023). Absent when the standard has no code for the kind (LabelNonCompliant and WrongDestination have none)." }
+                cbv_disposition: { type: string, description: "GS1 CBV disposition (ADR 0023, 0024), derived from the kind." }
+                supplier_ref: { type: string, description: "The supplier of the ASN; set on LabelNonCompliant and WrongDestination so a first-pass rate can be told per supplier (ADR 0024). Optional." }
+
+    ReceiptClosedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [receipt_id, asn_number, closed_at, discrepancies]
+              properties:
+                receipt_id: { type: string }
+                asn_number: { type: string }
+                closed_at: { type: string, format: date-time }
+                discrepancies:
+                  type: array
+                  description: Empty when everything matched.
+                  items: { $ref: "#/components/schemas/DiscrepancyData" }
+
+    ReceivingAdviceIssuedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [receipt_id, asn_number, despatch_advice_ref, supplier_ref, issued_at, last_carton_at, sla_seconds, within_sla, lines, lines_total, carton_findings, carton_findings_total]
+              properties:
+                receipt_id: { type: string }
+                asn_number: { type: string }
+                despatch_advice_ref: { type: string, description: "The reference to the despatch advice: the ASN number." }
+                supplier_ref: { type: string, description: "The supplier as the ASN knows it." }
+                owner_ref: { type: string, description: "The 3PL depositor. Omitted for fleet-owned stock." }
+                issued_at: { type: string, format: date-time }
+                last_carton_at: { type: string, format: date-time, description: "When the last unit was received; the receipt's opening when nothing was." }
+                sla_seconds: { type: integer, format: int64, minimum: 1, description: "The committed window (RECEIVING_ADVICE_SLA) in force at close." }
+                within_sla: { type: boolean, description: "issued_at - last_carton_at <= sla_seconds." }
+                lines:
+                  type: array
+                  maxItems: 1000
+                  description: Lines with exceptions first, then the rest, each group in line order; bounded.
+                  items:
+                    type: object
+                    required: [line_no, sku, expected_qty, received_qty, accepted_qty, rejected_qty, held_qty, sscc_count, discrepancies]
+                    properties:
+                      line_no: { type: integer, minimum: 1 }
+                      sku: { type: string }
+                      gtin: { type: string, pattern: '^[0-9]{14}$', description: Omitted when the line has no known GTIN. }
+                      expected_qty: { type: integer, minimum: 0 }
+                      received_qty: { type: integer, minimum: 0, description: "Accepted plus rejected plus held." }
+                      accepted_qty: { type: integer, minimum: 0, description: The Good units that are not held. }
+                      rejected_qty: { type: integer, minimum: 0, description: The Damaged units. }
+                      held_qty: { type: integer, minimum: 0, description: "The Good units declared held by the Hold command." }
+                      sscc_count: { type: integer, minimum: 0, description: The real number of SSCCs received on the line. }
+                      ssccs:
+                        type: array
+                        maxItems: 1000
+                        items: { type: string, pattern: '^[0-9]{18}$' }
+                      ssccs_truncated: { type: boolean, description: "True when ssccs lists fewer than sscc_count. Omitted when false." }
+                      earliest_best_before: { type: string, format: date, description: "The earliest best-before date (AI 15) of the accepted cartons of the line (ADR 0024). Omitted when none carried one." }
+                      earliest_expiry: { type: string, format: date, description: "The earliest expiry date (AI 17) of the accepted cartons of the line (ADR 0024). Omitted when none carried one." }
+                      discrepancies:
+                        type: array
+                        items:
+                          type: object
+                          required: [kind, quantity, cbv_disposition]
+                          properties:
+                            kind: { type: string, enum: [Short, Over, Damaged, IncorrectProduct, Hold] }
+                            quantity: { type: integer, minimum: 1 }
+                            w13_code: { type: string, enum: ["01", "02", "03", "05", "09"] }
+                            cbv_disposition: { type: string, enum: [damaged, mismatch_quantity, mismatch_class, non_conformant] }
+                lines_total: { type: integer, minimum: 0, description: The real number of lines. }
+                lines_truncated: { type: boolean, description: "True when lines lists fewer than lines_total. Omitted when false." }
+                carton_findings:
+                  type: array
+                  maxItems: 200
+                  items:
+                    type: object
+                    required: [kind, at]
+                    properties:
+                      kind: { type: string }
+                      sscc: { type: string }
+                      expected: { type: string }
+                      actual: { type: string }
+                      at: { type: string, format: date-time }
+                      w13_code: { type: string, enum: ["01", "02", "03", "05", "09"], description: Absent for a kind with no W13 code. }
+                      cbv_disposition: { type: string }
+                      supplier_ref: { type: string, description: Set on label findings (ADR 0024). }
+                carton_findings_total: { type: integer, minimum: 0 }
+
+    ReceivingAdviceOverdueEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [receipt_id, asn_number, last_carton_at, due_at, sla_seconds, overdue_at]
+              properties:
+                receipt_id: { type: string }
+                asn_number: { type: string }
+                last_carton_at: { type: string, format: date-time }
+                due_at: { type: string, format: date-time, description: last_carton_at + sla_seconds. }
+                sla_seconds: { type: integer, format: int64, minimum: 1 }
+                overdue_at: { type: string, format: date-time, description: When the sweep saw the receipt past due. }
+
+    VisitCheckedInEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              description: The fields this service reads; others are ignored.
+              required: [visit_id, arrived_at, version]
+              properties:
+                visit_id: { type: string }
+                appointment_id: { type: [string, "null"], description: "Null for a walk-in visit, which is ignored." }
+                arrived_at: { type: string, format: date-time, description: "The gate arrival: the start of dock-to-stock." }
+                version: { type: integer, format: int64, minimum: 1 }
+
+    ContainerStowedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              description: The fields this service reads; others are ignored.
+              required: [lpn, at]
+              properties:
+                lpn: { type: string, description: "The license plate; for a receipt carton it is its SSCC." }
+                at: { type: string, format: date-time, description: "When the container was stowed." }
+
+    ReceiptStowCompletedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [receipt_id, asn_number, appointment_id, arrived_at, closed_at, stowed_at, dock_to_stock_seconds, carton_count]
+              properties:
+                receipt_id: { type: string }
+                asn_number: { type: string }
+                appointment_id: { type: string }
+                arrived_at: { type: string, format: date-time, description: "yard-management's gate arrival." }
+                closed_at: { type: string, format: date-time }
+                stowed_at: { type: string, format: date-time, description: "The latest stow of a Good carton." }
+                dock_to_stock_seconds: { type: integer, format: int64, minimum: 0, description: "stowed_at - arrived_at, clamped at 0." }
+                carton_count: { type: integer, minimum: 1, description: "How many Good cartons were stowed." }
+
+    ProductRegisteredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, description, version]
+              properties:
+                sku: { type: string }
+                description: { type: string }
+                version: { type: integer, minimum: 1 }
+
+    ProductPackLevelDeclaredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, level, gtin, units_per_pack, is_orderable, is_despatch_unit, effective_from, version]
+              properties:
+                sku: { type: string }
+                level: { type: string, enum: [EACH, INNER, CASE, PALLET] }
+                gtin: { type: string, pattern: '^[0-9]{14}$' }
+                child_gtin: { type: string, pattern: '^[0-9]{14}$' }
+                qty_of_child: { type: integer, minimum: 2, maximum: 1000000, description: Absent for EACH. }
+                units_per_pack: { type: integer, minimum: 1, maximum: 1000000, description: Direct factor to eaches; 1 for EACH. }
+                is_orderable: { type: boolean }
+                is_despatch_unit: { type: boolean }
+                effective_from: { type: string, format: date-time }
+                version: { type: integer, minimum: 1 }
+    ProductPackLevelRetiredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, level, gtin, effective_to, reason, version]
+              properties:
+                sku: { type: string }
+                level: { type: string, enum: [EACH, INNER, CASE, PALLET] }
+                gtin: { type: string, pattern: '^[0-9]{14}$' }
+                effective_to: { type: string, format: date-time }
+                reason: { type: string, minLength: 1, maxLength: 200 }
+                version: { type: integer, minimum: 1 }
+
+    LocationSlotRegisteredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [locationCode, aisleId, zoneId, locationType, maxWeightKg, maxVolumeM3]
+              properties:
+                eventName: { type: string }
+                eventType: { type: string }
+                occurredAt: { type: string, format: date-time }
+                locationCode: { type: string }
+                aisleId: { type: string }
+                zoneId: { type: string }
+                locationType: { type: string }
+                role: { type: string, description: "Storage, Dock, Yard, WorkCenter, Drop, Staging, QC, Consolidation or Shipping; absent means Storage." }
+                dockFlow: { type: string, enum: [Inbound, Outbound, Both], description: Present only when role is Dock. }
+                activities: { type: array, items: { type: string }, description: Present only when role is WorkCenter. }
+                maxWeightKg: { type: number }
+                maxVolumeM3: { type: number }
+
+    LocationSlotDecommissionedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [locationCode]
+              properties:
+                eventName: { type: string }
+                eventType: { type: string }
+                occurredAt: { type: string, format: date-time }
+                locationCode: { type: string }

@@ -1,0 +1,19 @@
+{
+  "id": "ord-a1b2c3d4-0000-0000-0000-000000000001",
+  "status": "Allocated",
+  "allowPartialShipment": false,
+  "releaseOnAllocation": true,
+  "requiredShipBy": "2026-09-25T08:00:00Z",
+  "fulfillmentSiteId": "WH1",
+  "promiseDate": "2026-08-27T09:00:00Z",
+  "lines": [
+    {
+      "lineNo": 1,
+      "sku": "SKU-1",
+      "quantity": 2,
+      "pathId": "PICK",
+      "giftWrap": false,
+      "status": "Allocated"
+    }
+  ]
+}
