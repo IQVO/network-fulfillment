@@ -1,0 +1,1277 @@
+openapi: 3.0.3
+info:
+  title: Order Management API
+  version: "2.0.0"
+  description: >
+    The missing upstream Open Host Service for the warehouse-systems
+    platform: it owns **Order** and **OrderLine** as first-class, validated
+    aggregates. Before this bounded context existed, "an order" was just an
+    unowned, unvalidated string — `OrderRef` / `DemandRef` / `Reference` —
+    independently reinvented by three different services. Here the OrderId
+    is a real identity, and it is the value sent downstream as
+    inventory-storage's `demandRef`.
+
+
+    The lifecycle is intake -> allocation -> release, with cancellation
+    legal up to the release boundary — but as of this redesign, a caller
+    only ever expresses ONE intent: **place an order**
+    (`POST /orders`). Allocation and release are internal saga steps this
+    service performs automatically, right after intake, and again on
+    `POST /orders/{id}/allocation-retries` — they are no longer public REST
+    verbs a caller drives by hand. **Allocation** reserves stock per line through
+    inventory-storage's published `POST /reservations`; a `409` from that
+    service is the business fact "no usable stock", which backorders that
+    one line, while any other failure fails the whole allocation pass
+    rather than silently recording a backorder. **Release** is no longer a
+    synchronous call to any Supplier — it is announced as a fact on the
+    enriched `OrderAllocated` / `OrderPartiallyAllocated` Kafka integration
+    events (topic `warehouse.order-management.events`), which
+    wes-work-planning consumes to enqueue its own work asynchronously. This
+    service holds no reservation or work-unit state of its own, only the
+    references it needs to revoke.
+
+
+    The order-level `status` is always DERIVED from the line statuses and
+    is never stored, so it cannot drift out of sync with the lines it
+    summarises.
+
+
+    Out of this service's boundary: it does not hold inventory, pick, pack,
+    ship, or plan work (those are inventory-storage, wes-work-planning and
+    fulfillment-execution), and it does not model a local Reservation or
+    WorkUnit aggregate. Error responses across this API use RFC 7807
+    (`application/problem+json`) Problem Details.
+
+
+    This API follows the fleet REST API guideline (ADR 0048): URLs name
+    things (commands are noun sub-resources such as
+    `POST /orders/{id}/releases` and `POST /orders/{id}/allocation-retries`),
+    EVERY `POST` is behind the Idempotency-Key middleware (a retry replays the
+    stored answer with the response header `Idempotency-Replayed: true`; the
+    same key with a different method, path or body is 409
+    `idempotency-key-reused`; a missing key is 400
+    `idempotency-key-required`, a malformed one 400
+    `idempotency-key-invalid`), and `DELETE /orders/{id}` is idempotent by
+    method. `GET /planned-capacity` is a bounded read model exempt from paging
+    (`x-pagination-exempt: report`).
+  contact:
+    name: Order Management (Generic/Supporting Bounded Context)
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: Orders
+    description: >
+      Order intake and reads. An order is received with its lines in
+      `Received` status, and this service immediately attempts
+      allocation-then-release in the SAME call — a caller expresses intent
+      by placing the order, not by separately driving internal saga steps.
+  - name: Allocation
+    description: >
+      Automatic allocation of stock per line through inventory-storage,
+      folded into `POST /orders` and `POST /orders/{id}/allocation-retries`.
+      A `409` from that Supplier backorders a single line (a business
+      fact); any other failure fails the whole allocation pass
+      (fail-closed on ambiguity). A backordered line returns to
+      `Allocated` only via an allocation retry, which also re-attempts
+      release for any lines it newly clears.
+  - name: PlannedCapacity
+    description: >
+      The local read model of warehouse-planning's published CapacityPlans
+      (ADR 0031). Written only by the Kafka consumer; this API only reads it.
+      Present only when the deployment enables the integration
+      (`PLANNED_CAPACITY_CONSUMER_GROUP`).
+  - name: Health
+    description: Liveness probe.
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Liveness probe
+      description: >
+        Returns 200 with a static status body if the process is up. Does
+        not check downstream dependencies (Postgres, inventory-storage,
+        wes-work-planning) — it is a liveness check, not a readiness check.
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                example:
+                  status: ok
+
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Readiness probe
+      description: >
+        Returns 200 `{"status":"ready"}` while the process accepts traffic and
+        503 `{"status":"not_ready"}` once graceful shutdown has begun
+        (ADR 0025): the readiness gate is flipped first, before the HTTP
+        server or any consumer is stopped, so a Kubernetes readinessProbe
+        can drain traffic during `SHUTDOWN_DRAIN_DELAY`. Like `/healthz` it
+        does not check downstream dependencies; unlike `/healthz` it is the
+        one that changes during shutdown.
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is ready to receive traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                example:
+                  status: ready
+        "503":
+          description: Service is draining for shutdown and must not receive new traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+                example:
+                  status: not_ready
+
+  /orders:
+    post:
+      operationId: receiveOrder
+      summary: Receive a new order — allocates and releases automatically
+      description: >
+        Intake — the ReceiveOrder use case. Validates every requested line
+        (SKU non-empty, quantity > 0), mints an `OrderId`, and persists the
+        order in `Received` status, publishing `OrderReceived`
+        unconditionally.
+
+
+        Immediately afterward, in the SAME call, this service attempts
+        allocation-then-release: it reserves stock per line via
+        inventory-storage's `POST /reservations` (see the Allocation tag),
+        and for every line that ends up `Allocated` and eligible under BR3
+        (see below), releases it — announced via the enriched
+        `OrderAllocated` / `OrderPartiallyAllocated` Kafka events, never a
+        second synchronous call. If that implicit allocation attempt hits
+        a hard (non-business) failure, this endpoint still returns `201`:
+        the order genuinely was received, and a caller expressing "place
+        an order" must never be told that failed just because an internal,
+        best-effort next step could not complete. The returned body
+        reflects whatever the allocation pass actually achieved.
+
+
+        `allowPartialShipment` defaults to `false` — ship-complete (BR3).
+        Every line's `pathId` is chosen by this service, not the caller
+        (ADR 0021): the active process paths in the process-path catalogue
+        are filtered by their declared eligibility and the shortest known
+        cycle time wins (ties: lower path id), falling back to the default
+        `pick` when no catalogue is configured or no path is active. A
+        caller placing an order has no business supplying
+        wes-work-planning's process-path vocabulary at intake; `pathId` is
+        visible on every line in the response, but not settable on the
+        request.
+
+
+        Idempotent (REST guideline, ADR 0023/0048): send an `Idempotency-Key`
+        header. A retry with the same key, method, path and body replays the
+        stored answer (with `Idempotency-Replayed: true`) and creates no
+        second order; the same key with another body is 409
+        `idempotency-key-reused`.
+      tags: [Orders]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReceiveOrderRequest"
+            examples:
+              ordinary:
+                summary: An ordinary order — no site named
+                value:
+                  allowPartialShipment: false
+                  lines:
+                    - sku: SKU-1
+                      quantity: 2
+                    - sku: SKU-2
+                      quantity: 1
+                      giftWrap: true
+              withFulfillmentSite:
+                summary: A network-originated hold with a caller-assigned fulfillment site
+                value:
+                  releaseOnAllocation: false
+                  requiredShipBy: "2026-09-25T08:00:00Z"
+                  fulfillmentSiteId: WH1
+                  lines:
+                    - sku: SKU-1
+                      quantity: 2
+      responses:
+        "201":
+          description: >
+            Order received. Reflects whatever the immediate
+            allocation-then-release attempt achieved — `Received`,
+            `Backordered`, `PartiallyAllocated`/`PartiallyReleased`,
+            `Allocated`, or `Released` — a caller inspects `status`/line
+            `status` for the outcome rather than assuming `Received`.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            Location:
+              schema:
+                type: string
+              description: Canonical URI of the created order.
+              example: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+              example:
+                id: ord-a1b2c3d4-0000-0000-0000-000000000001
+                status: Released
+                allowPartialShipment: false
+                releaseOnAllocation: true
+                promiseDate: "2026-08-27T09:00:00Z"
+                lines:
+                  - lineNo: 1
+                    sku: SKU-1
+                    quantity: 2
+                    pathId: pick
+                    giftWrap: false
+                    status: Released
+                    reservationId: res-a1b2c3d4-0000-0000-0000-000000000009
+                  - lineNo: 2
+                    sku: SKU-2
+                    quantity: 1
+                    pathId: pick
+                    giftWrap: true
+                    status: Released
+                    reservationId: res-a1b2c3d4-0000-0000-0000-000000000010
+        "400":
+          description: >
+            The request body is malformed or invalid — an empty or missing
+            SKU, a body with no lines, an explicit `null` on a non-nullable
+            field, or a `fulfillmentSiteId` that is not a site code of
+            uppercase letters and digits (problem type
+            `invalid-fulfillment-site-id`, ADR 0044), or a body that is not
+            valid JSON (`malformed-request-body`), or a resolved process path
+            that is not active in the process-path catalogue
+            (`unknown-process-path`). A missing or malformed
+            Idempotency-Key header is also a 400 (`idempotency-key-required` /
+            `idempotency-key-invalid`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                invalidFulfillmentSiteId:
+                  summary: Malformed fulfillment site id
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/invalid-fulfillment-site-id
+                    title: Fulfillment site id must be a site code of uppercase letters and digits
+                    status: 400
+                    detail: 'fulfillment site id must be a non-empty site code of uppercase letters and digits: "wh1" must contain only uppercase letters and digits'
+                    instance: /orders
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing (REST guideline 2.2)
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /orders
+        "409":
+          description: >
+            The Idempotency-Key was already used with a different method,
+            path or body (`idempotency-key-reused`), or the write lost an
+            optimistic-concurrency race (`concurrent-modification`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.order-management.warehouse-systems.dev/idempotency-key-reused
+                title: Idempotency-Key was already used with a different request
+                status: 409
+                detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                instance: /orders
+        "422":
+          description: >
+            A line quantity is not greater than zero (`non-positive-quantity`),
+            a line's attributes are not eligible for its resolved process path
+            (`line-ineligible-for-resolved-path`), or a held order
+            (`releaseOnAllocation: false`) was combined with
+            `allowPartialShipment: true` (`held-order-must-be-ship-complete`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.order-management.warehouse-systems.dev/non-positive-quantity
+                title: Quantity must be greater than zero
+                status: 422
+                detail: quantity must be greater than zero
+                instance: /orders
+        "503":
+          $ref: "#/components/responses/DownstreamUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      summary: Read an order's current state
+      description: >
+        The GetOrder use case. Returns the order with every line's current
+        status, its reservation reference where allocated, and the promise
+        date once allocation has computed one. The order-level `status` in
+        this response is derived from the line statuses at read time — it
+        is not a stored field.
+      tags: [Orders]
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: The order's current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+              example:
+                id: ord-a1b2c3d4-0000-0000-0000-000000000001
+                status: Allocated
+                allowPartialShipment: false
+                releaseOnAllocation: true
+                promiseDate: "2026-08-27T09:00:00Z"
+                lines:
+                  - lineNo: 1
+                    sku: SKU-1
+                    quantity: 2
+                    pathId: pick
+                    giftWrap: false
+                    status: Allocated
+                    reservationId: res-a1b2c3d4-0000-0000-0000-000000000009
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/OrderNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: cancelOrder
+      summary: Cancel an order and revoke its reservations
+      description: >
+        The CancelOrder use case. Revokes every allocated line's
+        reservation on inventory-storage via
+        `DELETE /reservations/{id}`, then cancels every line. Publishes
+        `OrderCancelled`.
+
+
+        **BR6 — the cancellation boundary:** this is legal ONLY while no
+        line has reached `Released`. The boundary is checked BEFORE any
+        reservation is revoked, so a rejected cancellation leaves
+        inventory-storage completely untouched. Once any line is released,
+        v1 does NOT claw back the released work — a deliberate, documented
+        gap (see ADR 0004), not an oversight.
+
+
+        A failed revoke fails the whole cancellation and leaves the order
+        untouched, so retrying is safe.
+      tags: [Orders]
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "204":
+          description: Order cancelled; every allocated reservation was revoked.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/OrderNotFound"
+        "409":
+          description: >
+            At least one line has already been released (BR6,
+            `order-already-released`), or the write lost an optimistic-concurrency
+            race (`concurrent-modification`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.order-management.warehouse-systems.dev/order-already-released
+                title: Order already has released lines and can no longer be cancelled
+                status: 409
+                detail: order already has released lines and can no longer be cancelled
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001
+        "503":
+          $ref: "#/components/responses/DownstreamUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /orders/{id}/releases:
+    post:
+      operationId: releaseHeldOrder
+      summary: Release an order held at intake
+      description: >
+        The ReleaseHeldOrder use case (ADR 0020). Commits an order received
+        with `releaseOnAllocation: false` to the floor: its already-allocated
+        lines are released through the same BR3-gated flow every other
+        release uses, the promise is recomputed by the same policy, and the
+        same `OrderAllocated`/`OrderReleased` events fire with the same
+        per-line payload.
+
+
+        IDEMPOTENT for a HELD order: releasing one whose lines are already
+        released returns `200` with no state change and no event. A caller
+        working against an external fill-or-kill deadline cannot distinguish
+        "my release was lost" from "my release failed", so retrying must be
+        safe.
+
+
+        An order that was never held has nothing to release on demand — its
+        lines release themselves at allocation — so calling this on one is
+        rejected with `409` rather than silently succeeding, since it means
+        the caller has the wrong order id or the wrong expectation. This
+        holds even when that order has no allocated lines of its own (a
+        backordered order, say): "never held" and "already released" are
+        different answers and must not collapse into one.
+
+
+        Idempotent through the `Idempotency-Key` header (REST guideline, ADR
+        0023/0048): a retry with the same key, method, path and body replays
+        the stored answer with `Idempotency-Replayed: true` and runs nothing
+        again, so the key row, the order change and the outbox rows commit
+        together.
+      tags: [Allocation]
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The order after release (or unchanged, if already released).
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "400":
+          $ref: "#/components/responses/BadRequestOrIdempotencyKey"
+        "404":
+          $ref: "#/components/responses/OrderNotFound"
+        "409":
+          description: >
+            This order was not held at intake, so it has nothing to release
+            on demand (`order-not-held`); it has no allocated lines to release
+            (`no-allocated-lines`) or no promise date (`promise-date-not-set`);
+            or the write lost an optimistic-concurrency race
+            (`concurrent-modification`). The same Idempotency-Key reused with a different
+            method, path or body is also a 409 (`idempotency-key-reused`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                orderNotHeld:
+                  summary: The order was not held at intake
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/order-not-held
+                    title: Order was not held at intake and has nothing to release on demand
+                    status: 409
+                    detail: order was not held at intake
+                    instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
+        "503":
+          $ref: "#/components/responses/DownstreamUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /orders/{id}/allocation-retries:
+    post:
+      operationId: retryAllocation
+      summary: Re-attempt allocation for backordered lines, then release
+      description: >
+        The RetryAllocation use case. Re-attempts allocation for the
+        order's `Backordered` lines and ONLY those lines — it is the single
+        sanctioned route from `Backordered` back to `Allocated`, and it is
+        what unblocks a ship-complete order held back by BR3. UNLIKE the
+        implicit allocation attempt folded into `POST /orders`, this is an
+        explicit, on-purpose operator/recovery action: a hard (non-409)
+        failure here fails the call with `503` rather than being swallowed
+        — invoking this endpoint IS asking for allocation right now.
+
+
+        A line still short of stock stays `Backordered` (no error). The
+        same fail-closed rule as intake's implicit allocation applies to
+        any non-409 failure. An order with no backordered line at all is
+        rejected with `409`: retrying an order that is not backordered is
+        a caller mistake, not a no-op.
+
+
+        On success, this ALSO attempts release in the same call — the same
+        allocation-then-release flow `POST /orders` uses — announced via
+        the enriched `OrderAllocated` / `OrderPartiallyAllocated` Kafka
+        events rather than any synchronous call to a Supplier.
+
+
+        Idempotent through the `Idempotency-Key` header (REST guideline, ADR
+        0023/0048): a retry with the same key, method, path and body replays
+        the stored answer with `Idempotency-Replayed: true` and allocates
+        nothing again, so the key row, the order change and the outbox rows
+        commit together.
+      tags: [Allocation]
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The order after the retry-then-release pass.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+              example:
+                id: ord-a1b2c3d4-0000-0000-0000-000000000001
+                status: Released
+                allowPartialShipment: false
+                releaseOnAllocation: true
+                promiseDate: "2026-08-27T09:00:00Z"
+                lines:
+                  - lineNo: 1
+                    sku: SKU-1
+                    quantity: 2
+                    pathId: pick
+                    giftWrap: false
+                    status: Released
+                    reservationId: res-a1b2c3d4-0000-0000-0000-000000000009
+                  - lineNo: 2
+                    sku: SKU-2
+                    quantity: 1
+                    pathId: pick
+                    giftWrap: true
+                    status: Released
+                    reservationId: res-a1b2c3d4-0000-0000-0000-000000000010
+        "400":
+          $ref: "#/components/responses/BadRequestOrIdempotencyKey"
+        "404":
+          $ref: "#/components/responses/OrderNotFound"
+        "409":
+          description: >
+            This order has no backordered line to retry
+            (`no-backordered-lines`), or the write lost an
+            optimistic-concurrency race (`concurrent-modification`). The same
+            Idempotency-Key reused with a different method, path or body is
+            also a 409 (`idempotency-key-reused`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                noBackorderedLines:
+                  summary: The order has no backordered line to retry
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/no-backordered-lines
+                    title: Order has no backordered lines to retry
+                    status: 409
+                    detail: order has no backordered lines to retry
+                    instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/allocation-retries
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/allocation-retries
+        "503":
+          $ref: "#/components/responses/DownstreamUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /planned-capacity:
+    get:
+      operationId: getPlannedCapacity
+      summary: List a site's planned capacity windows
+      description: >
+        Reads order-management's LOCAL read model of warehouse-planning's
+        CapacityPlans for one site (ADR 0031): a PLANNED statement about a
+        future window — the demand the planned capacity cannot process in
+        it (`shortage`, in orders) — mirrored from the CloudEvents
+        warehouse-planning publishes on `warehouse.warehouse-planning.events`.
+        It is not live execution state and is never refreshed by calling
+        warehouse-planning. Windows of every `status` are listed (a `DRAFT`
+        is visible here but never influences an order; only a `PUBLISHED`
+        plan with `shortage > 0` annotates orders — see `capacityConstraint`
+        on the Order schema). Windows that ended before `from` are omitted.
+        This route exists only when the integration is enabled; otherwise it
+        is a 404.
+
+
+        Not paged (`x-pagination-exempt: report`, REST guideline 3.5): a
+        bounded read model of ONE site's planned windows, scoped by the
+        required `site` and the `from` instant, whose size is set by the
+        planning horizon warehouse-planning publishes, not by order volume.
+      tags: [PlannedCapacity]
+      x-pagination-exempt: report
+      parameters:
+        - name: site
+          in: query
+          required: true
+          description: >
+            The planning `location` — a site/building code such as `SIM1`
+            (exact, case-sensitive match).
+          schema:
+            type: string
+            minLength: 1
+          example: SIM1
+        - name: from
+          in: query
+          required: false
+          description: >
+            RFC 3339 instant; only windows whose end is after it are listed.
+            Defaults to now.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-10-05T00:00:00Z"
+      responses:
+        "200":
+          description: The site's planned windows ordered by start (possibly none).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlannedCapacity"
+              example:
+                site: SIM1
+                windows:
+                  - planId: 0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10
+                    warehouseId: WH-1
+                    location: SIM1
+                    pathId: pick-rebin-pack
+                    windowStart: "2026-10-05T08:00:00Z"
+                    windowEnd: "2026-10-05T16:00:00Z"
+                    assignedDemand: 12000
+                    capacityOverWindow: 8000
+                    shortage: 4000
+                    bottleneckStep: REBIN
+                    status: PUBLISHED
+                    asOf: "2026-10-04T21:45:10Z"
+        "400":
+          description: The `site` query parameter is missing, or `from` is not an RFC 3339 timestamp.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.order-management.warehouse-systems.dev/invalid-query-parameter
+                title: A required query parameter is missing or invalid
+                status: 400
+                detail: query parameter "site" is required
+                instance: /planned-capacity
+        "404":
+          description: >
+            The planned-capacity integration is not enabled on this
+            deployment (`PLANNED_CAPACITY_CONSUMER_GROUP` unset): the route is
+            not registered, so the router's default 404 answers.
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  headers:
+    IdempotencyReplayed:
+      description: >
+        Present, with the value `true`, ONLY when this response is a replay
+        of the stored answer for the request's Idempotency-Key (the handler
+        did not run again). The first execution of a key never carries it.
+      schema:
+        type: string
+        enum: ["true"]
+        example: "true"
+
+  parameters:
+    OrderId:
+      name: id
+      in: path
+      required: true
+      description: The order's identifier, as returned by receiveOrder.
+      schema:
+        type: string
+        minLength: 1
+      example: ord-a1b2c3d4-0000-0000-0000-000000000001
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >
+        Caller-generated unique key (a UUID per logical submit; a retry
+        reuses it, a new user action mints a new one) that makes a retried
+        request safe (ADR 0023, REST guideline section 2). Clients must ALWAYS
+        send a non-empty value of 1-128 printable ASCII characters: with
+        Postgres wired (every deployed runtime) a missing key is answered
+        with 400 `idempotency-key-required`, a malformed one with 400
+        `idempotency-key-invalid`; a replay with the same key and the same
+        method, path and body returns the original response plus
+        `Idempotency-Replayed: true`, while the same key with a different
+        method, path or body is 409 `idempotency-key-reused`. It is declared
+        optional here only because the in-memory development mode (no
+        `DATABASE_URL`, the mode the Schemathesis contract job boots) has no
+        transactional store and gates the middleware off.
+      schema:
+        type: string
+        example: 5b0f6a0e-6a41-4c63-9f33-0c8f5c1d2a77
+
+  responses:
+    BadRequest:
+      description: >
+        The request body or path parameter is malformed or invalid —
+        including a body whose JSON is syntactically valid but
+        shape-invalid: an explicitly null value on a non-nullable field
+        (e.g. `"giftWrap": null`) is rejected here rather than silently
+        coerced to that field's zero value.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.order-management.warehouse-systems.dev/empty-sku
+            title: SKU must not be empty
+            status: 400
+            detail: sku must not be empty
+            instance: /orders
+
+    BadRequestOrIdempotencyKey:
+      description: >
+        The Idempotency-Key header is missing (`idempotency-key-required`)
+        or is not 1-128 printable ASCII characters
+        (`idempotency-key-invalid`), or the order id in the path is invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            idempotencyKeyRequired:
+              summary: Idempotency-Key header missing (REST guideline 2.2)
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/idempotency-key-required
+                title: Idempotency-Key header is required
+                status: 400
+                detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
+            idempotencyKeyInvalid:
+              summary: Idempotency-Key header is not 1-128 printable ASCII characters
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/idempotency-key-invalid
+                title: Idempotency-Key header is invalid
+                status: 400
+                detail: The Idempotency-Key header must be 1-128 printable ASCII characters (a client-generated UUID per logical submit).
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
+
+    OrderNotFound:
+      description: No order has this id.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.order-management.warehouse-systems.dev/order-not-found
+            title: Order not found
+            status: 404
+            detail: order not found
+            instance: /orders/ord-does-not-exist
+
+    DownstreamUnavailable:
+      description: >
+        inventory-storage could not be reached (transport error, timeout,
+        open circuit breaker), answered with an unexpected status, or is
+        wired in permissive (no-op) mode, or reported insufficient usable
+        stock. Problem `type` is `downstream-unavailable` for an
+        infrastructure failure, `downstream-not-configured` for permissive
+        mode and `insufficient-stock` for the latter. Never papered
+        over with a 2xx: allocating real stock must not appear to succeed
+        when it did not.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            unavailable:
+              summary: inventory-storage failed or answered unexpectedly
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/downstream-unavailable
+                title: A downstream service is unavailable or answered unexpectedly
+                status: 503
+                detail: "downstream service is unavailable: inventory-storage: unexpected response status: 500"
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/allocation-retries
+            notConfigured:
+              summary: inventory-storage client is in permissive (no-op) mode
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/downstream-not-configured
+                title: A downstream service is running in permissive (no-op) mode
+                status: 503
+                detail: downstream client is running in permissive (no-op) mode and cannot perform this operation
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/allocation-retries
+
+    InternalError:
+      description: An unexpected internal error occurred.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.order-management.warehouse-systems.dev/internal-error
+            title: An unexpected internal error occurred
+            status: 500
+            detail: unexpected adapter failure
+            instance: /orders
+
+  schemas:
+    Problem:
+      type: object
+      description: >
+        RFC 7807 (Problem Details for HTTP APIs) error shape, used for
+        every non-2xx response across this service — the same shape the
+        other five services in this platform emit.
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: >
+            A URI identifying the error category (does not need to
+            resolve). Unique per distinct error category in this service.
+          example: https://errors.order-management.warehouse-systems.dev/order-not-found
+        title:
+          type: string
+          description: Fixed, human-readable summary of the error category.
+          example: Order not found
+        status:
+          type: integer
+          format: int32
+          description: Duplicates the HTTP status code as an integer (RFC 7807 requirement).
+          example: 404
+        detail:
+          type: string
+          description: The specific error message for this occurrence.
+          example: order not found
+        instance:
+          type: string
+          description: The request path that produced this error.
+          example: /orders/ord-does-not-exist
+
+    ReceiveOrderRequest:
+      type: object
+      required: [lines]
+      properties:
+        lines:
+          type: array
+          minItems: 1
+          description: The requested lines. An order must have at least one.
+          items:
+            $ref: "#/components/schemas/ReceiveOrderLineRequest"
+        fulfillmentSiteId:
+          type: string
+          minLength: 1
+          pattern: "^[A-Z0-9]+$"
+          description: >
+            OPTIONAL. The site this order is to be fulfilled from, ASSIGNED
+            BY THE CALLER (customer-ordering or network-fulfillment) — this
+            service never infers, defaults or looks one up (ADR 0044). A
+            site code in facility-layout's shape: uppercase letters and
+            digits only. It applies to ordinary orders and to a
+            network-originated hold (`releaseOnAllocation: false`, ADR 0020)
+            alike.
+
+
+            When present it is stored on the order, immutable for its
+            lifetime (re-promise, release and cancel never change it), and is
+            the site of every `SiteSkuDemandChanged` event for the order's
+            lines (`assignment_version` `order-site-v1`, ADR 0044). It is
+            also the site the order is PROMISED against (ADR 0047): the CPT
+            window comes from that site's CPT schedule, at intake and on
+            every re-promise, and the `capacityConstraint` annotation matches
+            that site. A site with no CPT schedule known to this service is
+            promised on the `LeadTime` basis, never on another site's
+            windows. When absent the order behaves exactly as before: it is
+            promised against the deployment's default site
+            (`DEFAULT_SITE_ID`) and demand projects to the deployment's
+            static site, if one is configured
+            (`static-site-v1`, ADR 0035). The frozen
+            `OrderAllocated` / `OrderPartiallyAllocated` / `OrderRepromised`
+            events never carry it. A malformed value is rejected with `400`
+            (problem type `invalid-fulfillment-site-id`); an explicit `null`
+            is rejected too.
+          example: WH1
+        requiredShipBy:
+          type: string
+          format: date-time
+          description: >
+            OPTIONAL. An externally-dictated deadline (RFC 3339) — the
+            instant this order must ship by, set by someone other than this
+            service (a retail network's required ship-by, for example).
+
+
+            When present the promise is CONSTRAINED to a CPT window at or
+            before it, rather than being the earliest window this service
+            can manage; specifically, the LATEST window that still meets the
+            deadline is chosen, leaving the floor maximum slack (ADR 0020
+            §2). When the deadline cannot be met the order is still created
+            and allocated, but comes back with NO `promiseDate` at all —
+            an absent promise is the honest signal that we cannot commit,
+            and is exactly what a caller holding a fill-or-kill obligation
+            needs to see before acknowledging it downstream.
+
+
+            Unlike the ordinary promise path, this one has NO lead-time
+            fallback: missing schedule or capability data yields no promise
+            rather than an estimate, because a guess dressed as a
+            commitment is worse than an admission of ignorance.
+        releaseOnAllocation:
+          type: boolean
+          default: true
+          description: >
+            When true (the default, and the behaviour of every caller that
+            omits the field), the order is received, allocated and released
+            in one call exactly as before ADR 0020. When false the order is
+            HELD: lines are allocated, inventory reservations genuinely
+            exist and a promise is computed and attached, but nothing is
+            released and no work reaches the floor until
+            `POST /orders/{id}/releases`. Intended for a caller that must
+            decide whether to commit to the order before it becomes work —
+            see ADR 0020. A held order must be ship-complete: sending
+            `releaseOnAllocation: false` together with
+            `allowPartialShipment: true` is rejected with `422`.
+        allowPartialShipment:
+          type: boolean
+          default: false
+          description: >
+            When false (the default — ship-complete, BR3), a single
+            backordered line holds the WHOLE order back from release until
+            an allocation retry (`POST /orders/{id}/allocation-retries`)
+            clears it. When true, allocated lines are
+            independently eligible for release.
+          example: false
+
+    ReceiveOrderLineRequest:
+      type: object
+      required: [sku, quantity]
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          description: The stock keeping unit ordered. Must be non-empty.
+          example: SKU-1
+        quantity:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Quantity ordered. Must be greater than zero. int64, not int32:
+            the service is a 64-bit Go binary whose quantity validation is
+            "greater than zero" only, so it genuinely accepts (and echoes)
+            quantities beyond 2^31-1 — this spec documents that reality.
+          example: 2
+        giftWrap:
+          type: boolean
+          default: false
+          description: >
+            OPTIONAL. Whether the requester asked the warehouse to produce
+            a gift package for this line. Passed straight through onto the
+            enriched `OrderAllocated`/`OrderPartiallyAllocated` Kafka
+            event's `lines[].gift_wrap` field — a caller-stated
+            characteristic, never looked up.
+          example: true
+
+    OrderStatus:
+      type: string
+      description: >
+        The order-level status, ALWAYS derived from the line statuses and
+        never stored, so it cannot drift out of sync with the lines it
+        summarises. `Received` -> `Allocated` | `PartiallyAllocated` |
+        `Backordered` -> `Released` | `PartiallyReleased`, with `Cancelled`
+        reachable only from a pre-release state (BR6).
+      enum:
+        - Received
+        - Allocated
+        - PartiallyAllocated
+        - Backordered
+        - Released
+        - PartiallyReleased
+        - Cancelled
+      example: Allocated
+
+    OrderLineStatus:
+      type: string
+      description: >
+        The per-line status. `Pending` -> `Allocated` (inventory-storage
+        reserved) or `Backordered` (inventory-storage answered 409);
+        `Backordered` -> `Allocated` ONLY via an allocation retry;
+        `Allocated` -> `Released` (a pure domain transition made in the
+        same call once ship-complete rule BR3 allows it, ADR 0005 — the
+        released lines are then announced on Kafka for wes-work-planning to
+        react to independently; nothing waits for it to accept the work);
+        any pre-release state -> `Cancelled`.
+      enum: [Pending, Allocated, Backordered, Released, Cancelled]
+      example: Allocated
+
+    OrderLine:
+      type: object
+      required: [lineNo, sku, quantity, pathId, giftWrap, status]
+      properties:
+        lineNo:
+          type: integer
+          format: int32
+          description: The line's 1-based position within its order.
+          example: 1
+        sku:
+          type: string
+          example: SKU-1
+        quantity:
+          type: integer
+          format: int64
+          description: >
+            Quantity ordered, as received (and validated) at intake — see
+            the matching int64 note on ReceiveOrderLineRequest.quantity.
+          example: 2
+        pathId:
+          type: string
+          description: >
+            The process path assigned to this line. It is chosen by this
+            service, never by the caller (ADR 0021): the active paths in
+            the process-path catalogue are filtered by their declared
+            eligibility (max units, required/excluded product attributes,
+            gift wrap) and the one with the shortest known cycle time
+            (P95) wins, ties broken on the lower path id. With no
+            catalogue configured, or no active path, it falls back to the
+            default `pick`. A caller placing an order has no business
+            supplying wes-work-planning's process-path vocabulary at
+            intake, so this is read-only: visible in every response, never
+            settable on the request.
+          example: pick
+        giftWrap:
+          type: boolean
+          example: false
+        status:
+          $ref: "#/components/schemas/OrderLineStatus"
+        reservationId:
+          type: string
+          description: >
+            inventory-storage's reservation id, present only once the line
+            is allocated. A reference only — this context models no local
+            Reservation aggregate, because inventory-storage remains the
+            sole owner of reservation state. Omitted (rather than empty)
+            when the line is not allocated.
+          example: res-a1b2c3d4-0000-0000-0000-000000000009
+
+    CapacityConstraint:
+      type: object
+      required: [constrained, site, windows]
+      description: >
+        Present on an Order ONLY when its promise overlaps a PUBLISHED
+        warehouse-planning shortage window at the order's site (ADR 0031,
+        ADR 0047): its `fulfillmentSiteId` when it carries one, else the
+        configured site.
+        The order's work window is `[now, promise cutoff)`; a window
+        overlaps it when both half-open intervals share at least one instant
+        (a window starting exactly at the cutoff does not). It is a derived,
+        read-time annotation: the order is still accepted, allocated and
+        released, its `promiseDate` is NOT moved, and nothing is reserved or
+        revoked. Omitted entirely otherwise, so with no planning events
+        consumed the Order response is unchanged.
+      properties:
+        constrained:
+          type: boolean
+          description: Always true when the object is present.
+          example: true
+        site:
+          type: string
+          description: >
+            The planning `location` the order was matched against — the
+            order's own `fulfillmentSiteId` when it carries one (ADR 0047),
+            else the configured site (`PLANNED_CAPACITY_SITE_ID`, defaulting
+            to `DEFAULT_SITE_ID`).
+          example: SIM1
+        windows:
+          type: array
+          description: The overlapping shortage windows, ordered by start.
+          items:
+            $ref: "#/components/schemas/CapacityConstraintWindow"
+    CapacityConstraintWindow:
+      type: object
+      required: [planId, windowStart, windowEnd, shortage]
+      properties:
+        planId:
+          type: string
+          description: The warehouse-planning CapacityPlan id.
+          example: 0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10
+        windowStart:
+          type: string
+          format: date-time
+          example: "2026-10-05T08:00:00Z"
+        windowEnd:
+          type: string
+          format: date-time
+          description: Exclusive.
+          example: "2026-10-05T16:00:00Z"
+        shortage:
+          type: number
+          format: double
+          description: Orders the planned capacity cannot process in the window.
+          example: 4000
+        bottleneckStep:
+          type: string
+          description: The path step limiting flow, as warehouse-planning reports it.
+          example: REBIN
+    PlannedCapacityWindow:
+      type: object
+      required: [planId, warehouseId, location, windowStart, windowEnd, assignedDemand, capacityOverWindow, shortage, status, asOf]
+      properties:
+        planId:
+          type: string
+          example: 0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10
+        warehouseId:
+          type: string
+          description: warehouse-planning's own warehouse label (informational).
+          example: WH-1
+        location:
+          type: string
+          description: Site/building code.
+          example: SIM1
+        pathId:
+          type: string
+          description: warehouse-planning's own path label (informational; not an order-management process path id).
+          example: pick-rebin-pack
+        windowStart:
+          type: string
+          format: date-time
+          example: "2026-10-05T08:00:00Z"
+        windowEnd:
+          type: string
+          format: date-time
+          description: Exclusive.
+          example: "2026-10-05T16:00:00Z"
+        assignedDemand:
+          type: number
+          format: double
+          example: 12000
+        capacityOverWindow:
+          type: number
+          format: double
+          example: 8000
+        shortage:
+          type: number
+          format: double
+          example: 4000
+        bottleneckStep:
+          type: string
+          example: REBIN
+        status:
+          type: string
+          enum: [DRAFT, PUBLISHED]
+          description: Only PUBLISHED plans with a shortage annotate orders.
+          example: PUBLISHED
+        asOf:
+          type: string
+          format: date-time
+          description: The CloudEvents `time` of the event that last wrote this row (last writer wins per plan id).
+          example: "2026-10-04T21:45:10Z"
+    PlannedCapacity:
+      type: object
+      required: [site, windows]
+      properties:
+        site:
+          type: string
+          example: SIM1
+        windows:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlannedCapacityWindow"
+    Order:
+      type: object
+      required: [id, status, allowPartialShipment, releaseOnAllocation, lines]
+      properties:
+        id:
+          type: string
+          description: The order's identity — this bounded context's contribution to the platform.
+          example: ord-a1b2c3d4-0000-0000-0000-000000000001
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+        allowPartialShipment:
+          type: boolean
+          description: False means ship-complete (BR3), the default.
+          example: false
+        requiredShipBy:
+          type: string
+          format: date-time
+          description: >
+            The externally-dictated deadline this order was received with,
+            or absent when it has none (the overwhelming majority). See the
+            same field on ReceiveOrderRequest.
+          example: "2026-09-25T08:00:00Z"
+        fulfillmentSiteId:
+          type: string
+          description: >
+            The caller-assigned fulfillment site this order was received
+            with (ADR 0044), or absent when the caller named none (the
+            overwhelming majority). Immutable. See the same field on
+            ReceiveOrderRequest.
+          example: WH1
+        releaseOnAllocation:
+          type: boolean
+          description: >
+            False means the order was HELD at intake (ADR 0020): allocated
+            but deliberately not released, awaiting
+            `POST /orders/{id}/releases`. True for every order received
+            without the flag, including every order predating ADR 0020.
+          example: true
+        promiseDate:
+          type: string
+          format: date-time
+          description: >
+            The date this order is promised for, RFC 3339 — the cutoff of
+            a CPT window computed at allocation time as a capability
+            promise (ADR 0014): the earliest window in the site's CPT
+            schedule that the allocated lines' process-path cycle time
+            (P95), eligibility and wes-work-planning's path capacity can
+            all meet. When those inputs are not available (caches cold, or
+            no process-path catalogue configured) it falls back to the
+            lead-time policy: "now plus the slowest configurable static
+            lead time among the allocated lines' process paths", not a live
+            carrier rate. With `allowPartialShipment=true` lines are
+            promised per shipment group (ADR 0017) and this is the latest
+            cutoff across the groups. For an order received with
+            `requiredShipBy` it is the latest window at or before that
+            deadline, and absent when the deadline cannot be met (ADR
+            0020). The promise basis (Capability / LeadTime / Network) is
+            carried on the `OrderAllocated`/`OrderPartiallyAllocated`
+            events, not on this response. Absent until at least one line is
+            allocated.
+          example: "2026-08-27T09:00:00Z"
+        capacityConstraint:
+          $ref: "#/components/schemas/CapacityConstraint"
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrderLine"

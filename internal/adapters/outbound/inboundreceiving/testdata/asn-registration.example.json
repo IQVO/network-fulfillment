@@ -1,0 +1,32 @@
+{
+  "asnNumber": "ASN-1001",
+  "supplierRef": "SUP-1",
+  "ownerRef": "seller-a",
+  "lines": [
+    {
+      "lineNo": 1,
+      "sku": "SKU-1",
+      "expectedQty": 24
+    }
+  ],
+  "cartons": [
+    {
+      "sscc": "340123450000000017",
+      "kind": "HOMOGENEOUS_CASE",
+      "contents": [
+        {
+          "lineNo": 1,
+          "sku": "SKU-1",
+          "gtin": "13041090004824",
+          "qty": 24
+        }
+      ],
+      "grossWeightG": 9000,
+      "dims": {
+        "lengthMm": 600,
+        "widthMm": 400,
+        "heightMm": 400
+      }
+    }
+  ]
+}

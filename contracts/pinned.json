@@ -1,9 +1,69 @@
 {
-  "_doc": "Every contract copy this repo pins from a producer, and the producer branch it must equal. scripts/harness/pinned_contract_gate.py fails when a copy differs from the producer's develop. Refresh = copy the file, never edit it.",
+  "_doc": "Every contract copy this repo pins from a producer, and the producer branch it must equal. scripts/harness/pinned_contract_gate.py fails when a copy differs from the producer's develop. Refresh = copy the file, never edit it. Entries 2-5 pin the REST producers this repo calls (inbound-receiving, inventory-storage, order-management, product-master); 6-9 pin the event producers this repo subscribes to (inbound-receiving, outbound-shipping, process-path-management, wes-work-planning); 10 is the SELF-pin of this repo's own asyncapi (the analytics projector reads warehouse.network-fulfillment.analytics); 11 is the SELF-pin of this repo's own openapi for the cmd/mcp -> cmd/netfulfil-reports edge — the reports surface (/reports/acknowledgement*) is documented in apis/openapi.yaml under the 'reports' tag, this repo keeps no separate apis/openapi-reports.yaml.",
   "pins": [
     {
       "local": "internal/adapters/outbound/retailnetwork/testdata/vendor-connectivity-openapi.yaml",
       "repo": "IQVO/vendor-connectivity",
+      "path": "apis/openapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/outbound/inboundreceiving/testdata/inbound-receiving.openapi.yaml",
+      "repo": "IQVO/inbound-receiving",
+      "path": "apis/openapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/outbound/inventoryclient/testdata/inventory-storage.openapi.yaml",
+      "repo": "IQVO/inventory-storage",
+      "path": "apis/openapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/outbound/ordermanagement/testdata/order-management.openapi.yaml",
+      "repo": "IQVO/order-management",
+      "path": "apis/openapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/outbound/productmaster/testdata/product-master.openapi.yaml",
+      "repo": "IQVO/product-master",
+      "path": "apis/openapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/inbound-receiving.asyncapi.yaml",
+      "repo": "IQVO/inbound-receiving",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/outbound-shipping.asyncapi.yaml",
+      "repo": "IQVO/outbound-shipping",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/outbound/processpathcache/testdata/process-path-management.asyncapi.yaml",
+      "repo": "IQVO/process-path-management",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/outbound/pathcapacitycache/testdata/wes-work-planning.asyncapi.yaml",
+      "repo": "IQVO/wes-work-planning",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/network-fulfillment.asyncapi.yaml",
+      "repo": "IQVO/network-fulfillment",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/mcp/testdata/network-fulfillment.openapi.yaml",
+      "repo": "IQVO/network-fulfillment",
       "path": "apis/openapi.yaml",
       "ref": "develop"
     }
