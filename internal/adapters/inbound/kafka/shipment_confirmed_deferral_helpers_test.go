@@ -18,7 +18,8 @@ import (
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
 )
 
-// The deferral half of TestShipmentConfirmedConsumer_RoundTripKafkaPostgres
+// Helpers (no test of their own, so no broker is started here) for the deferral
+// half of TestShipmentConfirmedConsumer_RoundTripKafkaPostgres
 // (ADR 0014 addendum D7): one order whose load departs while it is SUBMITTED
 // (po-2, deferred and later confirmed) and one REJECTED (po-3, dead-lettered).
 
