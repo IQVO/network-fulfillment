@@ -1,0 +1,2330 @@
+openapi: 3.0.3
+info:
+  title: Inbound Receiving API
+  version: 1.0.0
+  description: |
+    The WMS-tier inbound dock workflow of the warehouse-systems platform
+    (ADR 0001): the supplier's advance ship notice (**ASN**), the carrier's
+    **dock appointment** (a read-only copy: dock-scheduling owns it since ADR 0019) and the counted **receipt**, with the
+    discrepancies found when the receipt closes (ADR 0002). It decides nothing
+    about where received goods go; Good lines are handed to inventory-storage
+    as events (ADR 0003) and stow stays an RF action there.
+
+    Every `POST` except the three retired appointment writes requires an
+    `Idempotency-Key` header (fleet REST API guideline): a missing key is a 400 `idempotency-key-required`, a retry with
+    the same key and request (method, path, body) replays the original response
+    with `Idempotency-Replayed: true`, the same key with a different request is
+    a 409 `idempotency-key-reused`. Lifecycle transitions are transition
+    resources: `POST /asns/{asnNumber}/cancellations` and
+    `/receipts/{receiptId}/closures`.
+
+    **Appointments moved to dock-scheduling** (ADR 0019, plan YD-0002).
+    `POST /appointments`, `POST /appointments/{appointmentId}/check-ins` and
+    `POST /appointments/{appointmentId}/cancellations` answer `410 Gone` with
+    problem type `appointment-moved`, whose `detail` names the dock-scheduling
+    (or yard-management) operation to call. `GET /appointments` and
+    `GET /appointments/{appointmentId}` are **deprecated**: they read a local
+    copy fed by dock-scheduling's `DockAppointmentBooked` and
+    `DockAppointmentCancelled` events (inbound appointments only) and will be
+    removed once consumers read dock-scheduling directly.
+
+    Mutable resources carry a `version` (starts at 1, +1 per accepted change)
+    and a matching strong `ETag: "<version>"` header. A transition `POST` may send
+    `If-Match`; a stale value is a 412 `version-mismatch`, and a write that
+    loses a race at the database is a 409 `concurrent-modification`.
+
+    Accepted changes are published as CloudEvents on
+    `warehouse.inbound-receiving.events` through a transactional outbox (see
+    `apis/asyncapi.yaml`); sibling contexts keep a local copy and never call
+    this API at request time.
+
+    Errors are RFC 7807 problem documents (`application/problem+json`) with
+    `type = https://errors.inbound-receiving.warehouse-systems.dev/<slug>`.
+    The slug catalogue: `malformed-request`, `invalid-query`,
+    `idempotency-key-required`, `idempotency-key-invalid`,
+    `idempotency-key-reused`, `invalid-limit`, `invalid-cursor`,
+    `unknown-query-parameter`, `invalid-asn-number`,
+    `invalid-supplier-ref`, `asn-requires-lines`, `invalid-line-no`,
+    `duplicate-sku`, `invalid-sku`, `invalid-quantity`, `invalid-reason`,
+    `invalid-appointment-id`, `invalid-receipt-id`, `invalid-door-code`,
+    `invalid-carrier`, `invalid-window`,
+    `appointment-requires-asns`, `duplicate-asn-number`, `invalid-condition`,
+    `asn-not-found`, `appointment-not-found`, `receipt-not-found`,
+    `asn-already-exists`, `asn-in-progress`, `asn-terminal`,
+    `asn-not-receivable`, `appointment-cancelled`,
+    `receipt-already-open`, `receipt-closed`, `appointment-moved` (410),
+    `unknown-sku`, `unknown-asn`, `unknown-appointment`,
+    `asn-not-on-appointment`, `line-not-on-asn`, `invalid-owner-ref`,
+    `invalid-carton-kind`, `invalid-carton`, `invalid-sscc`, `invalid-gtin`,
+    `unsupported-gtin`, `invalid-scan-kind`, `invalid-scan`, `invalid-cases`,
+    `invalid-counted-contents`, `counted-contents-not-mixed`,
+    `counted-sku-unknown`, `carton-not-found`, `duplicate-sscc`, `homogeneous-carton-mixed`, `carton-contents-mismatch`,
+    `scan-kind-mismatch`, `unsupported-pack-level`, `version-mismatch`,
+    `concurrent-modification`, `resource-not-found` (a NUL character in the
+    request path), `dependency-unavailable` (`/readyz` while Postgres or Kafka
+    is unreachable), `internal-error`. A NUL (U+0000) in a JSON body is a 400
+    `malformed-request`.
+
+    Lists use cursor paging: `limit` (1 to 500, default 100) and the opaque
+    `cursor` that is the previous page's `nextCursor`; a response without
+    `nextCursor` is the last page. There is no authentication layer (fleet
+    decision 2026-09-11).
+  contact:
+    name: inbound-receiving maintainers
+    url: https://github.com/IQVO/inbound-receiving
+  license:
+    name: UNLICENSED
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: http://localhost:8000/api/inbound-receiving
+    description: Local kind cluster through Kong
+tags:
+  - name: ASNs
+    description: Advance ship notices (ADR 0002).
+  - name: Appointments
+    description: |
+      Dock appointments, one door window covering one or more ASNs (ADR 0002).
+      Owned by dock-scheduling since ADR 0019: writes answer 410, the reads are a deprecated local copy.
+  - name: Receipts
+    description: Counted receiving of one ASN and its close-time discrepancies (ADR 0002).
+  - name: Docks
+    description: The inbound dock doors known from facility-layout events (ADR 0003).
+  - name: Health
+    description: Liveness and readiness probes.
+  - name: Reports
+    description: |
+      The read-only receiving performance and accuracy report of the analytics
+      read side (ADR 0006), served by the separate `inbound-reports` binary
+      (port 8092, cluster-internal Service `<release>-reports`) from the
+      analytical database, never from the OLTP API. Like every sibling's
+      reports API its JSON is snake_case.
+
+paths:
+  /asns:
+    post:
+      operationId: registerAsn
+      summary: Register an ASN
+      description: |
+        Registers the supplier's announcement of a delivery in state
+        `Registered`. `asnNumber` (1 to 64 characters of `[A-Za-z0-9._-]`) is
+        the identity; registering an existing number is 409
+        `asn-already-exists`. `lines` is non-empty, `lineNo` runs exactly
+        `1..n` in order, SKUs are unique across lines and every `expectedQty`
+        is positive. An unknown SKU (not in the `known_skus` local copy) is 422
+        `unknown-sku`. Publishes `ASNRegistered`.
+      tags: [ASNs]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterAsnRequest"
+            example:
+              asnNumber: ASN-1001
+              supplierRef: ACME
+              expectedArrival: "2026-10-09T08:00:00Z"
+              lines:
+                - { lineNo: 1, sku: SKU-1, expectedQty: 40 }
+                - { lineNo: 2, sku: SKU-2, expectedQty: 5 }
+      responses:
+        "201":
+          description: The ASN was registered.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Location:
+              description: URL of the new ASN.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asn"
+              example:
+                asnNumber: ASN-1001
+                supplierRef: ACME
+                registeredAt: "2026-10-08T12:00:00Z"
+                expectedArrival: "2026-10-09T08:00:00Z"
+                state: Registered
+                lines:
+                  - { lineNo: 1, sku: SKU-1, expectedQty: 40 }
+                  - { lineNo: 2, sku: SKU-2, expectedQty: 5 }
+                version: 1
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listAsns
+      summary: List ASNs
+      description: |
+        Lists ASNs in ascending ASN-number order, a page at a time, optionally
+        narrowed to one lifecycle state.
+      tags: [ASNs]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: state
+          in: query
+          description: Only ASNs in this state.
+          schema:
+            $ref: "#/components/schemas/AsnState"
+      responses:
+        "200":
+          description: One page of ASNs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsnPage"
+              example:
+                items:
+                  - asnNumber: ASN-1001
+                    supplierRef: ACME
+                    registeredAt: "2026-10-08T12:00:00Z"
+                    state: Registered
+                    lines:
+                      - { lineNo: 1, sku: SKU-1, expectedQty: 40 }
+                    version: 1
+                nextCursor: QVNOLTEwMDE
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /asns/{asnNumber}:
+    parameters:
+      - $ref: "#/components/parameters/AsnNumber"
+    get:
+      operationId: getAsn
+      summary: Get an ASN
+      description: Returns the ASN with its lines, state and version (also as the `ETag`).
+      tags: [ASNs]
+      responses:
+        "200":
+          description: The ASN.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asn"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /asns/{asnNumber}/cartons:
+    parameters:
+      - $ref: "#/components/parameters/AsnNumber"
+    get:
+      operationId: getAsnCartons
+      summary: List the announced cartons of an ASN
+      x-pagination-exempt: view
+      description: |
+        Not paged (`x-pagination-exempt: view`): a composite view of one ASN's
+        announced cartons, bounded by the ASN and returned with the ASN's
+        `ETag`, so a page boundary would split a single consistent snapshot.
+        The cartons the supplier announced (`cartons` is empty for a flat ASN)
+        with the status of each against the ASN's receipt: `Expected` (no
+        receipt yet, or not scanned yet), `Accepted` (its SSCC was scanned) or
+        `Missing` (the receipt is closed and it never was). Cartons are
+        announced on `POST /asns`; there is no endpoint to add one later.
+      tags: [ASNs]
+      responses:
+        "200":
+          description: The announced cartons.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsnCartons"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /asns/{asnNumber}/cancellations:
+    parameters:
+      - $ref: "#/components/parameters/AsnNumber"
+    post:
+      operationId: cancelAsn
+      summary: Cancel an ASN
+      description: |
+        Cancels a `Registered` ASN and publishes `ASNCancelled`. An ASN that is
+        already being received is 409 `asn-in-progress`; a `Closed` or
+        `Cancelled` one is 409 `asn-terminal`. The body and its `reason` are
+        optional.
+      tags: [ASNs]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReasonRequest"
+            example:
+              reason: Supplier cancelled the shipment
+      responses:
+        "200":
+          description: The ASN after the cancellation.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asn"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/VersionMismatch"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /appointments:
+    post:
+      operationId: bookAppointment
+      x-retired: true
+      summary: Book a dock appointment (moved to dock-scheduling)
+      description: |
+        **Gone.** Appointments are booked in dock-scheduling since ADR 0019
+        (`POST /appointments` on that service). Always `410`
+        `appointment-moved`; the body is not read and no `Idempotency-Key` is
+        required.
+      tags: [Appointments]
+      responses:
+        "410":
+          $ref: "#/components/responses/AppointmentMoved"
+    get:
+      operationId: listAppointments
+      summary: List dock appointments
+      deprecated: true
+      description: |
+        **Deprecated** (ADR 0019): reads the local copy of dock-scheduling's
+        inbound appointments; read dock-scheduling instead. Lists appointments
+        in ascending `windowStart` order (ties by id), a page at a time.
+        `door` and `state` narrow by equality; `from` and `to` narrow to
+        appointments whose window overlaps `[from, to)`. The copy only moves
+        through `Booked` and `Cancelled` (a legacy row may still show
+        `CheckedIn` or `Completed`).
+      tags: [Appointments]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: door
+          in: query
+          description: Only appointments at this door code.
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: Only appointments in this state.
+          schema:
+            $ref: "#/components/schemas/AppointmentState"
+        - name: from
+          in: query
+          description: RFC 3339 instant; only appointments whose window ends after it.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: RFC 3339 instant; only appointments whose window starts before it.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: One page of appointments.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppointmentPage"
+              example:
+                items:
+                  - appointmentId: appt-123e4567-e89b-12d3-a456-426614174000
+                    doorCode: WH1-DOCK-IN-01
+                    carrier: ACME Freight
+                    windowStart: "2026-10-09T08:00:00Z"
+                    windowEnd: "2026-10-09T10:00:00Z"
+                    asnNumbers: [ASN-1001]
+                    state: Booked
+                    version: 1
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /appointments/{appointmentId}:
+    parameters:
+      - $ref: "#/components/parameters/AppointmentId"
+    get:
+      operationId: getAppointment
+      summary: Get a dock appointment
+      deprecated: true
+      description: |
+        **Deprecated** (ADR 0019): returns the local copy of a dock-scheduling
+        appointment with its window, ASN numbers, state and version (also as the
+        `ETag`; the version is dock-scheduling's, `0` for a legacy row not yet
+        refreshed). Read dock-scheduling instead.
+      tags: [Appointments]
+      responses:
+        "200":
+          description: The appointment.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Appointment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /appointments/{appointmentId}/check-ins:
+    parameters:
+      - $ref: "#/components/parameters/AppointmentId"
+    post:
+      operationId: checkInAppointment
+      x-retired: true
+      summary: Check a carrier in (moved to yard-management)
+      description: |
+        **Gone.** There is no check-in on appointments any more: the carrier's
+        arrival is recorded at the gate by yard-management (`POST /visits`
+        naming the `appointmentId`) and dock-scheduling derives the
+        appointment's check-in from it (ADR 0019). Always `410`
+        `appointment-moved`.
+      tags: [Appointments]
+      responses:
+        "410":
+          $ref: "#/components/responses/AppointmentMoved"
+
+  /appointments/{appointmentId}/cancellations:
+    parameters:
+      - $ref: "#/components/parameters/AppointmentId"
+    post:
+      operationId: cancelAppointment
+      x-retired: true
+      summary: Cancel a dock appointment (moved to dock-scheduling)
+      description: |
+        **Gone.** Appointments are cancelled in dock-scheduling since ADR 0019
+        (`POST /appointments/{appointmentId}/cancellations` on that service).
+        Always `410` `appointment-moved`.
+      tags: [Appointments]
+      responses:
+        "410":
+          $ref: "#/components/responses/AppointmentMoved"
+
+  /receipts:
+    post:
+      operationId: openReceipt
+      summary: Open a receipt
+      description: |
+        Starts receiving an ASN: opens a receipt against a snapshot of its
+        lines, moves a `Registered` ASN to `Receiving` and publishes
+        `ReceiptOpened`. The ASN must be `Registered` or `Receiving`
+        (409 `asn-not-receivable`) and may have only one open receipt
+        (409 `receipt-already-open`). With `appointmentId` the appointment
+        (looked up in the local copy of dock-scheduling's) must exist
+        (422 `unknown-appointment`), cover the ASN (422
+        `asn-not-on-appointment`) and not be cancelled (409
+        `appointment-cancelled`); a check-in is not required (the arrival is a
+        yard-management fact). The receipt takes its door code from it. Without one it is a walk-in delivery with no door. A missing
+        ASN or appointment is 422 `unknown-asn` / `unknown-appointment`.
+      tags: [Receipts]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenReceiptRequest"
+            example:
+              asnNumber: ASN-1001
+              appointmentId: appt-123e4567-e89b-12d3-a456-426614174000
+      responses:
+        "201":
+          description: The receipt was opened.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Location:
+              description: URL of the new receipt.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Receipt"
+              example:
+                receiptId: rcpt-223e4567-e89b-12d3-a456-426614174000
+                asnNumber: ASN-1001
+                appointmentId: appt-123e4567-e89b-12d3-a456-426614174000
+                doorCode: WH1-DOCK-IN-01
+                state: Open
+                lines:
+                  - { lineNo: 1, sku: SKU-1, expectedQty: 40, receivedGood: 0, receivedDamaged: 0 }
+                  - { lineNo: 2, sku: SKU-2, expectedQty: 5, receivedGood: 0, receivedDamaged: 0 }
+                openedAt: "2026-10-09T08:05:00Z"
+                discrepancies: []
+                cartonDiscrepancies: []
+                version: 1
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listReceipts
+      summary: List receipts
+      description: |
+        Lists receipts in ascending receipt-id order, a page at a time,
+        optionally narrowed to one ASN and/or one state.
+      tags: [Receipts]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: asnNumber
+          in: query
+          description: Only receipts of this ASN.
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: Only receipts in this state.
+          schema:
+            $ref: "#/components/schemas/ReceiptState"
+      responses:
+        "200":
+          description: One page of receipts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceiptPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /receipts/{receiptId}:
+    parameters:
+      - $ref: "#/components/parameters/ReceiptId"
+    get:
+      operationId: getReceipt
+      summary: Get a receipt
+      description: |
+        Returns the receipt with its lines, state, version (also as the `ETag`)
+        and the discrepancies as they stand now (final once the receipt is
+        `Closed`). `cartonDiscrepancies` lists every carton finding raised on
+        the receipt so far, scans and the close alike, in the order they were
+        raised (ADR 0015); it is `[]` when there are none.
+      tags: [Receipts]
+      responses:
+        "200":
+          description: The receipt.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Receipt"
+              examples:
+                withCartonFindings:
+                  summary: An open receipt that has had an unexpected carton scanned
+                  value:
+                    receiptId: rcpt-223e4567-e89b-12d3-a456-426614174000
+                    asnNumber: ASN-1001
+                    state: Open
+                    lines:
+                      - { lineNo: 1, sku: SKU-1, expectedQty: 40, receivedGood: 20, receivedDamaged: 0 }
+                    openedAt: "2026-10-09T08:05:00Z"
+                    discrepancies:
+                      - { lineNo: 1, sku: SKU-1, kind: Short, expectedQty: 40, receivedQty: 20, damagedQty: 0 }
+                    cartonDiscrepancies:
+                      - { kind: UnexpectedCarton, sscc: "340123450000000017", at: "2026-10-09T08:20:00Z" }
+                    version: 3
+                closedWithMissingCarton:
+                  summary: A closed receipt whose manifest carton never arrived
+                  value:
+                    receiptId: rcpt-223e4567-e89b-12d3-a456-426614174000
+                    asnNumber: ASN-1001
+                    state: Closed
+                    lines:
+                      - { lineNo: 1, sku: SKU-1, expectedQty: 40, receivedGood: 20, receivedDamaged: 0 }
+                    openedAt: "2026-10-09T08:05:00Z"
+                    closedAt: "2026-10-09T09:30:00Z"
+                    discrepancies:
+                      - { lineNo: 1, sku: SKU-1, kind: Short, expectedQty: 40, receivedQty: 20, damagedQty: 0 }
+                    cartonDiscrepancies:
+                      - { kind: MissingCarton, expected: "340123450000000024", at: "2026-10-09T09:30:00Z" }
+                    version: 5
+                clean:
+                  summary: No carton finding
+                  value:
+                    receiptId: rcpt-223e4567-e89b-12d3-a456-426614174000
+                    asnNumber: ASN-1001
+                    state: Open
+                    lines:
+                      - { lineNo: 1, sku: SKU-1, expectedQty: 40, receivedGood: 0, receivedDamaged: 0 }
+                    openedAt: "2026-10-09T08:05:00Z"
+                    discrepancies: []
+                    cartonDiscrepancies: []
+                    version: 1
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /receipts/{receiptId}/lines:
+    parameters:
+      - $ref: "#/components/parameters/ReceiptId"
+    post:
+      operationId: receiveLine
+      summary: Receive a quantity against a line
+      description: |
+        Records `quantity` units of line `lineNo` as `Good` or `Damaged` and
+        publishes `ReceiptLineReceived` (the handover event: inventory-storage
+        books the Good ones). This is NOT naturally idempotent, so the
+        `Idempotency-Key` is required: a retry with the same key never counts
+        the units twice. Over-receipt is accepted and shows as an `Over`
+        discrepancy on close. Receiving into a `Closed` receipt is 409
+        `receipt-closed`; a `lineNo` the ASN does not have is 422
+        `line-not-on-asn`.
+      tags: [Receipts]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReceiveLineRequest"
+            example:
+              lineNo: 1
+              quantity: 40
+              condition: Good
+      responses:
+        "201":
+          description: The quantity was recorded; the body is the receipt after the change.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Receipt"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/VersionMismatch"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /receipts/{receiptId}/cartons/{lpn}/label:
+    parameters:
+      - $ref: "#/components/parameters/ReceiptId"
+      - name: lpn
+        in: path
+        required: true
+        description: The carton's license plate - its SSCC, or the internal `LPN-<ulid>` of a carton received without one.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+        example: LPN-01K8Z3Q5R7T9V1W2X4Y6A8B0CD
+    get:
+      operationId: getCartonLabel
+      summary: Get the label data of an accepted carton
+      description: |
+        Returns the DATA of a license plate label (symbology, human readable
+        text, SKU and units); the service has no printer driver, the floor
+        client renders and prints it. A carton the receipt has not accepted
+        (or never heard of) is 404 `carton-not-found`.
+      tags: [Receipts]
+      responses:
+        "200":
+          description: The label data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CartonLabel"
+              example:
+                lpn: LPN-01K8Z3Q5R7T9V1W2X4Y6A8B0CD
+                symbology: CODE128
+                humanReadable: LPN-01K8Z3Q5R7T9V1W2X4Y6A8B0CD
+                sku: SKU-1
+                units: 20
+                receivedAt: "2026-10-09T08:10:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /receipts/{receiptId}/scans:
+    parameters:
+      - $ref: "#/components/parameters/ReceiptId"
+    post:
+      operationId: receiveScan
+      summary: Receive by scan
+      description: |
+        Receives goods from ONE scan. Give EITHER `scan` (the raw string the
+        scanner delivered; GS1-128 element strings and `]E0`/`]I1`/`]C1`
+        symbology prefixes are parsed server-side) OR `kind` and `id` (a client
+        that already parsed it; the service re-validates). The scan resolves to
+        `SSCC` (the carton's whole manifest is accepted), `CASE_GTIN` (`qty`
+        counts CASES, default 1; the service multiplies by the active CASE
+        units per pack) or `EACH_GTIN` (`qty` eaches, default 1). Every
+        quantity booked, and every event, is in eaches. `kind` (or
+        `expectedKind` with a raw scan) is the kind the screen expects: a scan
+        of another kind is 422 `scan-kind-mismatch` and changes nothing.
+
+        A raw `scan` is also validated as a GS1 logistic label (ADR 0024): a
+        label that breaks the GS1 rules (a bad check digit, AI 01 with AI 02,
+        a missing mandatory AI, ...) is refused with the finding
+        `LabelNonCompliant` (`expected` = the reason code, `actual` = the raw
+        scan, `supplierRef` = the ASN's supplier); with `RECEIVING_SITE_GLNS` set,
+        a label whose ship-to GLN (AI 410) is not one of the sites is refused
+        with `WrongDestination`. Both are findings, not errors, and nothing is
+        booked. A label that says no ship-to is never refused for it. The dates
+        the label carries (AI 15, 17, 11, 13) are kept on the carton.
+
+        A scan that cannot be accepted because of a finding (an SSCC not on the
+        manifest or already received, an unknown GTIN, a quantity that
+        contradicts the pack) is NOT an error: it books nothing, raises the
+        finding as `CartonDiscrepancyRaised` and answers **200** with
+        `accepted=false`; an accepted scan answers **201**. Carton discrepancies
+        are never added to `ReceiptClosed`, whose three v1 kinds stay
+        `Short`, `Over` and `Damaged`. This is NOT naturally idempotent, so the
+        `Idempotency-Key` is required.
+      tags: [Receipts]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReceiveScanRequest"
+            examples:
+              carton:
+                summary: Scan of a carton label (SSCC)
+                value:
+                  kind: SSCC
+                  id: "340123450000000017"
+              cases:
+                summary: Two cases by their case GTIN
+                value:
+                  kind: CASE_GTIN
+                  id: "13041090004824"
+                  qty: 2
+      responses:
+        "200":
+          description: The scan was refused with findings; nothing was booked.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResult"
+              example:
+                kind: SSCC
+                accepted: false
+                lines: []
+                cartons: []
+                discrepancies:
+                  - { kind: UnexpectedCarton, sscc: "340123450000000017" }
+                version: 3
+        "201":
+          description: The scan was accepted.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/VersionMismatch"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /receipts/{receiptId}/closures:
+    parameters:
+      - $ref: "#/components/parameters/ReceiptId"
+    post:
+      operationId: closeReceipt
+      summary: Close a receipt
+      description: |
+        Ends receiving, computes the discrepancies per line (`Short`, `Over`,
+        `Damaged`) and completes the ASN. Publishes `ReceiptClosed`. It no
+        longer completes the appointment nor raises `DockAppointmentCompleted`
+        (ADR 0019: the door release recorded by yard-management does, through
+        dock-scheduling). Closing a receipt that
+        is already `Closed` is 409 `receipt-closed`. A line nothing was received
+        for is `Short`.
+      tags: [Receipts]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "200":
+          description: The closed receipt with its final discrepancies.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Receipt"
+              example:
+                receiptId: rcpt-223e4567-e89b-12d3-a456-426614174000
+                asnNumber: ASN-1001
+                appointmentId: appt-123e4567-e89b-12d3-a456-426614174000
+                doorCode: WH1-DOCK-IN-01
+                state: Closed
+                lines:
+                  - { lineNo: 1, sku: SKU-1, expectedQty: 40, receivedGood: 30, receivedDamaged: 4 }
+                  - { lineNo: 2, sku: SKU-2, expectedQty: 5, receivedGood: 7, receivedDamaged: 0 }
+                openedAt: "2026-10-09T08:05:00Z"
+                closedAt: "2026-10-09T09:30:00Z"
+                discrepancies:
+                  - { lineNo: 1, sku: SKU-1, kind: Short, expectedQty: 40, receivedQty: 34, damagedQty: 4 }
+                  - { lineNo: 1, sku: SKU-1, kind: Damaged, expectedQty: 40, receivedQty: 34, damagedQty: 4 }
+                  - { lineNo: 2, sku: SKU-2, kind: Over, expectedQty: 5, receivedQty: 7, damagedQty: 0 }
+                cartonDiscrepancies: []
+                version: 6
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/VersionMismatch"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /receipts/{receiptId}/sscc-assignments:
+    parameters:
+      - $ref: "#/components/parameters/ReceiptId"
+    post:
+      operationId: assignSscc
+      summary: Receive a case that has no label under an SSCC of our own
+      description: |
+        For a case that arrived with no SSCC label (ADR 0024). Give the case
+        GTIN; the service receives ONE case of the active CASE pack under a new
+        SSCC of the **receiver's own GS1 company prefix** (extension digit 0, a
+        serial from a never-reused per-prefix sequence, a valid check digit),
+        raises `UnlabelledCarton` against a carton ASN as always, and answers
+        **201** with what a printer needs: `sscc`, `humanReadable`
+        (`(00)<sscc>`), `elementString` (the GS1-128 data) and `symbology`. The
+        service has no printer driver: the floor client prints. The carton
+        carries `ssccSource: receiver` on `ReceiptCartonReceived`.
+
+        **409 `sscc-prefix-not-configured`** until the business supplies a GS1
+        company prefix (`RECEIVER_GS1_COMPANY_PREFIX`, 7 to 10 digits): the
+        prefix is a licensed asset and there is no default. **409
+        `sscc-serial-exhausted`** when every serial of the prefix is used.
+        Not naturally idempotent, so the `Idempotency-Key` is required: a retry
+        with the same key replays the same SSCC and receives nothing twice.
+      tags: [Receipts]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignSsccRequest"
+            example:
+              gtin: "20001234567851"
+      responses:
+        "201":
+          description: The case was received under the new SSCC.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SsccAssignment"
+              example:
+                lpn: "006141410000000012"
+                sscc: "006141410000000012"
+                humanReadable: "(00)006141410000000012"
+                elementString: "00006141410000000012"
+                symbology: GS1-128
+                ssccSource: receiver
+                sku: SKU-1
+                units: 20
+                discrepancies: []
+                version: 4
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/VersionMismatch"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /docks:
+    get:
+      operationId: listDocks
+      summary: List the inbound dock doors
+      description: |
+        The inbound dock doors this service knows from facility-layout events
+        (ADR 0003): doors registered with `role=Dock` and `dockFlow` of
+        `Inbound` or `Both`, minus decommissioned ones, in ascending door-code
+        order, a page at a time. `mode` is always `kafka`: the shipped
+        binary refuses `DOCK_DOOR_MODE=permissive`/`off` at boot, so only the
+        doors in this list can be booked.
+      tags: [Docks]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of the known inbound dock doors.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DockList"
+              example:
+                mode: kafka
+                items:
+                  - { doorCode: WH1-DOCK-IN-01, dockFlow: Inbound }
+                  - { doorCode: WH1-DOCK-IO-02, dockFlow: Both }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe
+      description: 200 while the process is running.
+      tags: [Health]
+      responses:
+        "200":
+          description: Alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness probe
+      description: |
+        200 when the service can serve traffic: Postgres answers a ping AND a
+        Kafka broker answers a metadata request (reachability only, never
+        topics; the verdict is cached 3 seconds). 503 while draining for
+        shutdown (`{"status":"not_ready"}`) or while a dependency is down
+        (problem `dependency-unavailable`, naming `postgres` and/or `kafka`).
+        `/healthz` stays liveness only.
+      tags: [Health]
+      responses:
+        "200":
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "503":
+          description: Draining (`not_ready`) or a dependency is unavailable (`dependency-unavailable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/dependency-unavailable
+                title: A runtime dependency is unavailable
+                status: 503
+                detail: "not ready: kafka"
+                instance: /readyz
+
+  /reports/receiving-performance:
+    servers:
+      - url: http://localhost:8092
+        description: inbound-reports (cluster-internal Service <release>-reports)
+    get:
+      operationId: getReceivingPerformance
+      summary: Receiving performance and accuracy per day, and the state right now
+      tags: [Reports]
+      description: |
+        How is the dock performing? `days[]` has one row per UTC calendar day
+        intersecting `[from, to)` (zeros included); a day's counts cover the
+        part of the day inside the range. `receipts_closed`, `discrepancies`
+        and `receipt_cycle` follow the receipt's `ReceiptClosed` time;
+        `lines_received` counts the receiving actions (`ReceiptLineReceived`)
+        and `units_good` / `units_damaged` sum their quantities by condition.
+        `receipt_cycle` (open to close) and `dock_dwell` (check-in to
+        completed) include only receipts and appointments whose opening or
+        check-in the projection also saw; their `p50_seconds` / `p95_seconds`
+        are linear-interpolated percentiles and are null when `count` is 0.
+        `appointments` counts each milestone that fell in the window. The
+        `appointments` and `dock_dwell` blocks are FROZEN since ADR 0019: the
+        appointment moved to dock-scheduling, so nothing new feeds them.
+
+        `dock_to_stock` (ADR 0021) is the time from the carrier's gate arrival
+        (yard-management's `VisitCheckedIn`) to the stow of the last Good
+        carton (inventory-storage's `ContainerStowed`) of the receipts whose
+        `ReceiptStowCompleted` fell in the window (a fact counts in the UTC day
+        of its `stowed_at`). `p50_seconds` is the median and `p90_seconds` the
+        90th percentile (linear-interpolated); `under_target` counts the
+        facts at or under `dock_to_stock_target_seconds` (11160 s = 3.1 h, the
+        WERC best-in-class) and `share_under_target` is `under_target / count`.
+        The percentiles and the share are null when `count` is 0. A receipt
+        without an appointment arrival (a walk-in) or without cartons has no
+        dock-to-stock and is not counted.
+
+        `advice` (ADR 0023) counts the receiving advices (`ReceivingAdviceIssued`)
+        issued in the window (a fact counts in the UTC day of its `issued_at`):
+        `count`, `within_sla` (issued inside the committed window after the last
+        unit received) and `share_within_sla` (`within_sla / count`, null when
+        `count` is 0). Receipts closed before the advice existed have none.
+
+        `asn_timeliness` (ADR 0025) is the KPI "% ASNs received before
+        arrival, per supplier": one row per supplier, both sides counted in the
+        UTC day of the ASN's `registered_at` -- `registered` (ASNs registered
+        for the supplier that day) and `late` (of those, the ones registered
+        after the visit they were received under had arrived;
+        `AsnLateForArrival`). `share_on_time` is `1 - late / registered`, null
+        when `registered` is 0. The list holds at most the day's top ten
+        suppliers by `registered` (ties by `supplier_ref` ascending); a
+        supplier outside the bound is absent from that day's block and its
+        facts stay in the tables. ASNs with an unknown `registered_at` (rows
+        older than ADR 0025) count on neither side.
+
+        `current` is the state right now, independent of the range:
+        `open_receipts` (opened, not yet closed), `expected_today` (ASNs not
+        cancelled whose expected arrival falls in today's UTC day) and
+        `expected_today_started` (those with a receipt already opened). The
+        data is as fresh as `GET /reports/freshness` says.
+      parameters:
+        - $ref: "#/components/parameters/ReportFrom"
+        - $ref: "#/components/parameters/ReportTo"
+      responses:
+        "200":
+          description: The report for the effective range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceivingPerformanceReport"
+              example:
+                from: "2026-10-05T00:00:00Z"
+                to: "2026-10-07T00:00:00Z"
+                dock_to_stock_target_seconds: 11160
+                days:
+                  - day: "2026-10-05"
+                    receipts_closed: 14
+                    lines_received: 52
+                    units_good: 1840
+                    units_damaged: 36
+                    discrepancies: { short: 3, over: 1, damaged: 4 }
+                    receipt_cycle: { count: 14, p50_seconds: 2700, p95_seconds: 6900 }
+                    appointments: { booked: 18, checked_in: 15, cancelled: 2, completed: 14 }
+                    dock_dwell: { count: 14, p50_seconds: 3300, p95_seconds: 8100 }
+                    dock_to_stock: { count: 12, p50_seconds: 9300, p90_seconds: 15600, under_target: 8, share_under_target: 0.6666666666666666 }
+                    advice: { count: 14, within_sla: 13, share_within_sla: 0.9285714285714286 }
+                    asn_timeliness:
+                      - { supplier_ref: ACME, registered: 9, late: 3, share_on_time: 0.6666666666666666 }
+                      - { supplier_ref: BOLT, registered: 5, late: 0, share_on_time: 1 }
+                  - day: "2026-10-06"
+                    receipts_closed: 0
+                    lines_received: 0
+                    units_good: 0
+                    units_damaged: 0
+                    discrepancies: { short: 0, over: 0, damaged: 0 }
+                    receipt_cycle: { count: 0, p50_seconds: null, p95_seconds: null }
+                    appointments: { booked: 0, checked_in: 0, cancelled: 0, completed: 0 }
+                    dock_dwell: { count: 0, p50_seconds: null, p95_seconds: null }
+                    dock_to_stock: { count: 0, p50_seconds: null, p90_seconds: null, under_target: 0, share_under_target: null }
+                    advice: { count: 0, within_sla: 0, share_within_sla: null }
+                    asn_timeliness: []
+                current:
+                  open_receipts: 2
+                  expected_today: 9
+                  expected_today_started: 5
+        "400":
+          description: "`from` / `to` are not RFC 3339, empty or inverted, or span more than 366 days."
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/invalid-report-range
+                title: from and to must form a valid RFC 3339 range of at most 366 days
+                status: 400
+                detail: from must be strictly before to
+                instance: /reports/receiving-performance
+        "500":
+          $ref: "#/components/responses/ReportStoreError"
+  /reports/freshness:
+    servers:
+      - url: http://localhost:8092
+        description: inbound-reports (cluster-internal Service <release>-reports)
+    get:
+      operationId: getReportsFreshness
+      summary: How far the analytics projection is behind
+      tags: [Reports]
+      description: |
+        The freshness lag of the projection the report reads: `as_of` is the
+        CloudEvents time of the newest event the projector has applied and
+        `lag_seconds` is now minus `as_of` (never negative). Both are null
+        until the first event is applied. A growing lag means the projector is
+        down or behind, not that the report is wrong: it catches up when the
+        projector does.
+      responses:
+        "200":
+          description: The freshness (null fields while nothing was projected).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportsFreshness"
+              example:
+                as_of: "2026-10-07T11:59:55Z"
+                lag_seconds: 4.2
+        "500":
+          $ref: "#/components/responses/ReportStoreError"
+
+components:
+  headers:
+    IdempotencyReplayed:
+      description: Present, with the value `true`, only when this response is the replay of a stored answer for the same `Idempotency-Key`.
+      schema:
+        type: string
+        enum: ["true"]
+    ETag:
+      description: 'Strong entity tag of the resource: the quoted `version`, for example `"3"`.'
+      schema:
+        type: string
+        example: '"3"'
+
+  parameters:
+    ReportFrom:
+      name: from
+      in: query
+      required: false
+      description: RFC 3339 instant, inclusive. Defaults to `to` minus 30 days.
+      schema:
+        type: string
+        format: date-time
+      example: "2026-10-05T00:00:00Z"
+    ReportTo:
+      name: to
+      in: query
+      required: false
+      description: RFC 3339 instant, exclusive. Defaults to now. At most 366 days after `from`.
+      schema:
+        type: string
+        format: date-time
+      example: "2026-10-07T00:00:00Z"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Caller-supplied key, unique per logical submit (a UUID minted per user
+        action and reused on every retry of it). Required on every POST. A
+        retry with the same key and the same request (method, path and body)
+        replays the stored response with `Idempotency-Replayed: true`; the same
+        key with a different request is 409 `idempotency-key-reused`; a missing
+        key is 400 `idempotency-key-required` and one longer than 128
+        characters or with non-printable characters is 400
+        `idempotency-key-invalid`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+      example: 0b6b1f1e-4a5c-4c1e-9f2a-7d3c8e5f9a01
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        The `ETag` the caller last saw (quoted or bare integer >= 1). When it no
+        longer matches the current version the request is refused with 412
+        `version-mismatch`; an empty value or `*` skips the check and any
+        other value is 400 `malformed-request`.
+      schema:
+        type: string
+      example: '"2"'
+    Limit:
+      name: limit
+      in: query
+      description: Page size, 1 to 500 (default 100).
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      description: The `nextCursor` value from the previous page.
+      schema:
+        type: string
+    AsnNumber:
+      name: asnNumber
+      in: path
+      required: true
+      description: The ASN number (1 to 64 characters of `[A-Za-z0-9._-]`).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9._-]+$"
+      example: ASN-1001
+    AppointmentId:
+      name: appointmentId
+      in: path
+      required: true
+      description: The appointment id, `appt-` followed by a lowercase UUID.
+      schema:
+        type: string
+        pattern: "^appt-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      example: appt-123e4567-e89b-12d3-a456-426614174000
+    ReceiptId:
+      name: receiptId
+      in: path
+      required: true
+      description: The receipt id, `rcpt-` followed by a lowercase UUID.
+      schema:
+        type: string
+        pattern: "^rcpt-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      example: rcpt-223e4567-e89b-12d3-a456-426614174000
+
+  responses:
+    ReportStoreError:
+      description: The analytical database query failed (the cause is logged, never returned).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.inbound-receiving.warehouse-systems.dev/report-store-error
+            title: The report could not be served
+            status: 500
+            detail: the analytical database query failed
+            instance: /reports/receiving-performance
+    BadRequest:
+      description: |
+        Malformed JSON or an unknown field (`malformed-request`), a bad query
+        parameter (`invalid-query`, `invalid-limit`, `invalid-cursor`,
+        `unknown-query-parameter`), a missing or malformed `Idempotency-Key`
+        (`idempotency-key-required`, `idempotency-key-invalid`), or a value that breaks a domain rule
+        (the `invalid-*`, `*-requires-*`, `duplicate-*` and
+        `invalid-condition`, `invalid-carton*`, `invalid-scan*`, `invalid-counted-contents`, `invalid-cases`,
+        `invalid-gtin`, `invalid-sscc` and `invalid-owner-ref` slugs).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            malformedBody:
+              summary: Malformed JSON body
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/malformed-request
+                title: Malformed request
+                status: 400
+                detail: request body is not valid JSON for this operation
+                instance: /asns
+            idempotencyKeyRequired:
+              summary: Missing Idempotency-Key
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/idempotency-key-required
+                title: Idempotency-Key header is required
+                status: 400
+                detail: every POST must send a non-empty Idempotency-Key
+                instance: /asns
+            invalidSku:
+              summary: Invalid SKU on a line
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/invalid-sku
+                title: SKU is invalid
+                status: 400
+                detail: "sku must be 1..64 characters without whitespace, control characters or '/'"
+                instance: /asns
+            invalidWindow:
+              summary: Window longer than 4 hours
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/invalid-window
+                title: Window is invalid
+                status: 400
+                detail: window must end after it starts and last at most 4 hours
+                instance: /appointments
+    AppointmentMoved:
+      description: |
+        The appointment write moved to dock-scheduling (ADR 0019): problem type
+        `appointment-moved`; `detail` names the operation to call there. Sent
+        whatever the request, without an `Idempotency-Key` check.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            book:
+              summary: Booking moved
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/appointment-moved
+                title: Appointment writes moved to dock-scheduling
+                status: 410
+                detail: "Appointments are booked in dock-scheduling: POST /appointments on that service."
+                instance: /appointments
+    NotFound:
+      description: |
+        The resource in the path does not exist: `asn-not-found`,
+        `appointment-not-found`, `receipt-not-found` or `carton-not-found`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            asnNotFound:
+              summary: Unknown ASN
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/asn-not-found
+                title: ASN not found
+                status: 404
+                detail: asn not found
+                instance: /asns/ASN-UNKNOWN
+            receiptNotFound:
+              summary: Unknown receipt
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/receipt-not-found
+                title: Receipt not found
+                status: 404
+                detail: receipt not found
+                instance: /receipts/rcpt-00000000-0000-0000-0000-000000000000
+    Conflict:
+      description: |
+        The request conflicts with current state: `asn-already-exists`,
+        `asn-in-progress`, `asn-terminal`, `asn-not-receivable`,
+        `appointment-cancelled`, `receipt-already-open`, `receipt-closed`, `sscc-prefix-not-configured` and
+        `sscc-serial-exhausted` (receiver-assigned SSCCs, ADR 0024), a write that lost a race
+        (`concurrent-modification`), or an `Idempotency-Key` already used with
+        a different request (`idempotency-key-reused`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            asnAlreadyExists:
+              summary: ASN number already registered
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/asn-already-exists
+                title: ASN already exists
+                status: 409
+                detail: an asn with this number is already registered
+                instance: /asns
+            asnInProgress:
+              summary: Cancelling an ASN that is being received
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/asn-in-progress
+                title: ASN is being received
+                status: 409
+                detail: asn is being received and cannot be cancelled
+                instance: /asns/ASN-1001/cancellations
+            doorWindowOverlap:
+              summary: Door already booked in an overlapping window
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/door-window-overlap
+                title: Door is already booked in an overlapping window
+                status: 409
+                detail: door is already booked in an overlapping window
+                instance: /appointments
+            outsideCheckInWindow:
+              summary: Checking in too early or too late
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/outside-check-in-window
+                title: Check-in is outside the allowed window
+                status: 409
+                detail: check-in is only allowed from 30 minutes before the window until it ends
+                instance: /appointments/appt-123e4567-e89b-12d3-a456-426614174000/check-ins
+            receiptAlreadyOpen:
+              summary: The ASN already has an open receipt
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/receipt-already-open
+                title: ASN already has an open receipt
+                status: 409
+                detail: only one receipt may be open per asn
+                instance: /receipts
+            receiptClosed:
+              summary: Receiving into a closed receipt
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/receipt-closed
+                title: Receipt is closed
+                status: 409
+                detail: receipt is closed
+                instance: /receipts/rcpt-223e4567-e89b-12d3-a456-426614174000/lines
+            concurrentModification:
+              summary: Concurrent write
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/concurrent-modification
+                title: The resource was modified by another request; re-fetch the latest version and retry
+                status: 409
+                detail: concurrent modification
+                instance: /asns/ASN-1001/cancellations
+            idempotencyKeyReused:
+              summary: Same key, different request
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/idempotency-key-reused
+                title: Idempotency-Key was already used with a different request
+                status: 409
+                detail: the idempotency key was used with a different request
+                instance: /asns
+    VersionMismatch:
+      description: The `If-Match` value does not match the resource's current version; re-fetch and retry.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.inbound-receiving.warehouse-systems.dev/version-mismatch
+            title: The If-Match version is stale
+            status: 412
+            detail: if-match does not match the current version
+            instance: /asns/ASN-1001/cancellations
+    Unprocessable:
+      description: |
+        The request is well-formed but refers to something that does not hold:
+        `unknown-sku`, `unknown-dock-door`,
+        `unknown-asn`, `unknown-appointment`,
+        `asn-not-on-appointment`, `line-not-on-asn`, `invalid-sscc`,
+        `duplicate-sscc`, `homogeneous-carton-mixed`, `carton-contents-mismatch`,
+        `scan-kind-mismatch`, `unsupported-pack-level`,
+        `counted-contents-not-mixed`, `counted-sku-unknown` or `unknown-gtin`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            unknownSku:
+              summary: SKU not known to product-master
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/unknown-sku
+                title: SKU is not a registered product
+                status: 422
+                detail: sku SKU-TYPO is not known to product-master
+                instance: /asns
+            unknownDockDoor:
+              summary: Door is not an inbound dock
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/unknown-dock-door
+                title: Door is not a known inbound dock door
+                status: 422
+                detail: door WH1-STOR-01 is not an inbound dock door
+                instance: /appointments
+            lineNotOnAsn:
+              summary: Line the ASN does not have
+              value:
+                type: https://errors.inbound-receiving.warehouse-systems.dev/line-not-on-asn
+                title: Line is not on the ASN
+                status: 422
+                detail: line is not on the asn
+                instance: /receipts/rcpt-223e4567-e89b-12d3-a456-426614174000/lines
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.inbound-receiving.warehouse-systems.dev/internal-error
+            title: Internal server error
+            status: 500
+            detail: an unexpected error occurred
+            instance: /asns
+
+  schemas:
+    AsnState:
+      type: string
+      description: ASN lifecycle. `Cancelled` and `Closed` are terminal.
+      enum: [Registered, Receiving, Closed, Cancelled]
+    AppointmentState:
+      type: string
+      description: |
+        Appointment state in the local copy of dock-scheduling's appointments:
+        `Booked` or `Cancelled`. `CheckedIn` and `Completed` only appear on
+        legacy rows from before the cutover (ADR 0019); `Completed` and
+        `Cancelled` are terminal.
+      enum: [Booked, CheckedIn, Completed, Cancelled]
+    ReceiptState:
+      type: string
+      enum: [Open, Closed]
+    Condition:
+      type: string
+      description: Whether received units are fit to stock. Only `Good` is handed to inventory-storage.
+      enum: [Good, Damaged]
+    DiscrepancyKind:
+      type: string
+      description: |
+        `Short` = received below expected, `Over` = received above expected,
+        `Damaged` = at least one damaged unit.
+      enum: [Short, Over, Damaged]
+
+    AsnLine:
+      type: object
+      additionalProperties: false
+      required: [lineNo, sku, expectedQty]
+      properties:
+        lineNo:
+          type: integer
+          format: int32
+          minimum: 1
+          description: 1-based; lines are numbered exactly 1..n in order.
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 1 to 64 characters without whitespace, control characters or `/`.
+        expectedQty:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 2147483647
+    RegisterAsnRequest:
+      type: object
+      additionalProperties: false
+      required: [asnNumber, supplierRef, lines]
+      properties:
+        asnNumber:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9._-]+$"
+        supplierRef:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Non-blank supplier reference.
+        ownerRef:
+          type: string
+          maxLength: 64
+          pattern: "^[A-Za-z0-9._-]*$"
+          description: Optional opaque tenant tag; invalid is 400 `invalid-owner-ref`. Copied to the events, never interpreted.
+        expectedArrival:
+          type: string
+          format: date-time
+          description: Optional announced arrival.
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/AsnLine"
+        cartons:
+          type: array
+          description: Optional carton manifest (a flat ASN has none). Cartons can only be announced here.
+          items:
+            $ref: "#/components/schemas/AsnCarton"
+    CartonKind:
+      type: string
+      description: |
+        `HOMOGENEOUS_CASE` = one SKU in a case pack; `MIXED` = several SKUs, a
+        logistic unit only (no pack GTIN).
+      enum: [HOMOGENEOUS_CASE, MIXED]
+    CartonDims:
+      type: object
+      additionalProperties: false
+      required: [lengthMm, widthMm, heightMm]
+      properties:
+        lengthMm: { type: integer, format: int64, minimum: 1 }
+        widthMm: { type: integer, format: int64, minimum: 1 }
+        heightMm: { type: integer, format: int64, minimum: 1 }
+    CartonContent:
+      type: object
+      additionalProperties: false
+      required: [lineNo, sku, gtin, qty]
+      properties:
+        lineNo: { type: integer, format: int32, minimum: 1 }
+        sku: { type: string, minLength: 1, maxLength: 64 }
+        gtin:
+          type: string
+          description: GTIN of the content, 8, 12, 13 or 14 digits with a valid GS1 check digit; returned zero-padded to 14.
+        qty: { type: integer, format: int64, minimum: 1, description: Eaches. }
+        lot: { type: string, maxLength: 20, description: GS1 AI 10. }
+        expiry: { type: string, description: "Expiry date, `YYYY-MM-DD`." }
+    AsnCarton:
+      type: object
+      additionalProperties: false
+      required: [sscc, kind, contents]
+      properties:
+        sscc: { type: string, pattern: "^[0-9]{18}$", description: SSCC-18 with a valid GS1 check digit; unique per site. }
+        parentSscc: { type: string, pattern: "^[0-9]{18}$", description: "The pallet SSCC, when the carton is on one." }
+        kind: { $ref: "#/components/schemas/CartonKind" }
+        contents:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/CartonContent" }
+        grossWeightG: { type: integer, format: int64, minimum: 1, description: Declared gross weight in grams. }
+        dims: { $ref: "#/components/schemas/CartonDims" }
+    AsnCartonStatus:
+      type: object
+      required: [sscc, kind, contents, status]
+      properties:
+        sscc: { type: string }
+        parentSscc: { type: string }
+        kind: { $ref: "#/components/schemas/CartonKind" }
+        contents:
+          type: array
+          items: { $ref: "#/components/schemas/CartonContent" }
+        grossWeightG: { type: integer, format: int64 }
+        dims: { $ref: "#/components/schemas/CartonDims" }
+        status: { type: string, enum: [Expected, Accepted, Missing] }
+    AsnCartons:
+      type: object
+      required: [asnNumber, cartons]
+      properties:
+        asnNumber: { type: string }
+        ownerRef: { type: string, description: Opaque tenant tag; omitted for fleet-owned stock. }
+        cartons:
+          type: array
+          items: { $ref: "#/components/schemas/AsnCartonStatus" }
+    ScanKind:
+      type: string
+      description: What a scan resolves to. `qty` counts cases for `CASE_GTIN` and eaches for `EACH_GTIN`.
+      enum: [SSCC, CASE_GTIN, EACH_GTIN]
+    AssignSsccRequest:
+      type: object
+      additionalProperties: false
+      required: [gtin]
+      properties:
+        gtin: { type: string, pattern: '^[0-9]{14}$', description: "The CASE GTIN of the case (it must be in the PackagingView at the CASE level)." }
+        condition: { $ref: "#/components/schemas/Condition" }
+        lot: { type: string, maxLength: 20 }
+        expiry: { type: string, description: "`YYYY-MM-DD`." }
+    SsccAssignment:
+      type: object
+      required: [lpn, sscc, humanReadable, elementString, symbology, ssccSource, units, discrepancies, version]
+      description: The new SSCC and what a printer needs to render it (ADR 0024).
+      properties:
+        lpn: { type: string, description: The SSCC. }
+        sscc: { type: string, pattern: "^[0-9]{18}$" }
+        humanReadable: { type: string, description: "`(00)<sscc>`." }
+        elementString: { type: string, description: "The data of the GS1-128 symbol: AI 00 and the 18 digits, without parentheses." }
+        symbology: { type: string, enum: [GS1-128] }
+        ssccSource: { type: string, enum: [receiver] }
+        sku: { type: string }
+        units: { type: integer, format: int64, description: Eaches in the case. }
+        discrepancies:
+          type: array
+          description: Findings of the receiving (`UnlabelledCarton` against a carton ASN).
+          items: { $ref: "#/components/schemas/CartonDiscrepancy" }
+        version: { type: integer, format: int64 }
+    ReceiveScanRequest:
+      type: object
+      additionalProperties: false
+      description: Either `scan`, or `kind` and `id`; both is 400 `invalid-scan`.
+      properties:
+        scan: { type: string, maxLength: 512, description: The raw scanner string. }
+        kind: { $ref: "#/components/schemas/ScanKind" }
+        id: { type: string, maxLength: 64, description: The SSCC or GTIN when `kind` is given. }
+        expectedKind: { $ref: "#/components/schemas/ScanKind" }
+        qty:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Cases for a case GTIN (1 to 1000), eaches for an each GTIN; 0 or absent = 1; ignored for an SSCC."
+        condition: { $ref: "#/components/schemas/Condition" }
+        lot: { type: string, maxLength: 20 }
+        expiry: { type: string, description: "`YYYY-MM-DD`." }
+        countedContents:
+          type: array
+          maxItems: 200
+          description: |
+            Optional audit count of a MIXED carton, only with an SSCC scan
+            (a count on a homogeneous carton is 422 `counted-contents-not-mixed`).
+            The quantity RECEIVED is the counted one, never the label's; every
+            SKU whose count differs from the manifest raises
+            `MixedCartonContentMismatch`. A manifest SKU absent from the count
+            counts as zero; a SKU the manifest does not list needs an each GTIN
+            in the PackagingView (else 422 `counted-sku-unknown`).
+          items:
+            type: object
+            additionalProperties: false
+            required: [sku, qty]
+            properties:
+              sku: { type: string, minLength: 1, maxLength: 64 }
+              qty: { type: integer, format: int64, minimum: 0, description: Eaches counted; 0 = looked for and found none. }
+    CartonLabel:
+      type: object
+      required: [lpn, symbology, humanReadable, units, receivedAt]
+      properties:
+        lpn: { type: string }
+        symbology: { type: string, enum: [CODE128] }
+        humanReadable: { type: string, description: "The text printed under the barcode: `(00)<sscc>` for an SSCC carton, the LPN otherwise." }
+        sku: { type: string, description: Omitted when the carton holds more than one SKU. }
+        units: { type: integer, format: int64, description: Eaches in the carton. }
+        receivedAt: { type: string, format: date-time }
+    ReceiptCartonContent:
+      type: object
+      required: [lineNo, sku, gtin, qty, condition]
+      properties:
+        lineNo: { type: integer, format: int32, minimum: 1 }
+        sku: { type: string }
+        gtin: { type: string }
+        qty: { type: integer, format: int64, description: Eaches. }
+        lot: { type: string }
+        expiry: { type: string }
+        condition: { $ref: "#/components/schemas/Condition" }
+    ReceiptCarton:
+      type: object
+      required: [lpn, kind, status, sealed, contents]
+      properties:
+        lpn: { type: string, description: "The SSCC, or an internal `LPN-<ulid>` for a carton received without one." }
+        sscc: { type: string }
+        parentSscc: { type: string }
+        kind: { $ref: "#/components/schemas/CartonKind" }
+        status: { type: string, enum: [Expected, Accepted] }
+        sealed: { type: boolean }
+        contents:
+          type: array
+          items: { $ref: "#/components/schemas/ReceiptCartonContent" }
+        receivedAt: { type: string, format: date-time }
+        ssccSource: { type: string, enum: [supplier, receiver], description: "Who gave the carton its SSCC (ADR 0024). Absent on a carton that has none." }
+        bestBefore: { type: string, format: date, description: "AI 15 of the scanned label (a day 00 is the last day of the month). Absent when the label had none." }
+        expiry: { type: string, format: date, description: "AI 17 of the scanned label." }
+        productionDate: { type: string, format: date, description: "AI 11 of the scanned label." }
+        packagingDate: { type: string, format: date, description: "AI 13 of the scanned label." }
+        serial: { type: string, description: "AI 21 of the scanned label." }
+        purchaseOrder: { type: string, description: "AI 400 of the scanned label." }
+        shipToGln: { type: string, pattern: "^[0-9]{13}$", description: "AI 410 of the scanned label." }
+        shipForGln: { type: string, pattern: "^[0-9]{13}$", description: "AI 413 of the scanned label; stored, never enforced." }
+    CartonDiscrepancyKind:
+      type: string
+      description: |
+        Raised on `CartonDiscrepancyRaised`, never on `ReceiptClosed`.
+        `UnexpectedCarton` = an SSCC not on the manifest; `MissingCarton` = a
+        manifest carton never accepted (raised at close); `DuplicateSscc` =
+        scanned twice or already received; `UnknownGtin` = a GTIN the
+        PackagingView does not know; `CaseQtyMismatch` = quantity differs from
+        the active CASE units per pack or the label count;
+        `MixedCaseDeclaredAsCasePack` = the label's content contradicts the
+        manifest SKU; `UnlabelledCarton` = a case with no SSCC against a carton
+        ASN (it gets an internal LPN, see the label endpoint);
+        `CartonOverLimit` = the carton's DECLARED `grossWeightG` or longest
+        `dims` side is above `CARTON_MAX_GROSS_WEIGHT_G` /
+        `CARTON_MAX_LONGEST_SIDE_MM` (the carton is still ACCEPTED;
+        `expected` holds the breached limits and `actual` the declared values,
+        as `grossWeightG:<n>` / `longestSideMm:<n>` joined by commas);
+        `MixedCartonContentMismatch` = the `countedContents` of a MIXED carton
+        differ from its manifest for a SKU (`expected` and `actual` are
+        `<sku>:<qty>`, one finding per SKU);
+        `LabelNonCompliant` = the scanned label breaks the GS1 rules (`expected`
+        is the reason code: `bad_check_digit`, `invalid_identifier`,
+        `conflicting_ais`, `missing_ai`, `unknown_ai`, ...; `actual` the raw
+        scan; nothing is booked); `WrongDestination` = the label's ship-to GLN
+        (AI 410) is not a site of this receiving (`actual` is the GLN; nothing
+        is booked); `MissingContentGtin` = a carton scan against a FLAT ASN
+        (lines, no carton manifest, ADR 0025) carried no AI 02 content GTIN, so
+        no line could be resolved (`sscc` carries the parsed SSCC, the label
+        may itself be GS1-compliant; nothing is booked). The last three kinds
+        have no W13 code; their CBV dispositions are
+        `non_conformant`, `mismatch_instance` and `non_conformant`
+        (ADR 0024, ADR 0025).
+      enum: [UnexpectedCarton, MissingCarton, DuplicateSscc, UnknownGtin, CaseQtyMismatch, MixedCaseDeclaredAsCasePack, UnlabelledCarton, CartonOverLimit, MixedCartonContentMismatch, LabelNonCompliant, WrongDestination, MissingContentGtin]
+    CartonDiscrepancy:
+      type: object
+      required: [kind]
+      properties:
+        kind: { $ref: "#/components/schemas/CartonDiscrepancyKind" }
+        sscc: { type: string }
+        expected: { type: string }
+        actual: { type: string }
+        w13Code: { $ref: "#/components/schemas/W13Code" }
+        cbvDisposition: { $ref: "#/components/schemas/CbvDisposition" }
+        supplierRef: { type: string, description: "The ASN's supplier; set on `LabelNonCompliant` and `WrongDestination` (ADR 0024)." }
+    ReceiptCartonDiscrepancy:
+      type: object
+      description: |
+        A carton discrepancy as the receipt keeps it (ADR 0015): the finding of
+        `CartonDiscrepancy` plus the instant it was raised, the scan's for a
+        scan finding and the close's for `MissingCarton`. `sscc` is absent when
+        the finding is not about a scanned SSCC (an unknown GTIN, an
+        unlabelled case, a missing carton, whose manifest SSCC is `expected`).
+      required: [kind, at]
+      properties:
+        kind: { $ref: "#/components/schemas/CartonDiscrepancyKind" }
+        sscc: { type: string, pattern: "^[0-9]{18}$" }
+        expected: { type: string }
+        actual: { type: string }
+        at: { type: string, format: date-time }
+        w13Code: { $ref: "#/components/schemas/W13Code" }
+        cbvDisposition: { $ref: "#/components/schemas/CbvDisposition" }
+        supplierRef: { type: string, description: "The ASN's supplier; set on `LabelNonCompliant` and `WrongDestination` (ADR 0024)." }
+    ScanResult:
+      type: object
+      required: [kind, accepted, lines, cartons, discrepancies, version]
+      properties:
+        kind: { $ref: "#/components/schemas/ScanKind" }
+        accepted: { type: boolean }
+        lines:
+          type: array
+          description: The receipt's lines after the scan.
+          items: { $ref: "#/components/schemas/ReceiptLine" }
+        cartons:
+          type: array
+          items: { $ref: "#/components/schemas/ReceiptCarton" }
+        discrepancies:
+          type: array
+          items: { $ref: "#/components/schemas/CartonDiscrepancy" }
+        version: { type: integer, format: int64 }
+    ReasonRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+          description: Optional free text without control characters.
+    Asn:
+      type: object
+      required: [asnNumber, supplierRef, state, lines, version]
+      properties:
+        asnNumber:
+          type: string
+          example: ASN-1001
+        supplierRef:
+          type: string
+        registeredAt:
+          type: string
+          format: date-time
+          description: When the ASN was registered here (ADR 0025); omitted on a row written before it existed (unknown, and an unknown registration can never be late).
+        expectedArrival:
+          type: string
+          format: date-time
+          description: Omitted when the supplier gave none.
+        state:
+          $ref: "#/components/schemas/AsnState"
+        ownerRef:
+          type: string
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/AsnLine"
+        cartons:
+          type: array
+          items:
+            $ref: "#/components/schemas/AsnCarton"
+        version:
+          type: integer
+          format: int64
+          description: Starts at 1, +1 per accepted change.
+    AsnPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Asn"
+        nextCursor:
+          type: string
+          description: Opaque cursor for the next page; absent on the last page.
+
+    Appointment:
+      type: object
+      required: [appointmentId, doorCode, carrier, windowStart, windowEnd, asnNumbers, state, version]
+      properties:
+        appointmentId:
+          type: string
+          example: appt-123e4567-e89b-12d3-a456-426614174000
+        doorCode:
+          type: string
+        carrier:
+          type: string
+        windowStart:
+          type: string
+          format: date-time
+        windowEnd:
+          type: string
+          format: date-time
+        asnNumbers:
+          type: array
+          items:
+            type: string
+        state:
+          $ref: "#/components/schemas/AppointmentState"
+        version:
+          type: integer
+          format: int64
+    AppointmentPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Appointment"
+        nextCursor:
+          type: string
+          description: Opaque cursor for the next page; absent on the last page.
+
+    OpenReceiptRequest:
+      type: object
+      additionalProperties: false
+      required: [asnNumber]
+      properties:
+        asnNumber:
+          type: string
+          minLength: 1
+          maxLength: 64
+        appointmentId:
+          type: string
+          description: Optional; omit for a walk-in delivery.
+    ReceiveLineRequest:
+      type: object
+      additionalProperties: false
+      required: [lineNo, quantity, condition]
+      properties:
+        lineNo:
+          type: integer
+          format: int32
+          minimum: 1
+        quantity:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 2147483647
+        condition:
+          $ref: "#/components/schemas/Condition"
+    ReceiptLine:
+      type: object
+      required: [lineNo, sku, expectedQty, receivedGood, receivedDamaged]
+      properties:
+        lineNo:
+          type: integer
+          format: int32
+        sku:
+          type: string
+        expectedQty:
+          type: integer
+          format: int64
+        receivedGood:
+          type: integer
+          format: int64
+          minimum: 0
+        receivedDamaged:
+          type: integer
+          format: int64
+          minimum: 0
+        earliestBestBefore: { type: string, format: date, description: "The earliest best-before (AI 15) of the accepted cartons of the line (ADR 0024). Absent when none carried one." }
+        earliestExpiry: { type: string, format: date, description: "The earliest expiry (AI 17) of the accepted cartons of the line (ADR 0024). Absent when none carried one." }
+    PalletDates:
+      type: object
+      required: [parentSscc, cartonCount]
+      description: The accepted cartons of one pallet and their earliest dates (ADR 0024).
+      properties:
+        parentSscc: { type: string, pattern: "^[0-9]{18}$" }
+        cartonCount: { type: integer, minimum: 1 }
+        earliestBestBefore: { type: string, format: date, description: "The earliest AI 15 of the pallet's accepted cartons. Absent when none carried one." }
+        earliestExpiry: { type: string, format: date, description: "The earliest AI 17 of the pallet's accepted cartons. Absent when none carried one." }
+    Discrepancy:
+      type: object
+      required: [lineNo, sku, kind, expectedQty, receivedQty, damagedQty]
+      properties:
+        lineNo:
+          type: integer
+          format: int32
+        sku:
+          type: string
+        kind:
+          $ref: "#/components/schemas/DiscrepancyKind"
+        expectedQty:
+          type: integer
+          format: int64
+        receivedQty:
+          type: integer
+          format: int64
+          description: Good plus damaged.
+        damagedQty:
+          type: integer
+          format: int64
+        w13Code: { $ref: "#/components/schemas/W13Code" }
+        cbvDisposition: { $ref: "#/components/schemas/CbvDisposition" }
+    W13Code:
+      type: string
+      enum: ["01", "02", "03", "05", "09"]
+      description: |
+        The X12 W13 receiving condition code of the finding (ADR 0023): `01`
+        damaged, `02` short, `03` over, `05` incorrect product, `09` hold. Two
+        characters, leading zero kept. Absent for a kind the standard has no code
+        for (`DuplicateSscc`, `UnlabelledCarton`, `CartonOverLimit`, ...); never
+        invented. Derived from `kind`.
+    CbvDisposition:
+      type: string
+      description: |
+        The GS1 CBV disposition of the finding (ADR 0023), derived from `kind`
+        (`damaged`, `mismatch_quantity`, `mismatch_class`, `mismatch_instance`,
+        `non_conformant`, ...). Always present on a coded kind.
+    Receipt:
+      type: object
+      required: [receiptId, asnNumber, state, lines, openedAt, discrepancies, cartonDiscrepancies, version]
+      properties:
+        receiptId:
+          type: string
+          example: rcpt-223e4567-e89b-12d3-a456-426614174000
+        asnNumber:
+          type: string
+        appointmentId:
+          type: string
+          description: Omitted for a walk-in delivery.
+        doorCode:
+          type: string
+          description: Omitted when the receipt has no appointment.
+        state:
+          $ref: "#/components/schemas/ReceiptState"
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReceiptLine"
+        openedAt:
+          type: string
+          format: date-time
+        closedAt:
+          type: string
+          format: date-time
+          description: Present once the receipt is `Closed`.
+        discrepancies:
+          type: array
+          description: Per line, in line order, one entry per kind (`Short`, `Over`, `Damaged`); empty when everything matches.
+          items:
+            $ref: "#/components/schemas/Discrepancy"
+        cartonDiscrepancies:
+          type: array
+          description: |
+            Every carton discrepancy raised on the receipt (scan findings and
+            the `MissingCarton` findings raised at close), in raise order, the
+            same findings that travel as `CartonDiscrepancyRaised` (ADR 0015).
+            `[]` when there are none, including for a receipt that predates
+            the field. Never `ReceiptClosed.discrepancies`, which keeps its
+            three line-level kinds.
+          items:
+            $ref: "#/components/schemas/ReceiptCartonDiscrepancy"
+        pallets:
+          type: array
+          description: |
+            The accepted cartons grouped by parent SSCC, in the order the pallets
+            first appear, each with its earliest best-before and expiry: what the
+            putaway needs to pick by first-expired-first-out on a mixed pallet
+            (ADR 0024). Absent when no accepted carton has a pallet.
+          items:
+            $ref: "#/components/schemas/PalletDates"
+        version:
+          type: integer
+          format: int64
+    ReceiptPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Receipt"
+        nextCursor:
+          type: string
+          description: Opaque cursor for the next page; absent on the last page.
+
+    DockFlow:
+      type: string
+      description: Which traffic the door serves; only `Inbound` and `Both` are listed.
+      enum: [Inbound, Both]
+    Dock:
+      type: object
+      required: [doorCode, dockFlow]
+      properties:
+        doorCode:
+          type: string
+        dockFlow:
+          $ref: "#/components/schemas/DockFlow"
+    DockList:
+      type: object
+      required: [mode, items]
+      properties:
+        mode:
+          type: string
+          description: The runtime mode of the dock-door local copy; the service only runs in `kafka` mode.
+          enum: [kafka]
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Dock"
+        nextCursor:
+          type: string
+          description: Opaque cursor of the next page; absent on the last page.
+
+    Problem:
+      type: object
+      description: RFC 7807 problem document used for every non-2xx response.
+      required: [type, title, status, detail, instance]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+    Status:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+    ReceivingPerformanceReport:
+      type: object
+      required: [from, to, dock_to_stock_target_seconds, days, current]
+      properties:
+        from:
+          type: string
+          format: date-time
+          description: The effective range start (inclusive, UTC).
+        to:
+          type: string
+          format: date-time
+          description: The effective range end (exclusive, UTC).
+        dock_to_stock_target_seconds:
+          type: integer
+          format: int32
+          description: The dock-to-stock target the days' `share_under_target` is measured against, 11160 s (3.1 h, WERC best-in-class; ADR 0021).
+        days:
+          type: array
+          description: One row per UTC day intersecting the range, in day order, zeros included.
+          items:
+            $ref: "#/components/schemas/ReceivingPerformanceDay"
+        current:
+          $ref: "#/components/schemas/ReceivingCurrent"
+    ReceivingPerformanceDay:
+      type: object
+      required: [day, receipts_closed, lines_received, units_good, units_damaged, discrepancies, receipt_cycle, appointments, dock_dwell, dock_to_stock, advice, asn_timeliness]
+      properties:
+        day:
+          type: string
+          format: date
+          description: The UTC calendar day.
+        receipts_closed:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Receipts whose close fell in the day's window.
+        lines_received:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Receiving actions against a line (`ReceiptLineReceived`) in the window.
+        units_good:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Units received in `Good` condition in the window.
+        units_damaged:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Units received in `Damaged` condition in the window.
+        discrepancies:
+          $ref: "#/components/schemas/DiscrepancyCounts"
+        receipt_cycle:
+          $ref: "#/components/schemas/TimingSummary"
+        appointments:
+          $ref: "#/components/schemas/AppointmentCounts"
+        dock_dwell:
+          $ref: "#/components/schemas/TimingSummary"
+        dock_to_stock:
+          $ref: "#/components/schemas/DockToStockSummary"
+        advice:
+          $ref: "#/components/schemas/AdviceSummary"
+        asn_timeliness:
+          type: array
+          description: |
+            The day's per-supplier ASN timeliness (ADR 0025), biggest
+            `registered` first, ties by `supplier_ref` ascending, at most the
+            top ten suppliers of the day; `[]` when none registered.
+          items:
+            $ref: "#/components/schemas/SupplierTimeliness"
+    DiscrepancyCounts:
+      type: object
+      description: Discrepancies of the receipts closed in the window, by kind.
+      required: [short, over, damaged]
+      properties:
+        short: { type: integer, format: int32, minimum: 0 }
+        over: { type: integer, format: int32, minimum: 0 }
+        damaged: { type: integer, format: int32, minimum: 0 }
+    AppointmentCounts:
+      type: object
+      description: Appointment milestones that fell in the window.
+      required: [booked, checked_in, cancelled, completed]
+      properties:
+        booked: { type: integer, format: int32, minimum: 0 }
+        checked_in: { type: integer, format: int32, minimum: 0 }
+        cancelled: { type: integer, format: int32, minimum: 0 }
+        completed: { type: integer, format: int32, minimum: 0 }
+    TimingSummary:
+      type: object
+      description: |
+        A duration summary in seconds: how many durations there were and their
+        linear-interpolated median and 95th percentile. The percentiles are
+        null when `count` is 0.
+      required: [count, p50_seconds, p95_seconds]
+      properties:
+        count: { type: integer, format: int32, minimum: 0 }
+        p50_seconds: { type: number, format: double, nullable: true, minimum: 0 }
+        p95_seconds: { type: number, format: double, nullable: true, minimum: 0 }
+    DockToStockSummary:
+      type: object
+      description: |
+        The dock-to-stock facts (ADR 0021) of the receipts whose last Good
+        carton was stowed in the window: gate arrival to last stow, in
+        seconds, never negative.
+      required: [count, p50_seconds, p90_seconds, under_target, share_under_target]
+      properties:
+        count: { type: integer, format: int32, minimum: 0 }
+        p50_seconds: { type: number, format: double, nullable: true, minimum: 0, description: "Median; null when count is 0." }
+        p90_seconds: { type: number, format: double, nullable: true, minimum: 0, description: "90th percentile; null when count is 0." }
+        under_target: { type: integer, format: int32, minimum: 0, description: "Facts at or under dock_to_stock_target_seconds." }
+        share_under_target: { type: number, format: double, nullable: true, minimum: 0, maximum: 1, description: "under_target / count; null when count is 0." }
+    AdviceSummary:
+      type: object
+      description: |
+        The receiving advices (ADR 0023) issued in the window: how many, and how
+        many inside the committed window after the last unit received
+        (`RECEIVING_ADVICE_SLA`, default 24 h). The KPI "% receipts with advice
+        inside the SLA" is `share_within_sla`.
+      required: [count, within_sla, share_within_sla]
+      properties:
+        count: { type: integer, format: int32, minimum: 0, description: "Advices issued (`ReceivingAdviceIssued`) in the window, by the UTC day of their `issued_at`." }
+        within_sla: { type: integer, format: int32, minimum: 0, description: "Of those, how many had `within_sla` true." }
+        share_within_sla: { type: number, format: double, nullable: true, minimum: 0, maximum: 1, description: "within_sla / count; null when count is 0." }
+    SupplierTimeliness:
+      type: object
+      description: |
+        One supplier's ASN timeliness of a day (ADR 0025): how many of the
+        day's ASNs were registered for it (counted in the UTC day of the ASN's
+        `registered_at`) and how many of those were registered after the visit
+        they were received under had arrived (`AsnLateForArrival`). The KPI
+        "% ASNs received before arrival" is `share_on_time`.
+      required: [supplier_ref, registered, late, share_on_time]
+      properties:
+        supplier_ref: { type: string, description: The supplier the ASNs were registered for. }
+        registered: { type: integer, format: int32, minimum: 0, description: "ASNs of this supplier registered in the day (by `registered_at`)." }
+        late: { type: integer, format: int32, minimum: 0, description: "Of those, how many were late for their visit's arrival." }
+        share_on_time: { type: number, format: double, nullable: true, minimum: 0, maximum: 1, description: "1 - late / registered; null when registered is 0." }
+    ReceivingCurrent:
+      type: object
+      description: The state right now (not range-bound).
+      required: [open_receipts, expected_today, expected_today_started]
+      properties:
+        open_receipts:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Receipts opened and not yet closed.
+        expected_today:
+          type: integer
+          format: int32
+          minimum: 0
+          description: ASNs not cancelled whose expected arrival falls in today's UTC day.
+        expected_today_started:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Of those, the ASNs that already have a receipt opened.
+    ReportsFreshness:
+      type: object
+      required: [as_of, lag_seconds]
+      properties:
+        as_of:
+          type: string
+          format: date-time
+          nullable: true
+          description: CloudEvents time of the newest event applied; null when none.
+        lag_seconds:
+          type: number
+          format: double
+          nullable: true
+          minimum: 0
+          description: now - as_of, in seconds; null when nothing was applied.

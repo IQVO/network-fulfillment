@@ -1,0 +1,1567 @@
+openapi: 3.0.3
+info:
+  title: Product Master API
+  version: 1.0.0
+  description: |
+    The WMS-tier source of truth for SKU-level product master data in the
+    warehouse-systems platform (ADR 0001): what a SKU *is* for handling
+    purposes (its classification) and physically (declared and measured unit
+    dimensions and weight, ADR 0002). It answers no "where" or "how many"
+    question; stock lives in inventory-storage.
+
+    Every write is an idempotent `PUT`: repeating a request with the same body
+    changes nothing, bumps no version and publishes no event. Accepted changes
+    are published as CloudEvents on `warehouse.product-master.events` through a
+    transactional outbox (see `apis/asyncapi.yaml`); sibling contexts keep a
+    local copy from those events and never call this API at request time.
+
+    Errors are RFC 7807 problem documents with
+    `type = https://errors.product-master.warehouse-systems.dev/<slug>`.
+    There is no authentication layer (fleet decision 2026-09-11).
+
+    **Packaging hierarchy (ADR 0011).** A product also carries the pack levels
+    it is sold, shipped and received in (`EACH`, `INNER`, `CASE`, `PALLET`),
+    each identified by a GS1 GTIN. Eaches are the ledger unit: `unitsPerPack`
+    is the factor to eaches. A GTIN is always the 14-digit zero-left-padded
+    string; 8, 12, 13 and 14 digit input with a valid mod-10 check digit is
+    accepted and normalised. A GTIN identifies exactly one (sku, level),
+    fleet-wide, for ever. Once a level is active its content quantity never
+    changes: a new quantity is a new GTIN at that level (declaring it end-dates
+    the old level, which is kept and still resolvable). `PUT` declarations
+    stay idempotent; `POST .../{level}/retirements` is idempotent too (retiring a
+    retired level changes nothing).
+  contact:
+    name: product-master maintainers
+    url: https://github.com/IQVO/product-master
+  license:
+    name: UNLICENSED
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: http://localhost:8000/api/product-master
+    description: Local kind cluster through Kong
+tags:
+  - name: Products
+    description: Product registration and lookup.
+  - name: Classification
+    description: Handling classification (moved from inventory-storage, ADR 0003).
+  - name: Physical profile
+    description: Declared and measured unit dimensions and weight (ADR 0002).
+  - name: Packaging
+    description: Pack levels with GS1 GTINs and the GTIN lookup (ADR 0011).
+  - name: Health
+    description: Liveness and readiness probes.
+  - name: Reports
+    description: |
+      The read-only master data quality report of the analytics read side
+      (ADR 0006), served by the separate `product-reports` binary (port 8092,
+      cluster-internal Service `<release>-reports`) from the analytical
+      database, never from the OLTP API. Like every sibling's reports API its
+      JSON is snake_case.
+
+paths:
+  /products:
+    get:
+      operationId: listProducts
+      summary: List products
+      description: |
+        Lists registered products in ascending SKU order, a page at a time.
+        `cursor` is the opaque `nextCursor` of the previous page; a response
+        without `nextCursor` is the last page. Optional filters narrow the
+        list to products carrying a handling tag, or to products with or
+        without a classification.
+      tags: [Products]
+      parameters:
+        - name: limit
+          in: query
+          description: Page size, 1 to 500 (default 100).
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: cursor
+          in: query
+          description: The `nextCursor` value from the previous page.
+          schema:
+            type: string
+        - name: handlingTag
+          in: query
+          description: Only products whose classification carries this tag.
+          schema:
+            $ref: "#/components/schemas/HandlingTag"
+        - name: classified
+          in: query
+          description: "`true` = only classified products, `false` = only unclassified ones."
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: One page of products.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductPage"
+              example:
+                items:
+                  - sku: SKU-1
+                    description: Lithium battery pack 12V
+                    version: 3
+                    classification:
+                      handlingTags: [Hazmat]
+                      dotHazardClass: 9
+                      classificationSource: native
+                    physicalProfile:
+                      declared: { lengthMm: 200, widthMm: 120, heightMm: 80, weightG: 1500, volumeMm3: 1920000 }
+                      effective: { lengthMm: 200, widthMm: 120, heightMm: 80, weightG: 1500, volumeMm3: 1920000 }
+                      effectiveSource: declared
+                      discrepancy: false
+                nextCursor: eyJzIjoiU0tVLTEiLCJpIjoiU0tVLTEifQ
+        "400":
+          $ref: "#/components/responses/PagingBadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+    put:
+      operationId: registerProduct
+      summary: Register a product or change its description
+      description: |
+        Registers the SKU as a product (201) or, when it is already
+        registered, replaces its description (200). A product must be
+        registered before it can be classified or dimensioned. Repeating the
+        request with the same description returns 200 and changes nothing.
+      tags: [Products]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterProductRequest"
+            example:
+              description: Lithium battery pack 12V
+      responses:
+        "200":
+          description: The product already existed; its description is now the requested one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "201":
+          description: The product was registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+              example:
+                sku: SKU-1
+                description: Lithium battery pack 12V
+                version: 1
+                physicalProfile:
+                  effectiveSource: none
+                  discrepancy: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/ConcurrentModification"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: getProduct
+      summary: Get a product
+      description: Returns the product's full master record (description, classification, physical profile, version).
+      tags: [Products]
+      responses:
+        "200":
+          description: The product.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/ProductNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}/classification:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+    put:
+      operationId: classifyProduct
+      summary: Set or replace a product's handling classification
+      description: |
+        Sets (201) or replaces (200) the handling classification of a
+        registered product. The request body is the same as inventory-storage's
+        former `PUT /products/{sku}/classification` (ADR 0003). `handlingTags`
+        is a non-empty, duplicate-free set from the closed enum;
+        `temperatureClass` is required if and only if `TemperatureSensitive` is
+        present; `dotHazardClass` is optional and only allowed with `Hazmat`.
+        An identical classification returns 200 and changes nothing.
+      tags: [Classification]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClassifyProductRequest"
+            example:
+              handlingTags: [Hazmat, TemperatureSensitive]
+              temperatureClass: Frozen
+              dotHazardClass: 3
+      responses:
+        "200":
+          description: An existing classification was replaced (or was already identical).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductClassification"
+        "201":
+          description: The product had no classification; it has one now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductClassification"
+              example:
+                sku: SKU-1
+                handlingTags: [Hazmat, TemperatureSensitive]
+                temperatureClass: Frozen
+                dotHazardClass: 3
+                classificationSource: native
+                version: 2
+        "400":
+          $ref: "#/components/responses/InvalidClassification"
+        "404":
+          $ref: "#/components/responses/ProductNotFound"
+        "409":
+          $ref: "#/components/responses/ConcurrentModification"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: getProductClassification
+      summary: Get a product's handling classification
+      description: |
+        Returns the classification in the same shape inventory-storage used,
+        plus `classificationSource` and `version`. 404
+        `product-classification-not-found` when the product exists but is not
+        classified; 404 `product-not-found` when the SKU is not registered.
+      tags: [Classification]
+      x-pagination-exempt: view
+      x-pagination-exempt-reason: One classification record of one product; `handlingTags` is a closed set of at most eight tags inside it, not a collection of resources.
+      responses:
+        "200":
+          description: The classification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductClassification"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: The SKU is not registered, or it is registered but not classified.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                productNotFound:
+                  summary: SKU not registered
+                  value:
+                    type: https://errors.product-master.warehouse-systems.dev/product-not-found
+                    title: Product not found
+                    status: 404
+                    detail: product not found
+                    instance: /products/SKU-UNKNOWN/classification
+                classificationNotFound:
+                  summary: Registered but not classified
+                  value:
+                    type: https://errors.product-master.warehouse-systems.dev/product-classification-not-found
+                    title: Product classification not found
+                    status: 404
+                    detail: product classification not found
+                    instance: /products/SKU-1/classification
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}/dimensions/declared:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+    put:
+      operationId: declareDimensions
+      summary: Declare a product's unit dimensions and weight
+      description: |
+        Sets or replaces the declared (vendor or steward supplied) unit
+        dimensions in whole millimetres and weight in whole grams (ADR 0002).
+        Each dimension is 1..20000 mm and the weight 1..2000000 g. Returns the
+        whole physical profile, including the effective values and the
+        declared-versus-measured discrepancy flag. Identical values return 200
+        and change nothing.
+      tags: [Physical profile]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnitDimensionsInput"
+            example:
+              lengthMm: 200
+              widthMm: 120
+              heightMm: 80
+              weightG: 1500
+      responses:
+        "200":
+          description: The physical profile after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhysicalProfile"
+        "400":
+          $ref: "#/components/responses/InvalidDimensions"
+        "404":
+          $ref: "#/components/responses/ProductNotFound"
+        "409":
+          $ref: "#/components/responses/ConcurrentModification"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}/dimensions/measured:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+    put:
+      operationId: recordMeasurement
+      summary: Record a measurement of one unit
+      description: |
+        Records the latest measured unit dimensions and weight (a cubiscan
+        reading or a manual measurement, ADR 0002). The measured values become
+        the effective ones. A measurement older than the current one is
+        rejected with 409 `stale-measurement`; `measuredAt` in the future is a
+        400. Repeating the current measurement changes nothing.
+      tags: [Physical profile]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MeasurementInput"
+            example:
+              lengthMm: 205
+              widthMm: 121
+              heightMm: 82
+              weightG: 1720
+              measuredAt: "2026-10-06T14:05:00Z"
+              deviceId: CUBISCAN-03
+      responses:
+        "200":
+          description: The physical profile after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhysicalProfile"
+              example:
+                declared: { lengthMm: 200, widthMm: 120, heightMm: 80, weightG: 1500, volumeMm3: 1920000 }
+                measured: { lengthMm: 205, widthMm: 121, heightMm: 82, weightG: 1720, volumeMm3: 2034010, measuredAt: "2026-10-06T14:05:00Z", deviceId: CUBISCAN-03 }
+                effective: { lengthMm: 205, widthMm: 121, heightMm: 82, weightG: 1720, volumeMm3: 2034010 }
+                effectiveSource: measured
+                discrepancy: true
+                version: 4
+        "400":
+          $ref: "#/components/responses/InvalidDimensions"
+        "404":
+          $ref: "#/components/responses/ProductNotFound"
+        "409":
+          description: A newer measurement is already recorded, or a concurrent write won.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                staleMeasurement:
+                  summary: Older than the current measurement
+                  value:
+                    type: https://errors.product-master.warehouse-systems.dev/stale-measurement
+                    title: A newer measurement is already recorded
+                    status: 409
+                    detail: measurement is older than the current one
+                    instance: /products/SKU-1/dimensions/measured
+                concurrentModification:
+                  summary: Concurrent write
+                  value:
+                    type: https://errors.product-master.warehouse-systems.dev/concurrent-modification
+                    title: The resource was modified by another request; re-fetch the latest version and retry
+                    status: 409
+                    detail: concurrent modification
+                    instance: /products/SKU-1/dimensions/measured
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}/physical-profile:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+    get:
+      operationId: getPhysicalProfile
+      summary: Get a product's physical profile
+      description: Declared, measured and effective unit dimensions and weight, with the discrepancy flag (ADR 0002).
+      tags: [Physical profile]
+      responses:
+        "200":
+          description: The physical profile (empty parts are omitted; `effectiveSource` is `none` when nothing is known).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhysicalProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/ProductNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /gtins/{gtin}:
+    parameters:
+      - $ref: "#/components/parameters/Gtin"
+    get:
+      operationId: resolveGtin
+      summary: Resolve a GTIN to its SKU and pack level
+      description: |
+        Answers which SKU and packaging level a GTIN identifies (ADR 0011). The
+        path GTIN is normalised to 14 digits first (8, 12, 13 and 14 digit
+        spellings of one number resolve identically). A retired GTIN still
+        resolves, with `active: false` and its `effectiveTo`, so an in-flight
+        ASN that names it can be read. For people, tooling and backfills: no
+        service calls this on a hot path, each consumer keeps its own
+        event-fed projection.
+      tags: [Packaging]
+      responses:
+        "200":
+          description: The SKU and pack level the GTIN identifies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GtinResolution"
+              example:
+                gtin: "24006381333935"
+                sku: SKU-1
+                level: CASE
+                unitsPerPack: 12
+                childGtin: "04006381333931"
+                active: true
+                effectiveFrom: "2026-10-06T20:00:00Z"
+        "400":
+          $ref: "#/components/responses/InvalidGtin"
+        "404":
+          description: No pack level holds the GTIN.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.product-master.warehouse-systems.dev/gtin-not-found
+                title: GTIN not found
+                status: 404
+                detail: GTIN not found
+                instance: /gtins/5901234123457
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}/pack-levels:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+    get:
+      operationId: listPackLevels
+      summary: List a product's pack levels
+      description: |
+        Every pack level the product ever declared, retired ones included,
+        lowest level first and, within a level, oldest first, a page at a
+        time (`limit`, `cursor`; a response without `nextCursor` is the last
+        page). A product without pack levels answers an empty `items` array.
+      tags: [Packaging]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of the product's pack levels.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackLevelList"
+        "400":
+          $ref: "#/components/responses/PagingBadRequest"
+        "404":
+          $ref: "#/components/responses/ProductNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}/pack-levels/{level}:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+      - $ref: "#/components/parameters/PackLevelPath"
+    put:
+      operationId: declarePackLevel
+      summary: Declare a pack level
+      description: |
+        Declares the pack level `level` of a registered product with its GTIN
+        (ADR 0011). `EACH` has no child and exactly one unit per pack; every
+        other level names `childGtin` (an ACTIVE lower level of this product)
+        and `qtyOfChild` (2 to 1000000). `unitsPerPack`, the direct factor to
+        eaches, is derived from the chain when omitted and must equal it when
+        given. `dims` are the declared dimensions of ONE pack (ADR 0002 bounds);
+        a pack must not weigh less than its contents when both weights are
+        known.
+
+        Repeating the identical declaration returns 200 and changes nothing.
+        `isOrderable`, `isDespatchUnit` and `dims` of an active level can be
+        changed in place by declaring the same `gtin` again. The content
+        quantity (`childGtin`, `qtyOfChild`, `unitsPerPack`) of an active level
+        can NOT change: that is 409 `pack-quantity-immutable`. A new quantity
+        is declared with a NEW `gtin` at the same level, which end-dates the
+        old level (reason `superseded`, kept and still resolvable) in the same
+        transaction; the levels above it must be declared again by the caller.
+        Returns 201 when the product had no level there, else 200.
+      tags: [Packaging]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PackLevelInput"
+            example:
+              gtin: "24006381333935"
+              childGtin: "4006381333931"
+              qtyOfChild: 12
+              dims: { lengthMm: 400, widthMm: 300, heightMm: 200, weightG: 6500 }
+              isOrderable: true
+              isDespatchUnit: true
+      responses:
+        "200":
+          description: The level after the call (already declared, changed in place, or a new GTIN that superseded the old one).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackLevelResource"
+        "201":
+          description: The product had no level there; it is declared now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackLevelResource"
+              example:
+                sku: SKU-1
+                version: 3
+                level: CASE
+                gtin: "24006381333935"
+                childGtin: "04006381333931"
+                qtyOfChild: 12
+                unitsPerPack: 12
+                dims: { lengthMm: 400, widthMm: 300, heightMm: 200, weightG: 6500, volumeMm3: 24000000 }
+                isOrderable: true
+                isDespatchUnit: true
+                active: true
+                effectiveFrom: "2026-10-06T20:00:00Z"
+        "400":
+          $ref: "#/components/responses/InvalidPackLevelRequest"
+        "404":
+          $ref: "#/components/responses/ProductNotFound"
+        "409":
+          $ref: "#/components/responses/PackLevelConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}/pack-levels/{level}/retirements:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+      - $ref: "#/components/parameters/PackLevelPath"
+    post:
+      operationId: retirePackLevel
+      summary: Retire a pack level
+      description: |
+        End-dates the ACTIVE definition at `level` (`effectiveTo` = now). The
+        definition and its GTIN are kept: the GTIN still resolves, inactive,
+        and is never assigned again. The body is optional; `reason` (1 to 200
+        characters, no control characters) defaults to `retired`. Retiring a
+        level that is already retired returns 200 with that level and changes
+        nothing; a level the product never had is 404 `pack-level-not-found`.
+        Levels above the retired one are not retired by this call.
+      tags: [Packaging]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetirePackLevelInput"
+            example:
+              reason: discontinued
+      responses:
+        "200":
+          description: The retired level.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackLevelResource"
+              example:
+                sku: SKU-1
+                version: 4
+                level: CASE
+                gtin: "24006381333935"
+                childGtin: "04006381333931"
+                qtyOfChild: 12
+                unitsPerPack: 12
+                isOrderable: true
+                isDespatchUnit: true
+                active: false
+                effectiveFrom: "2026-10-06T20:00:00Z"
+                effectiveTo: "2026-10-06T21:01:00Z"
+        "400":
+          $ref: "#/components/responses/InvalidPackLevelRequest"
+        "404":
+          description: The product is not registered, or never had that level.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                productNotFound:
+                  summary: Unknown product
+                  value: { type: https://errors.product-master.warehouse-systems.dev/product-not-found, title: Product not found, status: 404, detail: product not found, instance: /products/SKU-404/pack-levels/CASE/retirements }
+                packLevelNotFound:
+                  summary: The product never declared that level
+                  value: { type: https://errors.product-master.warehouse-systems.dev/pack-level-not-found, title: Pack level not found, status: 404, detail: "pack level not found: PALLET", instance: /products/SKU-1/pack-levels/PALLET/retirements }
+        "409":
+          $ref: "#/components/responses/ConflictOrKeyReused"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /products/{sku}/pack-levels/{level}/measured:
+    parameters:
+      - $ref: "#/components/parameters/Sku"
+      - $ref: "#/components/parameters/PackLevelPath"
+    put:
+      operationId: recordPackLevelMeasurement
+      summary: Record a measurement of one pack
+      description: |
+        Records the latest measured dimensions and weight of ONE pack of the
+        ACTIVE level `level` (a cubiscan reading or a manual measurement; the
+        declared-versus-measured split of ADR 0002, per level). A measurement
+        older than the current one is 409 `stale-measurement`; `measuredAt` in
+        the future is 400; a measured weight below the weight of the contents
+        is 409 `pack-dimensions-below-contents`. Repeating the current
+        measurement changes nothing. Raises `ProductPackLevelMeasured`.
+      tags: [Packaging]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MeasurementInput"
+            example:
+              lengthMm: 410
+              widthMm: 310
+              heightMm: 210
+              weightG: 6900
+              measuredAt: "2026-10-06T14:05:00Z"
+              deviceId: CUBISCAN-03
+      responses:
+        "200":
+          description: The level after the call.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackLevelResource"
+        "400":
+          $ref: "#/components/responses/InvalidDimensions"
+        "404":
+          description: The product is not registered, or has no active level there.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.product-master.warehouse-systems.dev/pack-level-not-found
+                title: Pack level not found
+                status: 404
+                detail: "pack level not found: no active CASE level"
+                instance: /products/SKU-1/pack-levels/CASE/measured
+        "409":
+          $ref: "#/components/responses/PackLevelConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe
+      description: 200 while the process is running.
+      tags: [Health]
+      responses:
+        "200":
+          description: Alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness probe
+      description: |
+        200 when the service can serve traffic: it is not draining for shutdown, Postgres answers a ping and a
+        Kafka broker answers a metadata request (reachability only, never topics; the verdict is cached for a few
+        seconds). 503 with `{"status":"not_ready"}` while draining for shutdown; 503 `application/problem+json`
+        (`dependency-unavailable`, the detail names `postgres` and/or `kafka`) while a dependency is unreachable.
+      tags: [Health]
+      responses:
+        "200":
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "503":
+          description: Not ready (draining) or a runtime dependency is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /reports/master-data-quality:
+    servers:
+      - url: http://localhost:8092
+        description: product-reports (cluster-internal Service <release>-reports)
+    get:
+      operationId: getMasterDataQuality
+      summary: Master data quality per day and current coverage
+      tags: [Reports]
+      description: |
+        Is the product master filling in? `days[]` has one row per UTC calendar
+        day intersecting `[from, to)` (zeros included); a day's counts cover
+        the part of the day inside the range. `registered`, `classified`,
+        `dimensions_declared` and `measured` count the products whose FIRST
+        such event fell in that window, so a reclassification or a
+        re-measurement never counts twice and the rows add up to coverage
+        growth. `open_discrepancies` counts the products whose latest physical
+        profile at the end of the window (the day's end, or `to` for a partial
+        last day) has measured dimensions disagreeing with the declared ones.
+
+        `coverage` is the CURRENT state of every product the projection knows,
+        independent of the range: ratios are over `products` (distinct SKUs
+        seen in any event), except `discrepancy_ratio`, which is over
+        `measured`; a ratio over zero is 0. The data is as fresh as
+        `GET /reports/freshness` says.
+      parameters:
+        - $ref: "#/components/parameters/ReportFrom"
+        - $ref: "#/components/parameters/ReportTo"
+      responses:
+        "200":
+          description: The report for the effective range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MasterDataQualityReport"
+              example:
+                from: "2026-10-05T00:00:00Z"
+                to: "2026-10-07T00:00:00Z"
+                days:
+                  - day: "2026-10-05"
+                    registered: 12
+                    classified: 9
+                    dimensions_declared: 7
+                    measured: 2
+                    open_discrepancies: 1
+                  - day: "2026-10-06"
+                    registered: 3
+                    classified: 5
+                    dimensions_declared: 4
+                    measured: 6
+                    open_discrepancies: 2
+                coverage:
+                  products: 120
+                  classified: 96
+                  dimensions_declared: 80
+                  measured: 40
+                  open_discrepancies: 2
+                  classified_ratio: 0.8
+                  dimensions_declared_ratio: 0.6667
+                  measured_ratio: 0.3333
+                  discrepancy_ratio: 0.05
+        "400":
+          description: "`from` / `to` are not RFC 3339, empty or inverted, or span more than 366 days."
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.product-master.warehouse-systems.dev/invalid-report-range
+                title: from and to must form a valid RFC 3339 range of at most 366 days
+                status: 400
+                detail: from must be strictly before to
+                instance: /reports/master-data-quality
+        "500":
+          $ref: "#/components/responses/ReportStoreError"
+  /reports/freshness:
+    servers:
+      - url: http://localhost:8092
+        description: product-reports (cluster-internal Service <release>-reports)
+    get:
+      operationId: getReportsFreshness
+      summary: How far the analytics projection is behind
+      tags: [Reports]
+      description: |
+        The freshness lag of the projection the report reads: `as_of` is the
+        CloudEvents time of the newest event the projector has applied and
+        `lag_seconds` is now minus `as_of` (never negative). Both are null
+        until the first event is applied. A growing lag means the projector is
+        down or behind, not that the report is wrong: it catches up when the
+        projector does.
+      responses:
+        "200":
+          description: The freshness (null fields while nothing was projected).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportsFreshness"
+              example:
+                as_of: "2026-10-07T11:59:55Z"
+                lag_seconds: 4.2
+        "500":
+          $ref: "#/components/responses/ReportStoreError"
+
+components:
+  headers:
+    IdempotencyReplayed:
+      description: "`true` when this answer is the stored response of an earlier request with the same `Idempotency-Key` (the operation did not run again). Never present on the first execution."
+      schema:
+        type: string
+        enum: ["true"]
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated key (a UUID per logical submit; a retry reuses it), 1 to 128
+        printable ASCII characters. The same key with the same method, path and body
+        replays the stored answer with `Idempotency-Replayed: true`; with a different
+        request it is 409 `idempotency-key-reused`. Missing: 400
+        `idempotency-key-required`; malformed: 400 `idempotency-key-invalid`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size, 1 to 500 (default 100).
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: The `nextCursor` value of the previous page (opaque).
+      schema:
+        type: string
+    ReportFrom:
+      name: from
+      in: query
+      required: false
+      description: RFC 3339 instant, inclusive. Defaults to `to` minus 30 days.
+      schema:
+        type: string
+        format: date-time
+      example: "2026-10-05T00:00:00Z"
+    ReportTo:
+      name: to
+      in: query
+      required: false
+      description: RFC 3339 instant, exclusive. Defaults to now. At most 366 days after `from`.
+      schema:
+        type: string
+        format: date-time
+      example: "2026-10-07T00:00:00Z"
+    Gtin:
+      name: gtin
+      in: path
+      required: true
+      description: A GTIN of 8, 12, 13 or 14 digits with a valid mod-10 check digit; normalised to 14 digits before the lookup.
+      schema:
+        type: string
+        pattern: '^[0-9]{8,14}$'
+      example: "4006381333931"
+    PackLevelPath:
+      name: level
+      in: path
+      required: true
+      description: The packaging level, upper case.
+      schema:
+        $ref: "#/components/schemas/PackLevel"
+    Sku:
+      name: sku
+      in: path
+      required: true
+      description: The SKU (1..64 characters, no whitespace, control characters or `/`).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[^\\s/]+$"
+      example: SKU-1
+
+  responses:
+    ReportStoreError:
+      description: The analytical database query failed (the cause is logged, never returned).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.product-master.warehouse-systems.dev/report-store-error
+            title: The report could not be served
+            status: 500
+            detail: the analytical database query failed
+            instance: /reports/master-data-quality
+    BadRequest:
+      description: Malformed JSON body, an unknown field, or an invalid SKU or query parameter.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            invalidSku:
+              summary: Invalid SKU
+              value:
+                type: https://errors.product-master.warehouse-systems.dev/invalid-sku
+                title: SKU is invalid
+                status: 400
+                detail: "sku must be 1..64 characters without whitespace, control characters or '/'"
+                instance: /products/bad%20sku
+            malformedBody:
+              summary: Malformed JSON body
+              value:
+                type: https://errors.product-master.warehouse-systems.dev/malformed-request
+                title: Malformed request
+                status: 400
+                detail: request body is not valid JSON for this operation
+                instance: /products/SKU-1
+            invalidDescription:
+              summary: Description too long
+              value:
+                type: https://errors.product-master.warehouse-systems.dev/invalid-description
+                title: Description is invalid
+                status: 400
+                detail: description must be at most 200 characters without control characters
+                instance: /products/SKU-1
+    PagingBadRequest:
+      description: |
+        A paging or filter error of a collection GET: `limit` not an integer
+        from 1 to 500 (`invalid-limit`), a `cursor` that is not a page token
+        (`invalid-cursor`), a query parameter the operation does not declare
+        (`unknown-query-parameter`), a `classified` that is not `true`/`false`
+        or an unknown `handlingTag` (`malformed-request`), or an invalid SKU
+        (`invalid-sku`, pack levels).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            invalidLimit:
+              summary: limit out of range
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-limit, title: Invalid limit, status: 400, detail: limit must be an integer between 1 and 500, instance: /products }
+            invalidCursor:
+              summary: cursor is not a page token
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-cursor, title: Invalid cursor, status: 400, detail: cursor is not a valid page token, instance: /products }
+            unknownQueryParameter:
+              summary: An undeclared query parameter
+              value: { type: https://errors.product-master.warehouse-systems.dev/unknown-query-parameter, title: Unknown query parameter, status: 400, detail: "unknown query parameter: \"after\" is not a parameter of this operation", instance: /products }
+            badFilter:
+              summary: classified is not true or false
+              value: { type: https://errors.product-master.warehouse-systems.dev/malformed-request, title: Malformed request, status: 400, detail: "invalid list query: classified must be true or false", instance: /products }
+    InvalidClassification:
+      description: The classification breaks a rule of the closed taxonomy (inventory-storage ADR 0009/0010 rules, unchanged).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            noTags:
+              summary: No handling tags
+              value: { type: https://errors.product-master.warehouse-systems.dev/no-handling-tags, title: Classification requires at least one handling tag, status: 400, detail: classification requires at least one handling tag, instance: /products/SKU-1/classification }
+            unknownTag:
+              summary: Unknown handling tag
+              value: { type: https://errors.product-master.warehouse-systems.dev/unknown-handling-tag, title: Unknown handling tag, status: 400, detail: unknown handling tag, instance: /products/SKU-1/classification }
+            duplicateTag:
+              summary: Duplicate handling tag
+              value: { type: https://errors.product-master.warehouse-systems.dev/duplicate-handling-tag, title: Duplicate handling tag, status: 400, detail: duplicate handling tag, instance: /products/SKU-1/classification }
+            temperatureRequired:
+              summary: TemperatureSensitive without a temperature class
+              value: { type: https://errors.product-master.warehouse-systems.dev/temperature-class-required, title: Temperature-sensitive classification requires a temperature class, status: 400, detail: temperature-sensitive classification requires a temperature class, instance: /products/SKU-1/classification }
+            temperatureNotApplicable:
+              summary: Temperature class without TemperatureSensitive
+              value: { type: https://errors.product-master.warehouse-systems.dev/temperature-class-not-applicable, title: Temperature class is only meaningful when the temperature-sensitive tag is present, status: 400, detail: temperature class is only meaningful when the temperature-sensitive tag is present, instance: /products/SKU-1/classification }
+            unknownTemperature:
+              summary: Unknown temperature class
+              value: { type: https://errors.product-master.warehouse-systems.dev/unknown-temperature-class, title: Unknown temperature class, status: 400, detail: unknown temperature class, instance: /products/SKU-1/classification }
+            invalidDot:
+              summary: DOT hazard class outside 1..9
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-dot-hazard-class, title: DOT hazard class must be between 1 and 9, status: 400, detail: dot hazard class must be between 1 and 9, instance: /products/SKU-1/classification }
+            dotNotApplicable:
+              summary: DOT hazard class without Hazmat
+              value: { type: https://errors.product-master.warehouse-systems.dev/dot-hazard-class-not-applicable, title: DOT hazard class is only meaningful when the hazmat tag is present, status: 400, detail: dot hazard class is only meaningful when the hazmat tag is present, instance: /products/SKU-1/classification }
+            malformedBody:
+              summary: Malformed JSON body
+              value: { type: https://errors.product-master.warehouse-systems.dev/malformed-request, title: Malformed request, status: 400, detail: request body is not valid JSON for this operation, instance: /products/SKU-1/classification }
+    InvalidDimensions:
+      description: A dimension or the weight is out of bounds, a field is missing, or `measuredAt` is missing or in the future.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            dimensionOutOfRange:
+              summary: Dimension out of range
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-dimension, title: Dimension out of range, status: 400, detail: "each dimension must be 1..20000 mm", instance: /products/SKU-1/dimensions/declared }
+            weightOutOfRange:
+              summary: Weight out of range
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-weight, title: Weight out of range, status: 400, detail: "weight must be 1..2000000 g", instance: /products/SKU-1/dimensions/declared }
+            measuredAtInFuture:
+              summary: measuredAt in the future
+              value: { type: https://errors.product-master.warehouse-systems.dev/measured-at-in-future, title: Measurement time is in the future, status: 400, detail: measuredAt is after the current time, instance: /products/SKU-1/dimensions/measured }
+            malformedBody:
+              summary: Malformed JSON body or missing field
+              value: { type: https://errors.product-master.warehouse-systems.dev/malformed-request, title: Malformed request, status: 400, detail: request body is not valid JSON for this operation, instance: /products/SKU-1/dimensions/measured }
+    InvalidGtin:
+      description: The GTIN has a wrong length or check digit, or is a variable measure GTIN (indicator digit 9).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            invalidGtin:
+              summary: Wrong check digit
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-gtin, title: GTIN is invalid, status: 400, detail: "GTIN must be 8, 12, 13 or 14 digits with a valid mod-10 check digit: gs1: invalid GTIN: check digit does not match", instance: /gtins/4006381333930 }
+            variableMeasure:
+              summary: Indicator digit 9
+              value: { type: https://errors.product-master.warehouse-systems.dev/variable-measure-unsupported, title: Variable measure GTINs (indicator digit 9) are not supported, status: 400, detail: "variable measure GTINs (indicator digit 9) are not supported: 94006381333934", instance: /gtins/94006381333934 }
+    InvalidPackLevelRequest:
+      description: The level, a GTIN, a quantity, a dimension, a reason or the JSON body is invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            invalidGtin:
+              summary: Wrong length or check digit
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-gtin, title: GTIN is invalid, status: 400, detail: "GTIN must be 8, 12, 13 or 14 digits with a valid mod-10 check digit: gs1: invalid GTIN: check digit does not match", instance: /products/SKU-1/pack-levels/CASE }
+            variableMeasure:
+              summary: Indicator digit 9
+              value: { type: https://errors.product-master.warehouse-systems.dev/variable-measure-unsupported, title: Variable measure GTINs (indicator digit 9) are not supported, status: 400, detail: "variable measure GTINs (indicator digit 9) are not supported: 94006381333934", instance: /products/SKU-1/pack-levels/CASE }
+            invalidPackLevel:
+              summary: Not EACH, INNER, CASE or PALLET
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-pack-level, title: "Pack level must be EACH, INNER, CASE or PALLET", status: 400, detail: "pack level must be EACH, INNER, CASE or PALLET: \"BOX\"", instance: /products/SKU-1/pack-levels/BOX }
+            invalidPackQuantity:
+              summary: qtyOfChild below 2, or a unitsPerPack that disagrees with the chain
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-pack-quantity, title: Pack quantity is invalid, status: 400, detail: "invalid pack quantity: qtyOfChild must be 2..1000000 for a CASE", instance: /products/SKU-1/pack-levels/CASE }
+            invalidReason:
+              summary: A retire reason that is empty, too long or has control characters
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-reason, title: Reason must be 1 to 200 characters without control characters, status: 400, detail: "reason must be 1..200 characters without control characters", instance: /products/SKU-1/pack-levels/CASE/retirements }
+            invalidDimension:
+              summary: A dimension out of range
+              value: { type: https://errors.product-master.warehouse-systems.dev/invalid-dimension, title: Dimension out of range, status: 400, detail: "each dimension must be 1..20000 mm", instance: /products/SKU-1/pack-levels/CASE }
+            idempotencyKeyRequired:
+              summary: POST without an Idempotency-Key header
+              value: { type: https://errors.product-master.warehouse-systems.dev/idempotency-key-required, title: Idempotency-Key header is required, status: 400, detail: "send an Idempotency-Key header of 1 to 128 printable ASCII characters (a client-generated UUID per logical submit)", instance: /products/SKU-1/pack-levels/CASE/retirements }
+            idempotencyKeyInvalid:
+              summary: An Idempotency-Key that is longer than 128 characters or not printable ASCII
+              value: { type: https://errors.product-master.warehouse-systems.dev/idempotency-key-invalid, title: Idempotency-Key header is invalid, status: 400, detail: "the Idempotency-Key header must be 1 to 128 printable ASCII characters", instance: /products/SKU-1/pack-levels/CASE/retirements }
+            malformedBody:
+              summary: Malformed JSON body, unknown field or missing dimension
+              value: { type: https://errors.product-master.warehouse-systems.dev/malformed-request, title: Malformed request, status: 400, detail: request body is not valid JSON for this operation, instance: /products/SKU-1/pack-levels/CASE }
+    PackLevelConflict:
+      description: The request conflicts with the product's pack levels or another writer.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            packQuantityImmutable:
+              summary: The content quantity of an active level cannot change
+              value: { type: https://errors.product-master.warehouse-systems.dev/pack-quantity-immutable, title: "The content quantity of an active pack level cannot change; declare a new GTIN at that level", status: 409, detail: "the content quantity of an active pack level cannot change; declare a new GTIN at that level: 24006381333935 at level CASE", instance: /products/SKU-1/pack-levels/CASE }
+            gtinAlreadyAssigned:
+              summary: The GTIN identifies another (sku, level), or a retired level
+              value: { type: https://errors.product-master.warehouse-systems.dev/gtin-already-assigned, title: The GTIN already identifies a pack level, status: 409, detail: GTIN is already assigned to a pack level, instance: /products/SKU-2/pack-levels/EACH }
+            packLevelOrder:
+              summary: No active lower child level
+              value: { type: https://errors.product-master.warehouse-systems.dev/pack-level-order, title: A pack level needs an active child level that is lower than it, status: 409, detail: "a pack level needs an active child level that is lower than it: a CASE needs the GTIN of its child level", instance: /products/SKU-1/pack-levels/CASE }
+            packDimensionsBelowContents:
+              summary: The pack weighs less than its contents
+              value: { type: https://errors.product-master.warehouse-systems.dev/pack-dimensions-below-contents, title: The pack weighs less than its contents, status: 409, detail: "pack weight is below the weight of its contents: 5999 g is below 12 x 500 g = 6000 g", instance: /products/SKU-1/pack-levels/CASE }
+            staleMeasurement:
+              summary: A newer measurement is already recorded
+              value: { type: https://errors.product-master.warehouse-systems.dev/stale-measurement, title: A newer measurement is already recorded, status: 409, detail: measurement is older than the current one, instance: /products/SKU-1/pack-levels/CASE/measured }
+            concurrentModification:
+              summary: Concurrent write
+              value: { type: https://errors.product-master.warehouse-systems.dev/concurrent-modification, title: The resource was modified by another request; re-fetch the latest version and retry, status: 409, detail: concurrent modification, instance: /products/SKU-1/pack-levels/CASE }
+    ProductNotFound:
+      description: The SKU is not registered.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.product-master.warehouse-systems.dev/product-not-found
+            title: Product not found
+            status: 404
+            detail: product not found
+            instance: /products/SKU-UNKNOWN
+    ConflictOrKeyReused:
+      description: Another request changed the product between this request's read and write (`concurrent-modification`), or the `Idempotency-Key` was already used with a different request (`idempotency-key-reused`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            concurrentModification:
+              summary: Optimistic-concurrency conflict
+              value: { type: https://errors.product-master.warehouse-systems.dev/concurrent-modification, title: The resource was modified by another request; re-fetch the latest version and retry, status: 409, detail: concurrent modification, instance: /products/SKU-1/pack-levels/CASE/retirements }
+            idempotencyKeyReused:
+              summary: Same key, different request
+              value: { type: https://errors.product-master.warehouse-systems.dev/idempotency-key-reused, title: Idempotency-Key was already used with a different request, status: 409, detail: "the Idempotency-Key was first used with a different method, path or body; use a new key for a different request", instance: /products/SKU-1/pack-levels/CASE/retirements }
+    ConcurrentModification:
+      description: Another request changed the product between this request's read and write; re-fetch and retry.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.product-master.warehouse-systems.dev/concurrent-modification
+            title: The resource was modified by another request; re-fetch the latest version and retry
+            status: 409
+            detail: concurrent modification
+            instance: /products/SKU-1
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.product-master.warehouse-systems.dev/internal-error
+            title: Internal server error
+            status: 500
+            detail: an unexpected error occurred
+            instance: /products/SKU-1
+
+  schemas:
+    HandlingTag:
+      type: string
+      description: Closed set of handling tags.
+      enum: [Hazmat, Fragile, TemperatureSensitive, Oversized, HighValue]
+    TemperatureClass:
+      type: string
+      description: Storage temperature band required by a TemperatureSensitive product.
+      enum: [Ambient, Chilled, Frozen]
+    ClassificationSource:
+      type: string
+      description: "`native` = authored in product-master; `legacy-import` = imported from inventory-storage during the migration (ADR 0003)."
+      enum: [native, legacy-import]
+    EffectiveSource:
+      type: string
+      description: Which part of the physical profile the effective values come from.
+      enum: [measured, declared, none]
+
+    RegisterProductRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        description:
+          type: string
+          maxLength: 200
+          description: Operator-facing description; may be empty (omitted means empty). At most 200 characters, no control characters.
+    ClassifyProductRequest:
+      type: object
+      additionalProperties: false
+      required: [handlingTags]
+      properties:
+        handlingTags:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/HandlingTag"
+        temperatureClass:
+          $ref: "#/components/schemas/TemperatureClass"
+        dotHazardClass:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 9
+          nullable: true
+          description: Optional top-level US DOT hazard class; only allowed with Hazmat.
+    PackLevel:
+      type: string
+      description: A packaging level, lowest first. Receiving and picking flows of consumers implement EACH and CASE in v1.
+      enum: [EACH, INNER, CASE, PALLET]
+    Gtin14:
+      type: string
+      pattern: '^[0-9]{14}$'
+      description: A GTIN, always the 14-digit zero-left-padded string with a valid mod-10 check digit.
+      example: "24006381333935"
+    PackLevelInput:
+      type: object
+      additionalProperties: false
+      required: [gtin]
+      properties:
+        gtin:
+          type: string
+          pattern: '^[0-9]{8,14}$'
+          description: The GTIN of this level (8, 12, 13 or 14 digits, valid mod-10 check digit; indicator digit 9 is rejected). Stored as 14 digits.
+        childGtin:
+          type: string
+          pattern: '^[0-9]{8,14}$'
+          description: The GTIN of the child level, an ACTIVE lower level of this product. Required for every level but EACH, which has none.
+        qtyOfChild:
+          type: integer
+          format: int32
+          minimum: 2
+          maximum: 1000000
+          description: How many child packs make one of this level. Required for every level but EACH, which has none.
+        unitsPerPack:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1000000
+          description: Optional direct factor to eaches. Omitted means `qtyOfChild` times the child's factor (1 for EACH); a given value must equal that.
+        dims:
+          $ref: "#/components/schemas/PackDimensionsInput"
+        isOrderable:
+          type: boolean
+          description: Whether this level can be ordered from the supplier. Omitted means false.
+        isDespatchUnit:
+          type: boolean
+          description: Whether this level ships as a unit. Omitted means false.
+    PackDimensionsInput:
+      type: object
+      additionalProperties: false
+      required: [lengthMm, widthMm, heightMm, weightG]
+      description: Declared dimensions and weight of ONE pack of the level.
+      properties:
+        lengthMm: { type: integer, format: int64, minimum: 1, maximum: 20000 }
+        widthMm: { type: integer, format: int64, minimum: 1, maximum: 20000 }
+        heightMm: { type: integer, format: int64, minimum: 1, maximum: 20000 }
+        weightG: { type: integer, format: int64, minimum: 1, maximum: 2000000 }
+    RetirePackLevelInput:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Why the level is retired. Omitted means `retired`.
+    PackLevelDefinition:
+      type: object
+      required: [level, gtin, unitsPerPack, isOrderable, isDespatchUnit, active, effectiveFrom]
+      properties:
+        level: { $ref: "#/components/schemas/PackLevel" }
+        gtin: { $ref: "#/components/schemas/Gtin14" }
+        childGtin: { $ref: "#/components/schemas/Gtin14" }
+        qtyOfChild: { type: integer, format: int32, description: Absent for EACH. }
+        unitsPerPack: { type: integer, format: int32, description: The direct factor to eaches (1 for EACH). }
+        dims: { $ref: "#/components/schemas/UnitDimensions" }
+        measured: { $ref: "#/components/schemas/Measurement" }
+        isOrderable: { type: boolean }
+        isDespatchUnit: { type: boolean }
+        active: { type: boolean, description: False once the level is end-dated. }
+        effectiveFrom: { type: string, format: date-time }
+        effectiveTo: { type: string, format: date-time, description: Present once the level is end-dated. }
+    PackLevelResource:
+      allOf:
+        - type: object
+          required: [sku, version]
+          properties:
+            sku: { type: string, example: SKU-1 }
+            version: { type: integer, format: int64, description: The product version after this call. }
+        - $ref: "#/components/schemas/PackLevelDefinition"
+    PackLevelList:
+      type: object
+      required: [sku, version, items]
+      properties:
+        sku: { type: string, example: SKU-1 }
+        version: { type: integer, format: int64 }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PackLevelDefinition" }
+        nextCursor:
+          type: string
+          description: Opaque cursor for the next page; absent on the last page.
+    GtinResolution:
+      type: object
+      required: [gtin, sku, level, unitsPerPack, active, effectiveFrom]
+      properties:
+        gtin: { $ref: "#/components/schemas/Gtin14" }
+        sku: { type: string, example: SKU-1 }
+        level: { $ref: "#/components/schemas/PackLevel" }
+        unitsPerPack: { type: integer, format: int32, description: Eaches in one pack of this level. }
+        childGtin: { $ref: "#/components/schemas/Gtin14" }
+        active: { type: boolean }
+        effectiveFrom: { type: string, format: date-time }
+        effectiveTo: { type: string, format: date-time }
+
+    UnitDimensionsInput:
+      type: object
+      additionalProperties: false
+      required: [lengthMm, widthMm, heightMm, weightG]
+      properties:
+        lengthMm: { type: integer, format: int64, minimum: 1, maximum: 20000, description: Length of one unit in millimetres. }
+        widthMm: { type: integer, format: int64, minimum: 1, maximum: 20000, description: Width of one unit in millimetres. }
+        heightMm: { type: integer, format: int64, minimum: 1, maximum: 20000, description: Height of one unit in millimetres. }
+        weightG: { type: integer, format: int64, minimum: 1, maximum: 2000000, description: Weight of one unit in grams. }
+    MeasurementInput:
+      type: object
+      additionalProperties: false
+      required: [lengthMm, widthMm, heightMm, weightG, measuredAt]
+      properties:
+        lengthMm: { type: integer, format: int64, minimum: 1, maximum: 20000, description: Measured length of one unit in millimetres. }
+        widthMm: { type: integer, format: int64, minimum: 1, maximum: 20000, description: Measured width of one unit in millimetres. }
+        heightMm: { type: integer, format: int64, minimum: 1, maximum: 20000, description: Measured height of one unit in millimetres. }
+        weightG: { type: integer, format: int64, minimum: 1, maximum: 2000000, description: Measured weight of one unit in grams. }
+        measuredAt:
+          type: string
+          format: date-time
+          description: When the unit was measured; not in the future.
+        deviceId:
+          type: string
+          maxLength: 64
+          description: Measuring device identifier; omit for a manual measurement. At most 64 characters, no control characters.
+
+    UnitDimensions:
+      type: object
+      required: [lengthMm, widthMm, heightMm, weightG, volumeMm3]
+      properties:
+        lengthMm: { type: integer, format: int64 }
+        widthMm: { type: integer, format: int64 }
+        heightMm: { type: integer, format: int64 }
+        weightG: { type: integer, format: int64 }
+        volumeMm3: { type: integer, format: int64, description: length x width x height. }
+    Measurement:
+      allOf:
+        - $ref: "#/components/schemas/UnitDimensions"
+        - type: object
+          required: [measuredAt]
+          properties:
+            measuredAt: { type: string, format: date-time }
+            deviceId: { type: string }
+    PhysicalProfile:
+      type: object
+      required: [effectiveSource, discrepancy]
+      properties:
+        declared: { $ref: "#/components/schemas/UnitDimensions" }
+        measured: { $ref: "#/components/schemas/Measurement" }
+        effective: { $ref: "#/components/schemas/UnitDimensions" }
+        effectiveSource: { $ref: "#/components/schemas/EffectiveSource" }
+        discrepancy:
+          type: boolean
+          description: True when declared and measured both exist and volume or weight differ by more than 10 % of the declared value.
+        version:
+          type: integer
+          format: int64
+          description: The product version after this read or change (present on write responses).
+    ProductClassification:
+      type: object
+      required: [sku, handlingTags, classificationSource, version]
+      properties:
+        sku: { type: string, example: SKU-1 }
+        handlingTags:
+          type: array
+          items: { $ref: "#/components/schemas/HandlingTag" }
+          description: Stable enum order.
+        temperatureClass:
+          $ref: "#/components/schemas/TemperatureClass"
+        dotHazardClass:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 9
+          nullable: true
+        classificationSource: { $ref: "#/components/schemas/ClassificationSource" }
+        version: { type: integer, format: int64 }
+    Classification:
+      type: object
+      required: [handlingTags, classificationSource]
+      properties:
+        handlingTags:
+          type: array
+          items: { $ref: "#/components/schemas/HandlingTag" }
+        temperatureClass: { $ref: "#/components/schemas/TemperatureClass" }
+        dotHazardClass: { type: integer, format: int32, minimum: 1, maximum: 9, nullable: true }
+        classificationSource: { $ref: "#/components/schemas/ClassificationSource" }
+    Product:
+      type: object
+      required: [sku, description, version, physicalProfile]
+      properties:
+        sku: { type: string, example: SKU-1 }
+        description: { type: string }
+        version: { type: integer, format: int64, description: "Starts at 1, +1 per accepted change." }
+        classification: { $ref: "#/components/schemas/Classification" }
+        physicalProfile: { $ref: "#/components/schemas/PhysicalProfile" }
+    ProductPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Product" }
+        nextCursor:
+          type: string
+          description: Opaque cursor for the next page; absent on the last page.
+    Problem:
+      type: object
+      description: RFC 7807 problem document used for every non-2xx response.
+      required: [type, title, status, detail, instance]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer, format: int32 }
+        detail: { type: string }
+        instance: { type: string }
+    Status:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, example: ok }
+    MasterDataQualityReport:
+      type: object
+      required: [from, to, days, coverage]
+      properties:
+        from:
+          type: string
+          format: date-time
+          description: The effective range start (inclusive, UTC).
+        to:
+          type: string
+          format: date-time
+          description: The effective range end (exclusive, UTC).
+        days:
+          type: array
+          description: One row per UTC day intersecting the range, in day order, zeros included.
+          items:
+            $ref: "#/components/schemas/MasterDataQualityDay"
+        coverage:
+          $ref: "#/components/schemas/MasterDataCoverage"
+    MasterDataQualityDay:
+      type: object
+      required: [day, registered, classified, dimensions_declared, measured, open_discrepancies]
+      properties:
+        day:
+          type: string
+          format: date
+          description: The UTC calendar day.
+        registered:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Products registered in the day's window.
+        classified:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Products whose first classification fell in the window.
+        dimensions_declared:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Products whose first declared dimensions fell in the window.
+        measured:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Products whose first measurement fell in the window.
+        open_discrepancies:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Products whose latest physical profile at the window's end has a declared-vs-measured discrepancy.
+    MasterDataCoverage:
+      type: object
+      description: The current state of every product the projection knows (not range-bound).
+      required: [products, classified, dimensions_declared, measured, open_discrepancies,
+        classified_ratio, dimensions_declared_ratio, measured_ratio, discrepancy_ratio]
+      properties:
+        products:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Distinct SKUs seen in any product event.
+        classified:
+          type: integer
+          format: int32
+          minimum: 0
+        dimensions_declared:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Products whose current physical profile has declared dimensions.
+        measured:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Products whose current physical profile has a measurement.
+        open_discrepancies:
+          type: integer
+          format: int32
+          minimum: 0
+        classified_ratio:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: classified / products (0 when there are none).
+        dimensions_declared_ratio:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: dimensions_declared / products.
+        measured_ratio:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: measured / products.
+        discrepancy_ratio:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: open_discrepancies / measured.
+    ReportsFreshness:
+      type: object
+      required: [as_of, lag_seconds]
+      properties:
+        as_of:
+          type: string
+          format: date-time
+          nullable: true
+          description: CloudEvents time of the newest event applied; null when none.
+        lag_seconds:
+          type: number
+          format: double
+          nullable: true
+          minimum: 0
+          description: now - as_of, in seconds; null when nothing was applied.

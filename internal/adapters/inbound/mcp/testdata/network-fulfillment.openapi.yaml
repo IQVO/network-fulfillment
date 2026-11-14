@@ -1,0 +1,926 @@
+openapi: 3.0.3
+info:
+  title: Network Fulfillment API
+  version: "1.0.0"
+  description: >
+    The Anti-Corruption Layer between this platform and an external retail
+    fulfillment network (a vendor direct-fulfillment program). It owns **NetworkOrder**: demand that arrived from
+    outside carrying a deadline we did not choose, and the answer we owe
+    the network by a deadline the network set.
+
+
+    **This surface is READ-ONLY apart from ONE explicit write endpoint, and
+    that is a design decision rather than an omission.** Demand enters this
+    context by POLLING the network and by nothing else: the network offers
+    us no push, so an HTTP intake endpoint would be a second, fictional
+    inbound path with no counterpart in production. The only thing such an
+    endpoint could honestly be used for is injecting test demand, and the
+    stub gateway's file-seeded mode (`NETWORK_SEED_FILE`) already does that
+    without pretending to be a protocol. The one write is
+    `POST /network-orders/{networkRef}/shipment-confirmation` (ADR 0014):
+    a fact this context is TOLD (an order shipped), not demand it decides
+    on.
+
+
+    So what is exposed here is OBSERVATION, answering the two questions an
+    operator actually has during an incident: *what did we tell the
+    network about purchase order X*, and *is the inbound leg alive*. The
+    second matters because the poller's failure mode is silence — a poller
+    that stops fetching produces no orders, no errors and a perfectly
+    healthy `/healthz`, while the 24-hour acknowledgement clock keeps
+    running against wall time. A poller outage is an SLA breach, not a
+    delayed batch.
+
+
+    **Customer PII stops in this context.** Ship-to name, address and
+    phone live here and nowhere else in this platform, and no response in
+    this document carries them. The network's own *references* (its
+    purchase-order number, its line references, its product identifiers)
+    ARE exposed, because the questions above are unanswerable without
+    them — those identify the order, not the person.
+
+
+    Feasibility is never computed here. Whether a deadline can be met is
+    asked of order-management's promise policy, which owns that arithmetic
+    for the whole platform; this context asks, records the verdict, and
+    answers the network accordingly.
+  contact:
+    name: Network Fulfillment (Supporting Bounded Context, ACL to an external retail network)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8000/api/network-fulfillment
+    description: Local kind cluster, through the Kong gateway
+  - url: http://localhost:8080
+    description: Direct, for a local run
+
+tags:
+  - name: network-orders
+    description: >
+      Demand received from the external network, and the answer we gave
+      it.
+  - name: capability-offers
+    description: >
+      What this context would advertise to the network it can ship for each
+      (SKU, site): physical availability capped by throughput feasibility
+      (ADR 0001 §8). Always served (ADR 0025).
+  - name: operations
+    description: >
+      Liveness, and whether the inbound polling leg is actually working.
+  - name: reports
+    description: >
+      The "Network Order Acknowledgement & Translation" analytics data
+      product: read-only, derived entirely from this context's own
+      domain events, and served by a SEPARATE deployable
+      (`netfulfil-reports`) from the OLTP API documented above. It never
+      shares a process, a database, or a request path with `/healthz`,
+      `/network-orders`, or `/inbound-status`.
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      tags: [operations]
+      summary: Liveness probe
+      description: >
+        Liveness only. It deliberately does NOT consult the database or the
+        poller: a probe that fails when a dependency is slow turns one
+        degraded dependency into a restart loop, and this service's whole
+        job is to keep a 24-hour clock running.
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /readyz:
+    get:
+      operationId: readyz
+      tags: [operations]
+      summary: Readiness probe
+      description: >
+        Readiness, separate from liveness (`/healthz`, above): reports
+        `ready` until graceful shutdown begins, at which point it flips to
+        `not_ready` as the FIRST step of the shutdown sequence (ADR 0004)
+        -- before the HTTP server stops accepting connections -- so a
+        Kubernetes `readinessProbe` pointed here gets a window to stop
+        routing new traffic before the drain that follows. `/healthz`
+        stays a pure liveness signal and is never flipped by this.
+
+
+        Readiness also reflects the two runtime dependencies (ADR 0025):
+        Postgres (a ping) and Kafka (broker metadata reachable). Topics
+        are never checked. While either is unreachable the answer is a
+        503 `dependency-unavailable` problem naming the failing
+        dependency, and `/healthz` stays 200.
+      responses:
+        "200":
+          description: Ready to receive traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ready
+        "503":
+          description: >
+            Not ready. Either graceful shutdown is in progress
+            (`application/json`, `{"status":"not_ready"}`), or Postgres
+            or Kafka is unreachable (`application/problem+json`, type
+            `dependency-unavailable`, `detail` naming the failing
+            dependency, e.g. `not ready: postgres`). A `readinessProbe`
+            observing this should stop routing new requests to this pod;
+            already-established connections are unaffected.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.network-fulfillment.warehouse-systems.dev/dependency-unavailable
+                title: A runtime dependency is unavailable
+                status: 503
+                detail: "not ready: kafka"
+                instance: /readyz
+
+  /metrics:
+    get:
+      operationId: metrics
+      tags: [operations]
+      summary: Prometheus metrics
+      description: >
+        Prometheus text-format exposition, including `circuit_breaker_state`
+        (ADR 0004) -- one time series per outbound dependency guarded by a
+        circuit breaker, labelled `dependency`, with gobreaker's own state
+        numbering verbatim (0=closed, 1=half-open, 2=open).
+      responses:
+        "200":
+          description: Metrics in Prometheus text exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /inbound-status:
+    get:
+      operationId: getInboundStatus
+      tags: [operations]
+      summary: Is the inbound polling leg alive?
+      description: >
+        Counters for the poller plus the size of the unanswered working
+        set. This exists because a stalled poller is SILENT: no orders, no
+        errors, a healthy liveness probe, and an acknowledgement window
+        closing regardless.
+
+
+        `polls` climbing with `since` advancing means the leg is working
+        and the network simply has nothing for us. `polls` climbing while
+        `since` stays put means every pass is failing. `since` absent
+        after real uptime means no pass has ever succeeded.
+
+
+        `overdue` above zero is the fact worth alerting on: demand whose
+        24-hour window has already closed unanswered.
+      responses:
+        "200":
+          description: Current inbound state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundStatus"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /network-orders:
+    get:
+      operationId: listUnansweredNetworkOrders
+      tags: [network-orders]
+      summary: List orders still awaiting an answer
+      description: >
+        The unanswered working set — orders in `NEW`, the ones the
+        acknowledgement sweep acts on.
+
+
+        Only this list is exposed, deliberately. It is the only listing
+        whose size is an operational signal; a general "all orders"
+        endpoint would answer no question anybody has while something is
+        wrong.
+
+
+        Keyset-paginated (fleet REST guideline section 3): ordered by
+        (`acknowledgeBy`, `networkRef`), so orders sharing a deadline are
+        never skipped or repeated across pages. Follow `nextCursor` until
+        it is absent. Any query parameter other than `limit` and `cursor`
+        is a 400 `unknown-query-parameter`.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of unanswered orders, soonest deadline first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkOrderPage"
+        "400":
+          $ref: "#/components/responses/BadPageRequest"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /network-orders/{networkRef}:
+    get:
+      operationId: getNetworkOrder
+      tags: [network-orders]
+      summary: Get one network order
+      description: >
+        What we recorded for one unit of network demand, and what we told
+        the network about it.
+
+
+        Lines carry BOTH vocabularies: the network's product identifier
+        and the SKU this platform acted on. Publishing only one would make
+        the Anti-Corruption Layer's translation decision invisible to
+        whoever has to reconcile a disputed order.
+      parameters:
+        - name: networkRef
+          in: path
+          required: true
+          description: >
+            The network's own reference for the demand (for Vendor Direct
+            Fulfillment, its purchase-order number). Treated as an opaque
+            string: this context is Conformist upstream, so the network
+            owns the format and we never parse it.
+          schema:
+            type: string
+          example: po-4711
+      responses:
+        "200":
+          description: The network order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkOrder"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /network-orders/{networkRef}/shipment-confirmation:
+    post:
+      operationId: confirmNetworkOrderShipment
+      tags: [network-orders]
+      summary: Confirm shipment of one network order
+      description: >
+        The one write endpoint of this context (ADR 0014). Tells the
+        network that the order has shipped (`submitShipmentConfirmations`),
+        moves the order to `CONFIRMED` and publishes
+        `NetworkOrderShipmentConfirmed`. Takes no request body.
+
+
+        This route is the operator fallback. The primary trigger is the
+        `ShipmentConfirmed` event of outbound-shipping, which the service
+        consumes and joins on `localOrderId` (ADR 0014, addendum of
+        2026-11-06); both go through the same use case. The label is
+        requested from the network first, so a label failure leaves the
+        order `ACKNOWLEDGED`.
+
+
+        Idempotent twice over: the request carries a required
+        `Idempotency-Key` (fleet REST guideline section 2) whose first
+        answer is stored and replayed with `Idempotency-Replayed: true`,
+        and an order already `CONFIRMED` is still returned unchanged with
+        204, without re-submitting to the network or re-publishing the
+        event, when a NEW key is used. The route is registered only when
+        the shipment-confirmation use case is wired.
+      parameters:
+        - name: networkRef
+          in: path
+          required: true
+          description: The network's own reference for the demand.
+          schema:
+            type: string
+          example: po-4711
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: >
+            Shipment confirmed (or the order was already `CONFIRMED`).
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: >
+            The `Idempotency-Key` header is missing
+            (`idempotency-key-required`) or not 1-128 printable ASCII
+            characters (`idempotency-key-invalid`; also when the header is
+            repeated), or the request body could not be read or contains a
+            NUL character (`malformed-request-body`), or the query string
+            contains a NUL character (`invalid-request`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.network-fulfillment.warehouse-systems.dev/idempotency-key-required
+                title: Idempotency-Key header is required
+                status: 400
+                detail: the Idempotency-Key header is required on this operation
+                instance: /network-orders/po-4711/shipment-confirmation
+        "404":
+          description: No network order with that `networkRef` (`network-order-not-found`), or a path that carries a NUL character (`resource-not-found`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: >
+            The order is not `ACKNOWLEDGED`, so shipment cannot be confirmed
+            yet (`confirm-before-acknowledge`). A shipment may not be
+            confirmed for an order we never committed to. Also the answer
+            when the `Idempotency-Key` was already used with a different
+            request (method, path or body): problem type
+            `idempotency-key-reused`, a client bug, not to be retried. Or
+            a request with the same key is still in flight after the
+            server waited 30 seconds for it (`idempotency-key-in-progress`):
+            retry later with the same key. Finally `version-conflict`:
+            another writer (the demand poller or a sweep) changed the
+            order between this request's load and its save — retryable
+            after a reload.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                confirmBeforeAcknowledge:
+                  value:
+                    type: https://errors.network-fulfillment.warehouse-systems.dev/confirm-before-acknowledge
+                    title: Shipment cannot be confirmed before the order is acknowledged
+                    status: 409
+                    detail: cannot confirm shipment before acknowledgement
+                    instance: /network-orders/po-4711/shipment-confirmation
+                idempotencyKeyReused:
+                  value:
+                    type: https://errors.network-fulfillment.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: idempotency key was already used with a different request
+                    instance: /network-orders/po-4711/shipment-confirmation
+                idempotencyKeyInProgress:
+                  value:
+                    type: https://errors.network-fulfillment.warehouse-systems.dev/idempotency-key-in-progress
+                    title: A request with this Idempotency-Key is still being processed
+                    status: 409
+                    detail: retry later with the same key
+                    instance: /network-orders/po-4711/shipment-confirmation
+                versionConflict:
+                  value:
+                    type: https://errors.network-fulfillment.warehouse-systems.dev/version-conflict
+                    title: The order was changed by another writer; reload and retry
+                    status: 409
+                    detail: the order row moved to a newer version while this request was in flight
+                    instance: /network-orders/po-4711/shipment-confirmation
+        "422":
+          description: The `networkRef` is empty (`empty-network-ref`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          description: >
+            Unexpected error, including a failed submission to the network
+            AFTER the order was already saved as `CONFIRMED`; a retry then
+            returns 204 without re-submitting.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /capability-offers:
+    get:
+      operationId: listCapabilityOffers
+      tags: [capability-offers]
+      summary: List every currently-advertised capability offer
+      description: >
+        The figure this context would tell the network it can ship for each
+        (SKU, site) it knows about: `min(physicalAvailable,
+        throughputFeasibleBefore(nextCutoff))` (ADR 0001 §8). Offers are
+        persisted by the recompute loop. In live mode `FeedInventory`
+        submits them to the network as a per-site inventory feed
+        (ADR 0027 part 2); in stub mode nothing is sent.
+
+
+        Always registered: the capability-offer recompute loop and its
+        Kafka-fed caches are part of the runtime (ADR 0025).
+
+
+        Keyset-paginated (fleet REST guideline section 3): ordered by
+        (`sku`, `siteId`). Follow `nextCursor` until it is absent. Any
+        query parameter other than `limit` and `cursor` is a 400
+        `unknown-query-parameter`.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of current capability offers (empty `items` when none).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilityOfferPage"
+        "400":
+          $ref: "#/components/responses/BadPageRequest"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /reports/acknowledgement:
+    get:
+      operationId: getAcknowledgementReport
+      tags: [reports]
+      summary: Network Order Acknowledgement & Translation report
+      description: >
+        Bucketed by day: how much demand arrived, how it was answered, and
+        how fast. `ordersRejected` is split by cause —
+        `ordersRejectedUntranslatableSku` (a catalogue gap: the Anti-
+        Corruption Layer had no SKU mapping) is a different operational
+        signal from `ordersRejectedDomain` (order-management's promise
+        policy could not meet the deadline) or
+        `acknowledgementDeadlinesMissed` (the 24-hour window closed with no
+        answer ever sent — an operational failure, not a business
+        decision).
+
+
+        Served by the `netfulfil-reports` deployable, reading a Postgres
+        read model that `netfulfil-projector` maintains from this
+        context's own domain events. Never the OLTP database.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive start of the window (RFC3339).
+          schema:
+            type: string
+            format: date-time
+          example: "2026-06-01T00:00:00Z"
+        - name: to
+          in: query
+          required: true
+          description: Exclusive end of the window (RFC3339).
+          schema:
+            type: string
+            format: date-time
+          example: "2026-06-08T00:00:00Z"
+        - name: granularity
+          in: query
+          required: false
+          description: Bucket size. Only `day` exists today; omit for the default.
+          schema:
+            type: string
+            enum: [day]
+            default: day
+      responses:
+        "200":
+          description: The report, one row per day bucket in range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcknowledgementReport"
+        "400":
+          description: >
+            `invalid-report-query`: `from` or `to` is missing or not an
+            RFC3339 timestamp, or `granularity` is anything but `day`. (A
+            NUL character in the query is `invalid-request`.)
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.network-fulfillment.warehouse-systems.dev/invalid-report-query
+                title: The report query is malformed or missing a required parameter
+                status: 400
+                detail: query parameter 'from' is required (RFC3339)
+                instance: /reports/acknowledgement
+        "500":
+          description: The read model could not be queried (`report-store-error`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /reports/acknowledgement/freshness:
+    get:
+      operationId: getAcknowledgementReportFreshness
+      tags: [reports]
+      summary: How far the report lags real time
+      description: >
+        Seconds between now and the `occurredAt` of the most recently
+        projected domain event. Matches every sibling data product's
+        `/freshness` convention exactly: it is how an operator tells "the
+        report is caught up" from "the projector is stuck or the topic is
+        stalled" without reading projector logs.
+      responses:
+        "200":
+          description: Current freshness lag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Freshness"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Client-generated key (a UUID per logical submit; a retry of the same
+        submit reuses it), 1-128 printable ASCII characters. The first
+        answer (2xx or 4xx) is stored for 24 hours and replayed for
+        the same method, path and body with `Idempotency-Replayed: true`; a
+        different request under the same key is a 409
+        `idempotency-key-reused`. A 5xx is never stored.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+      example: 7b0d1c2e-9a43-4d1f-8f7e-0c2b1a9d6e55
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size, 1-500.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >
+        Opaque keyset token from a previous page's `nextCursor`. A value
+        that does not decode is a 400 `invalid-cursor`.
+      schema:
+        type: string
+
+  headers:
+    IdempotencyReplayed:
+      description: >
+        Present, with the value `true`, only when this answer is a replay of
+        the stored answer for the same `Idempotency-Key`.
+      schema:
+        type: string
+        enum: ["true"]
+
+  responses:
+    BadPageRequest:
+      description: >
+        `invalid-limit` (not an integer 1-500), `invalid-cursor` (the
+        cursor does not decode), or `unknown-query-parameter` (a query
+        parameter the collection does not declare, e.g. a retired paging
+        parameter).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.network-fulfillment.warehouse-systems.dev/invalid-cursor
+            title: Invalid cursor
+            status: 400
+            detail: cursor is not a valid page token
+            instance: /network-orders
+    Problem:
+      description: >
+        An RFC 7807 problem document. A NUL character (U+0000) is never
+        valid input (PostgreSQL text cannot hold it): in the request path
+        it is a 404 `resource-not-found`, in a query parameter a 400
+        `invalid-request`, and in a request body a 400
+        `malformed-request-body`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    NetworkOrderPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetworkOrder"
+        nextCursor:
+          type: string
+          description: Opaque token for the next page; absent on the last page.
+
+    CapabilityOfferPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CapabilityOffer"
+        nextCursor:
+          type: string
+          description: Opaque token for the next page; absent on the last page.
+
+    CapabilityOffer:
+      type: object
+      description: >
+        What this context would advertise to the network it can ship for one
+        (SKU, site) (ADR 0001 §8).
+      required: [sku, siteId, advertisedQuantity, basis, computedAt]
+      properties:
+        sku:
+          type: string
+          description: Our product identity.
+          example: sku-1
+        siteId:
+          type: string
+          description: The fulfillment site the offer is for.
+          example: site-1
+        advertisedQuantity:
+          type: integer
+          minimum: 0
+          description: >
+            The quantity we would advertise: `min(physicalAvailable,
+            throughputFeasibleBefore(nextCutoff))`.
+          example: 40
+        basis:
+          type: string
+          description: >
+            Which rule produced `advertisedQuantity`. `PHYSICAL` means
+            physical stock on hand was the binding constraint (or
+            throughput was unknown). `THROUGHPUT_CONSTRAINED` means the
+            eligible paths' remaining capacity before the next cutoff some
+            path can still make (ADR 0031) was.
+          enum: [PHYSICAL, THROUGHPUT_CONSTRAINED]
+        computedAt:
+          type: string
+          format: date-time
+          description: When the recompute loop last computed this offer.
+
+    NetworkOrder:
+      type: object
+      required:
+        - networkRef
+        - siteId
+        - state
+        - requiredShipBy
+        - acknowledgeBy
+        - receivedAt
+        - acknowledgementOverdue
+        - lines
+      properties:
+        networkRef:
+          type: string
+          description: The network's reference for this demand.
+          example: po-4711
+        siteId:
+          type: string
+          description: The fulfillment site the demand is destined for.
+          example: site-1
+        state:
+          type: string
+          description: >
+            `NEW` is received and unanswered, with the clock running.
+            `SUBMITTED` means we answered and told the network, but that
+            submission has not yet been reconciled against the network's
+            own transaction-status record (a 200 on the submit call is
+            accepted-for-processing, never itself a settled commitment).
+            `ACKNOWLEDGED` is a settled commitment to fulfil in full,
+            reached once reconciliation confirms it — the protocol has no
+            partial acknowledgement. `REJECTED` is a refusal, and just as
+            valid an answer: a deadline we cannot meet, or a submission
+            the network itself refused, is better refused than missed.
+            `CONFIRMED` means shipment has been confirmed to the network.
+          enum: [NEW, SUBMITTED, ACKNOWLEDGED, REJECTED, CONFIRMED]
+        requiredShipBy:
+          type: string
+          format: date-time
+          description: >
+            The deadline the NETWORK set. This context did not choose it
+            and cannot move it.
+        acknowledgeBy:
+          type: string
+          format: date-time
+          description: >
+            When our answer is due — 24 hours after the demand ARRIVED,
+            matching the counterparty's published SLA. Anchored to arrival
+            and then stored, never recomputed: a batch that arrives after
+            an outage may already be near or past its window, and
+            recomputing would silently reset every one of those clocks.
+        receivedAt:
+          type: string
+          format: date-time
+          description: When we received the demand.
+        localOrderId:
+          type: string
+          description: >
+            The order raised in order-management for this demand. Absent
+            until acknowledged, because local work must never exist for
+            demand we have not committed to. An explicitly stored mapping,
+            never derived from a string convention.
+          example: ord-1a226bfd-c654-495f-af87-5883d67c5371
+        acknowledgementOverdue:
+          type: boolean
+          description: >
+            Whether the window has closed with this order still
+            unanswered. Derived using the same domain rule the sweep
+            enforces, so this surface cannot disagree with the sweep about
+            what overdue means.
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetworkOrderLine"
+
+    NetworkOrderLine:
+      type: object
+      required: [networkLineRef, networkProductId, sku, quantity]
+      properties:
+        networkLineRef:
+          type: string
+          description: >
+            The network's identity for this line, unique only WITHIN its
+            order rather than globally.
+          example: "1"
+        networkProductId:
+          type: string
+          description: >
+            The network's product identifier (an ASIN, in the
+            counterparty's vocabulary). Not a SKU.
+          example: ASIN-XYZ123
+        sku:
+          type: string
+          description: >
+            Our product identity, resolved from `networkProductId` by this
+            context's translation dictionary. Demand naming a product we
+            cannot translate is rejected in full, because we cannot
+            acknowledge in full what we cannot identify in full.
+          example: sku-1
+        quantity:
+          type: integer
+          minimum: 1
+          example: 3
+
+    InboundStatus:
+      type: object
+      required: [networkMode, polls, received, failed, unanswered, overdue]
+      properties:
+        networkMode:
+          type: string
+          description: >
+            The gateway mode actually in force, echoed so it can be
+            verified rather than assumed. `stub` reaches no external
+            network and needs no credentials.
+          enum: [stub, live]
+        polls:
+          type: integer
+          description: Poll passes attempted since start.
+        received:
+          type: integer
+          description: Units of demand successfully processed since start.
+        failed:
+          type: integer
+          description: >
+            Units that failed and will be re-fetched. A failure
+            deliberately does not advance the watermark, so nothing is
+            skipped; processing is idempotent on `networkRef`, which is
+            what makes the retry safe.
+        since:
+          type: string
+          format: date-time
+          description: >
+            The watermark the next poll will use. ABSENT before any pass
+            has completed cleanly — which after real uptime is itself the
+            signal that no poll has ever succeeded.
+        unanswered:
+          type: integer
+          description: Orders currently in `NEW`.
+        overdue:
+          type: integer
+          description: >
+            Of those, how many have already missed their acknowledgement
+            window. Above zero is worth alerting on.
+
+    AcknowledgementReport:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/AcknowledgementReportRow"
+
+    AcknowledgementReportRow:
+      type: object
+      description: One day bucket of the acknowledgement & translation report.
+      required:
+        - dayBucket
+        - ordersReceived
+        - ordersAcknowledged
+        - ordersRejectedUntranslatableSku
+        - ordersRejectedDomain
+        - acknowledgementDeadlinesMissed
+        - ordersRejectedSubmissionFailed
+        - avgAcknowledgementLatencySeconds
+      properties:
+        dayBucket:
+          type: string
+          format: date-time
+          description: The UTC day this row summarizes (RFC3339, midnight).
+        ordersReceived:
+          type: integer
+          description: Orders received into this bucket (NetworkOrderReceived).
+        ordersAcknowledged:
+          type: integer
+          description: Orders acknowledged in full (NetworkOrderAcknowledged).
+        ordersRejectedUntranslatableSku:
+          type: integer
+          description: >
+            Rejected because the Anti-Corruption Layer had no SKU mapping
+            for one or more lines — a catalogue gap, not a business
+            refusal.
+        ordersRejectedDomain:
+          type: integer
+          description: >
+            Rejected because order-management's promise policy could not
+            meet the network's requiredShipBy.
+        acknowledgementDeadlinesMissed:
+          type: integer
+          description: >
+            The 24-hour acknowledgement window closed with no answer ever
+            sent (the sweep's own rejection). An operational failure, not
+            a business decision.
+        ordersRejectedSubmissionFailed:
+          type: integer
+          description: >
+            Rejected with reason `SUBMISSION_FAILED`: we submitted an
+            acknowledgement, but the network's own transaction-status
+            reconciliation reported failure, so the order was refused. Not
+            a catalogue gap or a promise refusal: we said yes and the
+            network did not accept it. Added additively (ADR 0015);
+            history before this counter existed reads 0.
+        avgAcknowledgementLatencySeconds:
+          type: number
+          format: double
+          description: >
+            Average seconds between an order's receipt and its
+            acknowledgement, over the orders acknowledged in this bucket.
+            Zero when none were acknowledged in the bucket (never NaN).
+
+    Freshness:
+      type: object
+      required: [lagSeconds]
+      properties:
+        lagSeconds:
+          type: number
+          format: double
+          description: >
+            Seconds between now and the occurredAt of the most recently
+            projected domain event. Zero when the read model is empty.
+
+    Problem:
+      type: object
+      description: RFC 7807 problem details.
+      required: [type, title, status, detail, instance]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://errors.network-fulfillment.warehouse-systems.dev/network-order-not-found
+        title:
+          type: string
+          example: Network order not found
+        status:
+          type: integer
+          example: 404
+        detail:
+          type: string
+          example: network order not found
+        instance:
+          type: string
+          example: /network-orders/po-4711
