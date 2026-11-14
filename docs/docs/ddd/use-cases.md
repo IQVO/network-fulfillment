@@ -6,7 +6,7 @@ sidebar_label: Use cases
 
 # Application use cases
 
-The eight application services in `internal/application/usecases`, as they are
+The eleven application services in `internal/application/usecases`, as they are
 on `develop`: what triggers each one, what it takes, which invariants it
 relies on, what it calls and which events it raises. The step-by-step
 sequence diagrams are in [sequence-diagrams.md](/docs/ddd/sequence-diagrams); the
@@ -27,13 +27,21 @@ tools read the repositories directly (`internal/adapters/inbound/http/server.go`
 | `SweepAcknowledgementDeadlines` | ticker | every `SWEEP_INTERVAL` | `cmd/netfulfil/workers.go` |
 | `RejectOverdueOrders` | ticker | every `SWEEP_INTERVAL` (its own ticker) | `cmd/netfulfil/workers.go` |
 | `SweepOrphanedHolds` | ticker | every `SWEEP_INTERVAL` (its own ticker, the same interval as the two passes above); not started when `ORPHAN_HOLD_SWEEP_ENABLED=false` | `cmd/netfulfil/workers.go` (`runSweepOrphanedHolds`), built in `cmd/netfulfil/wiring.go` (`wireOrphanHoldSweep`) |
-| `ConfirmNetworkOrderShipment` | REST | `POST /network-orders/{networkRef}/shipment-confirmation` | `internal/adapters/inbound/http/server.go` |
+| `ConfirmNetworkOrderShipment` | Kafka (primary) or REST (operator fallback) | a `ShipmentConfirmed` event on `warehouse.outbound-shipping.events`, in every mode; or `POST /network-orders/{networkRef}/shipment-confirmation` | `internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`, `cmd/netfulfil/outbound_shipping.go`; `internal/adapters/inbound/http/server.go` |
 | `RecomputeCapabilityOffers` | ticker | every `RECOMPUTE_INTERVAL`, always | `cmd/netfulfil/capability.go` |
 | `DeclareNodeProfiles` | worker | live mode only: once at start, then every `NETWORK_PROFILE_INTERVAL` (`0` disables) | `cmd/netfulfil/profile.go` (`wireNodeProfiles`, `startProfileWorker`) |
+| `FeedInventory` | worker | live mode only: once at start, then every `NETWORK_INVENTORY_INTERVAL` (default `5m`, `0` disables) | `cmd/netfulfil/inventory_feed.go` (`wireInventoryFeed`, `startInventoryWorker`) |
+| `IntakeInboundShipments` | ticker | live mode only: at once, then every `INBOUND_INTAKE_INTERVAL` (default `30s`) | `cmd/netfulfil/inbound.go` (`wireInboundLoop`, `tick`) |
+| `ReturnInboundReceipts` | ticker | the same tick as the intake, run before it | `cmd/netfulfil/inbound.go` (`tickReturn`) |
 
-No use case is driven by Kafka or by MCP. The two Kafka consumers in
-`netfulfil` only fill caches that `RecomputeCapabilityOffers` and `DeclareNodeProfiles` read; the
-projector's consumer feeds the analytics store, not a use case.
+One use case is driven by Kafka: `ConfirmNetworkOrderShipment`, by the
+`ShipmentConfirmed` consumer. No use case is driven by MCP. Apart from that
+consumer, `netfulfil` runs three more Kafka consumers, and none calls a use
+case: two fill the process-path and path-capacity caches that
+`RecomputeCapabilityOffers` and `DeclareNodeProfiles` read, and, in live mode only,
+the receipt consumer writes inbound-receiving's receipt events into a local
+projection that `ReturnInboundReceipts` reads (`cmd/netfulfil/inbound.go`).
+The projector's consumer feeds the analytics store, not a use case.
 
 ## How Save and Publish commit
 
@@ -227,22 +235,46 @@ another having run.
 
 ## ConfirmNetworkOrderShipment
 
-`confirm_network_order_shipment.go`, driven by
-`POST /network-orders/{networkRef}/shipment-confirmation` (ADR 0014). No
-`PackageManifested` consumer exists.
+`confirm_network_order_shipment.go`. Two triggers reach one use case, so
+neither can double-submit (ADR 0014 and its 2026-11-06 addendum):
 
-- **Input**: `networkRef` from the path. No body.
-- **Steps**: load the order (`404 network-order-not-found` if absent); if it
-  is already `CONFIRMED`, return it (`204`, no second event, no second
-  network call); otherwise `ConfirmShipment`, save and publish
-  `NetworkOrderShipmentConfirmed` in one scope, then
+- **Event, primary, every mode**: `ShipmentConfirmedConsumer`
+  (`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`) reads
+  outbound-shipping's `ShipmentConfirmed` from `warehouse.outbound-shipping.events`
+  under `OUTBOUND_SHIPPING_CONSUMER_GROUP` (default
+  `network-fulfillment-outbound-shipping`). For each `orders[].order_id` it finds
+  the `NetworkOrder` by `localOrderId` (`FindByLocalOrderId`) and calls
+  `ExecuteForShipment(ref, loadId, package_count)`. An `order_id` that no
+  `NetworkOrder` carries (a local order raised from customer demand) is skipped and
+  logged.
+- **REST, operator fallback**:
+  `POST /network-orders/{networkRef}/shipment-confirmation` calls `Execute(ref)`,
+  which is `ExecuteForShipment(ref, ref, 1)`.
+
+`PackageManifested` from `fulfillment-execution` is not consumed.
+
+- **Input**: REST: `networkRef` from the path, no body. Event: the load id as the
+  shipment reference and each order's `package_count` (a `package_count` of 0 or an
+  absent one means 1, the `singlePackage` placeholder of ADR 0026).
+- **Steps** (`ExecuteForShipment`): load the order (`404 network-order-not-found`
+  on REST if absent); if the `(shipment reference, order id)` pair is already in
+  the `ShipmentConfirmationLog` or the order is already `CONFIRMED`, return it
+  (`204` on REST, no second event, no second network call); `CheckConfirmable`
+  (the order must be `ACKNOWLEDGED`); `NetworkGateway.RequestLabel` for the package
+  count; `ConfirmShipment`; then, in one scope, save, record the ledger row and
+  publish `NetworkOrderShipmentConfirmed`; then
   `NetworkGateway.SubmitShipmentConfirmation`.
 - **Invariant**: `ConfirmShipment` only from `ACKNOWLEDGED`
-  (`ErrConfirmBeforeAcknowledge`, `409 confirm-before-acknowledge`).
+  (`ErrConfirmBeforeAcknowledge`, `409 confirm-before-acknowledge` on REST).
 - **Events**: `NetworkOrderShipmentConfirmed`.
-- **Failure**: if the gateway call fails after the commit the route answers
-  `500 internal-error`; the order is already `CONFIRMED`, so a retry returns
-  `204` without calling the gateway again.
+- **Failure**: the label is requested first, so a label failure leaves the order
+  `ACKNOWLEDGED` and the call retryable. If the gateway call fails after the commit
+  the REST route answers `500 internal-error`; the order is already `CONFIRMED`, so a
+  retry returns `204` without calling the gateway again. On the event path a handler
+  error, `ErrConfirmBeforeAcknowledge` included, is retried and then the message is
+  dead-lettered to `warehouse.outbound-shipping.events.dlq` and committed past
+  (`handleWithDeadLetter`); the REST route closes that gap. A message that is not a
+  CloudEvent or breaks outbound-shipping's contract is dead-lettered without retry.
 
 ## RecomputeCapabilityOffers
 
@@ -335,3 +367,47 @@ Reads local data only: the persisted `CapabilityOffer`s and the product dictiona
 - **Failure**: one site's failure is logged and never stops the others; a cancelled
   context stops the pass before the next site; offers that cannot be read fail every
   site for this pass and the next one retries.
+
+## IntakeInboundShipments
+
+`intake_inbound_shipments.go` (ADR 0028). The first half of the inbound loop: it
+learns which seller shipments are on their way to our sites and registers an ASN
+for each in `inbound-receiving`. Live mode only; a stub deployment runs no inbound
+loop.
+
+- **Input**: none; the sites are `SITE_ID` plus the node file's
+  (`networkSites`, `cmd/netfulfil/inbound.go`).
+- **Per site**: read the poll cursor, `NetworkGateway.PollInboundShipments(site, cursor)`,
+  record each shipment (`Shipments.Record`, with the ASN number `AsnNumberFor(ref)`:
+  `NF-<ref>`, or `NF-` and a hash of the reference when it has characters an ASN
+  number does not allow) and advance the cursor to the newest `ShippedAt`. If a
+  record fails the cursor stays and the next poll returns the shipment again.
+- **Then**: for the due shipments (batch of 100) `BuildAsn` resolves every GTIN to
+  a SKU through product-master (a GTIN that is not an each GTIN is a data error)
+  and `AsnRegistrar.RegisterAsn` registers the ASN in inbound-receiving.
+- **Outcomes**: registered; `PENDING` and retried with a backoff of one minute
+  doubling up to one hour (`IntakeBackoff`), for a GTIN product-master does not
+  know, an SKU inbound-receiving has not caught up with or a transport failure;
+  `REJECTED`, logged at `ERROR` and never retried, for a data error or an ASN
+  inbound-receiving refuses outright.
+- **Events**: none. **Failure**: one shipment's failure is recorded on its row and
+  never stops the others; the pass returns the errors that could not be recorded.
+
+## ReturnInboundReceipts
+
+`return_inbound_receipts.go` (ADR 0028). The second half of the inbound loop: when
+`inbound-receiving` closes the receipt of an ASN this service registered, it reports
+what the dock found to the network, once per shipment. Live mode only.
+
+- **Input**: none; it lists the due receipts from the local projection
+  (`ReceiptProjection.DueReceipts`) that the receipt consumer fills from
+  `warehouse.inbound-receiving.events` (`ReceiptCartonReceived`,
+  `CartonDiscrepancyRaised`, `ReceiptClosed`). It never calls inbound-receiving.
+- **Per receipt**: `BuildReceipt` gives each manifest carton the status `RECEIVED`,
+  `DAMAGED` or `MISSING`, adds `UNEXPECTED` cartons seen at the dock, and turns
+  the other findings into compliance codes; then
+  `NetworkGateway.SubmitInboundReceipt`.
+- **Outcomes**: sent; retried with the same backoff as the intake; or parked at
+  `ERROR` and never retried when the network refuses it (`ErrReceiptRefused`) or the
+  receipt names no carton.
+- **Events**: none. **Failure**: one receipt's failure never stops the others.

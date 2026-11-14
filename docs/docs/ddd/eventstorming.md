@@ -173,22 +173,29 @@ an open breaker leaves the hold for the next pass.
 
 ```mermaid
 flowchart LR
-    OP["Operator or upstream caller"]:::actor
+    OS["outbound-shipping<br/>ShipmentConfirmed"]:::external
+    OP["Operator<br/>(fallback)"]:::actor
+    C0["Confirm shipment<br/>consume ShipmentConfirmed"]:::command
     C1["Confirm shipment<br/>POST shipment-confirmation"]:::command
-    POL1["Policy: already CONFIRMED<br/>returns unchanged"]:::policy
+    POL0["Policy: order_id joins<br/>NetworkOrder.localOrderId,<br/>no match is skipped"]:::policy
+    POL1["Policy: already CONFIRMED or<br/>(shipment, order) recorded<br/>returns unchanged"]:::policy
+    C2["Request label"]:::command
     G1["NetworkOrder"]:::aggregate
     E1["NetworkOrderShipmentConfirmed"]:::event
-    NW["retail-network<br/>SubmitShipmentConfirmation"]:::external
-    FE["fulfillment-execution<br/>PackageManifested"]:::external
-    H1["Hotspot: no persisted WorkUnitId to<br/>NetworkRef mapping, ADR 0014"]:::hotspot
+    NW["retail-network<br/>RequestLabel,<br/>SubmitShipmentConfirmation"]:::external
+    H1["Hotspot: package count is always 1<br/>until the producer sends package_count"]:::hotspot
 
+    OS --> C0
+    C0 --> POL0
+    POL0 --> POL1
     OP --> C1
     C1 --> POL1
-    C1 --> G1
+    POL1 --> C2
+    C2 --> NW
+    C2 --> G1
     G1 --> E1
     E1 --> NW
-    FE -.- H1
-    H1 -.- C1
+    C2 --- H1
 
     classDef actor fill:#fff59d,stroke:#b59f00,color:#000,font-size:11px
     classDef command fill:#4aa3df,stroke:#1f6f9f,color:#fff
@@ -200,11 +207,16 @@ flowchart LR
 ```
 
 Source: `internal/application/usecases/confirm_network_order_shipment.go`,
+`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`,
 `internal/adapters/inbound/http/server.go` (`handleConfirmShipment`),
 `internal/adapters/inbound/http/errors.go` (`ErrConfirmBeforeAcknowledge`
-maps to 409 `confirm-before-acknowledge`), `docs/adr/0014-explicit-shipment-confirmation-endpoint.md`.
+maps to 409 `confirm-before-acknowledge`), `docs/adr/0014-explicit-shipment-confirmation-endpoint.md`
+(2026-11-06 addendum: the event path is primary, the REST route is the operator fallback).
 
-Omitted: the 404 branch for an unknown `networkRef`.
+Omitted: the 404 branch for an unknown `networkRef` on the REST route, the
+dead-letter topic for a `ShipmentConfirmed` message that cannot be applied, and
+the ledger row written with the save. The `Request label` step runs before the
+order is confirmed, so a label failure leaves it `ACKNOWLEDGED`.
 
 ## 4. Capability offer recompute
 
@@ -262,14 +274,15 @@ event, so there is no orange sticky.
 | Sticky | Kind | Code evidence |
 | --- | --- | --- |
 | Poll / sweep / recompute timers | Actor | `poller.Run`, `runSweep`, `runRejectOverdue`, `runSweepOrphanedHolds`, `runReconcile` in `cmd/netfulfil/workers.go`; `runRecompute` in `cmd/netfulfil/capability.go` |
-| Operator or upstream caller | Actor | `POST /network-orders/{networkRef}/shipment-confirmation` |
+| Operator (fallback) | Actor | `POST /network-orders/{networkRef}/shipment-confirmation` |
 | Receive network demand | Command | `ReceiveNetworkDemand.Execute` |
 | Raise / release / cancel held order | Command | `FulfillmentPlanner.RaiseHeldOrder` / `ReleaseHeldOrder` / `CancelHeldOrder` |
 | Submit acceptance | Command | `NetworkOrder.Submit` + `LinkLocalOrder` |
 | Record / settle the hold | Command | `NetworkOrder.RecordHold` / `SettleHold` |
 | Reject | Command | `NetworkOrder.Reject` |
 | Confirm acknowledgement | Command | `NetworkOrder.ConfirmAcknowledgement` |
-| Confirm shipment | Command | `NetworkOrder.ConfirmShipment`, `ConfirmNetworkOrderShipment` |
+| Confirm shipment | Command | `NetworkOrder.ConfirmShipment`, `ConfirmNetworkOrderShipment.Execute` (REST) / `ExecuteForShipment` (event) |
+| Request label | Command | `NetworkGateway.RequestLabel`, called first in `ExecuteForShipment` |
 | Compute capability offer | Command | `capabilityoffer.Compute` |
 | NetworkOrder | Aggregate | `internal/domain/networkorder` |
 | CapabilityOffer | Aggregate | `internal/domain/capabilityoffer` |
@@ -282,7 +295,8 @@ event, so there is no orange sticky.
 | Overdue refused, never answered late | Policy | `RejectOverdueOrders` |
 | Open hold past acknowledgeBy + grace is cancelled, state untouched | Policy | `SweepOrphanedHolds`, `NetworkOrder.HoldOrphaned` (ADR 0024) |
 | Hold recorded the moment it exists | Policy | `ReceiveNetworkDemand.answer` → `NetworkOrder.RecordHold` (ADR 0024) |
-| Already CONFIRMED returns unchanged | Policy | `ConfirmNetworkOrderShipment.Execute` |
+| Already CONFIRMED or (shipment, order) recorded returns unchanged | Policy | `ConfirmNetworkOrderShipment.alreadyConfirmed` (`ShipmentConfirmationLog`, `State() == StateConfirmed`) |
+| `orders[].order_id` joins `NetworkOrder.localOrderId`; no match is skipped | Policy | `ShipmentConfirmedConsumer.confirm` (`FindByLocalOrderId`) |
 | Unknown capacity falls back to physical | Policy | `capabilityoffer.Compute` (`throughputKnown=false`) |
 | Product translation dictionary | Read Model | `memory.ProductTranslation` (`PRODUCT_TRANSLATION_FILE`) |
 | Submitted / unanswered orders | Read Model | `NetworkOrderRepo.ListSubmitted` / `ListUnanswered` |
@@ -294,13 +308,14 @@ event, so there is no orange sticky.
 | order-management | External System | `internal/adapters/outbound/ordermanagement` |
 | inventory-storage | External System | `internal/adapters/outbound/inventoryclient` |
 | process-path-management, wes-work-planning | External System | the two Kafka caches |
-| fulfillment-execution | External System | named in ADR 0014 as the deliberately unused trigger |
+| outbound-shipping | External System | `ShipmentConfirmedConsumer` on `warehouse.outbound-shipping.events` (ADR 0014 addendum). `fulfillment-execution` is named in ADR 0014 only as the trigger that was not built |
 | Decided 2026-10-06: Submitted at SUBMITTED, Acknowledged only on settle (ADR 0016) | Policy | `ReceiveNetworkDemand.acknowledge` publishes `NetworkOrderSubmitted`; `ReconcileSubmittedOrders.confirm` publishes `NetworkOrderAcknowledged` (v2) with the save (ex-hotspots "Acknowledged at SUBMITTED" and "No event on settle") |
 | Orphaned hold after crash | Hotspot, resolved 2026-10-17 (ADR 0024, gap OM-0020) | The hold id is recorded right after `RaiseHeldOrder` (`RecordHold`) and `SweepOrphanedHolds` cancels the ones nobody decided, so `RejectOverdueOrders`'s cancel now has a hold to find. Still open, on purpose (ADR 0024): a hold never named because the process stopped between order-management's commit and the id being saved, if the window closes before a re-delivery repeats the raise; a `SUBMITTED` order whose network status stays `PENDING`; an `ACKNOWLEDGED` order whose release failed (not a cancel case); rows rejected before migration `0005` whose raise had succeeded |
 | SUBMISSION_FAILED counted | Policy | `PostgresProjection.ApplyNetworkOrderRejected` increments `orders_rejected_submission_failed` (analytics migration 0002, ADR 0015; resolved 2026-10-06) |
-| At-risk only after the deadline | Hotspot | `AcknowledgementOverdue` vs ADR 0001 §6 "approaching" |
-| No WorkUnitId → NetworkRef mapping | Hotspot | ADR 0014 |
+| At-risk only after the deadline | Hotspot | `AcknowledgementOverdue` vs ADR 0001 §6 "approaching" (the ADR 0001 addendum of 2026-11-13 records what the code does) |
+| No WorkUnitId → NetworkRef mapping | Hotspot, resolved 2026-11-06 (ADR 0014 addendum) | The join is `orders[].order_id` on `NetworkOrder.localOrderId`, consumed from outbound-shipping's `ShipmentConfirmed` (`shipment_confirmed_consumer.go`); `PackageManifested` is still not consumed |
+| Package count is always 1 | Hotspot | `singlePackage` in `confirm_network_order_shipment.go`; outbound-shipping's `ShipmentConfirmed.orders[]` carries only `order_id`, the consumer decodes `package_count` for the day it does (ADR 0014 addendum, ADR 0026) |
 | Confirm-before-acknowledge → 409 | Policy | `errors.go` maps `ErrConfirmBeforeAcknowledge` to 409 `confirm-before-acknowledge` (resolved 2026-10-06) |
-| Offer never submitted outward | Hotspot | `RecomputeCapabilityOffers` doc comment; ADR 0001 §8 "published outward on a schedule" |
+| Offer reaches the network only in live mode | Hotspot | `RecomputeCapabilityOffers` calls no gateway (doc comment); `FeedInventory` sends the persisted offers (ADR 0027 part 2, `cmd/netfulfil/inventory_feed.go`: no worker in stub mode); ADR 0001 §8 "published outward on a schedule" |
 | Decided 2026-10-06: path eligible only if CycleTimeP95 ≤ cutoff − now, missing/zero stays eligible (ADR 0017) | Policy | `RecomputeCapabilityOffers.throughputFeasible` / `cycleTimeFits` (ex-hotspot "CycleTimeP95 unused") |
 | Single SITE_ID | Hotspot | `RecomputeCapabilityOffers.SiteId`; ADR 0001 Consequences (single-site inherited) |

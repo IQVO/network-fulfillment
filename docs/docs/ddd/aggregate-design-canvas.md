@@ -109,7 +109,7 @@ why it is not a state.
 | Reject | `Reject` | `ReceiveNetworkDemand.reject`, `RejectOverdueOrders`, `ReconcileSubmittedOrders.fail` |
 | Settle the hold | `SettleHold` | `freeHold` (the three reject paths, outcome `CANCELLED`), `SweepOrphanedHolds` (`CANCELLED` or `ALREADY_RELEASED`) |
 | Confirm acknowledgement | `ConfirmAcknowledgement` | `ReconcileSubmittedOrders.confirm` |
-| Confirm shipment | `ConfirmShipment` | `ConfirmNetworkOrderShipment` (REST `POST .../shipment-confirmation`) |
+| Confirm shipment | `ConfirmShipment` | `ConfirmNetworkOrderShipment` (the `ShipmentConfirmed` consumer; REST `POST .../shipment-confirmation` as the operator fallback) |
 
 ### 7. Created Events
 

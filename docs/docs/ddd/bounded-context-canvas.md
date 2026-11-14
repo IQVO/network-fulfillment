@@ -147,14 +147,14 @@ ship-to PII enters this context at all.
 | **Gateway / Anti-Corruption Layer** | **Yes, primary** | The network vocabulary stops at `internal/adapters/outbound/retailnetwork/`. `ports.NetworkGateway` and `contract.*` are expressed in our terms, and `NetworkOrder.SKUQuantities()` is the only shape sent to `order-management`. |
 | **Execution (protocol)** | **Yes, narrow** | Owns the answer, the 24h clock (`acknowledgeBy`, the sweep, `RejectOverdueOrders`) and reconciliation. It does not own the fulfillment work, which belongs to `order-management`. |
 | **Analysis** | **Yes, always on** | `RecomputeCapabilityOffers` derives advertised availability from inventory, the CPT schedule and path capacity (wired at boot; `CAPABILITY_OFFER_ENABLED` is only a boot guard, ADR 0025). |
-| **Published Language / Open Host** | **Partly** | Publishes 6 CloudEvents types on `warehouse.network-fulfillment.events` (documented in `apis/asyncapi.yaml`). No other fleet context was found consuming them. Read-only REST and MCP are exposed for operators and agents. |
+| **Published Language / Open Host** | **Partly** | Publishes 7 CloudEvents types on `warehouse.network-fulfillment.events` (documented in `apis/asyncapi.yaml`). No other fleet context was found consuming them. Read-only REST and MCP are exposed for operators and agents. |
 
 ## Inbound Communication
 
 | Collaborator | Message | Type | Channel | Relationship |
 | --- | --- | --- | --- | --- |
 | External network (`retail-network`; stub by default, live opt-in, ADR 0026) | Inbound demand (`contract.InboundDemand`) | Query (poll) | `ports.NetworkGateway.PollDemand`, driven by `internal/adapters/inbound/poller` | Conformist (we are downstream) |
-| Operator / upstream caller | Confirm shipment | Command | REST `POST /network-orders/{networkRef}/shipment-confirmation` (ADR 0014) | Open Host (unauthenticated) |
+| Operator (fallback) | Confirm shipment | Command | REST `POST /network-orders/{networkRef}/shipment-confirmation` (ADR 0014) | Open Host (unauthenticated) |
 | Operators, `web/` remote in `warehouse-console` | List unanswered orders | Query | REST `GET /network-orders` | Open Host |
 | Operators | Get one order | Query | REST `GET /network-orders/{networkRef}` | Open Host |
 | Operators, `web/` remote | Inbound leg health | Query | REST `GET /inbound-status` | Open Host |
@@ -166,6 +166,7 @@ ship-to PII enters this context at all.
 | Report consumers | Acknowledgement & Translation report | Query | REST (`cmd/netfulfil-reports`) `GET /reports/acknowledgement`, `GET /reports/acknowledgement/freshness` | Open Host |
 | `process-path-management` | Path catalogue + CPT schedule | Event | Kafka `warehouse.process-path-management.events`: `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`, `...processpath.ProcessPathUpdated`, `...processpath.ProcessPathDeactivated`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | Conformist (always-on cache) |
 | `wes-work-planning` | Remaining path capacity | Event | Kafka `warehouse.work-planning.events`: `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | Conformist (always-on cache) |
+| `outbound-shipping` | Shipment confirmed (the primary trigger of shipment confirmation) | Event | Kafka `warehouse.outbound-shipping.events`: `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed`, every mode (ADR 0014 addendum) | Customer/Supplier (outbound-shipping ADR 0001) |
 | Itself (analytics projector) | Own events, for the report | Event | Kafka `warehouse.network-fulfillment.analytics`: `...networkorder.NetworkOrderReceived`, `...NetworkOrderSubmitted`, `...NetworkOrderAcknowledged.v2` (and the historic `...NetworkOrderAcknowledged` v1), `...NetworkOrderRejected` | Internal |
 
 ## Outbound Communication
@@ -224,8 +225,9 @@ Full glossary: [ubiquitous-language.md](/docs/ddd/ubiquitous-language). Top term
 7. **Correlation is a persisted mapping** (`local_order_id`, recorded when the
    hold is raised; the hold's outcome is `hold_outcome`, guarded by `CHECK`
    constraints). It is never a string convention, and that is why
-   shipment confirmation is an explicit call (ADR 0014), not a
-   `PackageManifested` join.
+   shipment confirmation joins `orders[].order_id` of outbound-shipping's
+   `ShipmentConfirmed` on `local_order_id` (ADR 0014 addendum), not a
+   `PackageManifested` string join.
 8. **Advertise what the floor can move.** `advertisedQuantity` is
    `min(physical, throughputFeasible)` and is never above physical
    (`ErrAdvertisedExceedsPhysical`). If capacity is unknown, the offer

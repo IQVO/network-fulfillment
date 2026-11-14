@@ -161,12 +161,19 @@ What exists today:
   next pass. It never changes the order's state. Counter
   `network_fulfillment.orphaned_holds.swept`. Runbook:
   [A held order is stuck in order-management](docs/docs/operations/runbook.md#a-held-order-is-stuck-in-order-management).
-- **`ConfirmNetworkOrderShipment`** (ADR 0014, ADR 0026) — the one write endpoint,
-  `POST /network-orders/{networkRef}/shipment-confirmation`: requests the label
-  from the gateway first (one package), then `ACKNOWLEDGED -> CONFIRMED`,
-  publishes `NetworkOrderShipmentConfirmed`, then tells the network. A label
-  failure leaves the order `ACKNOWLEDGED` and retryable. Idempotent on an
-  already-`CONFIRMED` order.
+- **`ConfirmNetworkOrderShipment`** (ADR 0014 and its 2026-11-06 addendum, ADR 0026)
+  — requests the label from the gateway first (one package, until the producer
+  sends a package count), then `ACKNOWLEDGED -> CONFIRMED`, publishes
+  `NetworkOrderShipmentConfirmed`, then tells the network. A label failure leaves
+  the order `ACKNOWLEDGED` and retryable. Two triggers, one use case: the primary
+  one is a Kafka consumer of outbound-shipping's `ShipmentConfirmed`
+  (`warehouse.outbound-shipping.events`, group `OUTBOUND_SHIPPING_CONSUMER_GROUP`,
+  default `network-fulfillment-outbound-shipping`, every mode), which joins each
+  `orders[].order_id` on `localOrderId`; the other is the one write endpoint,
+  `POST /network-orders/{networkRef}/shipment-confirmation`, kept as the operator
+  fallback. Idempotent on an already-`CONFIRMED` order and on a
+  `(shipment reference, order id)` pair already recorded, so neither path
+  double-submits.
 - **`RecomputeCapabilityOffers`** — every `RECOMPUTE_INTERVAL` (default
   `1m`), for every SKU in the
   translation dictionary at `SITE_ID`: physical stock from
@@ -276,9 +283,11 @@ What exists today:
 
 Not built yet:
 
-- **A `PackageManifested`-driven shipment confirmation.** ADR 0014 chose
-  the explicit endpoint until a persisted correlation exists.
-- **A real package count.** The label is requested for exactly one package.
+- **A `PackageManifested`-driven shipment confirmation.** Not built:
+  outbound-shipping's `ShipmentConfirmed` is the trigger (ADR 0014 addendum).
+- **A real package count.** The label is requested for exactly one package: the
+  consumer decodes `package_count`, but outbound-shipping's `ShipmentConfirmed`
+  does not carry it yet.
 - **Reconciling a shipment confirmation.** The network's `FAILURE` of one is
   logged at `ERROR` and recorded in `network_submissions`; no use case acts on it.
 
@@ -511,7 +520,7 @@ still arrives only by polling — there is no create-order endpoint.
 | `GET` | `/inbound-status` | network mode, poller counters, unanswered/overdue counts |
 | `GET` | `/network-orders` | unanswered orders |
 | `GET` | `/network-orders/{networkRef}` | one order (with `localOrderId` from `SUBMITTED` on) |
-| `POST` | `/network-orders/{networkRef}/shipment-confirmation` | the one write route: label request, `ACKNOWLEDGED -> CONFIRMED`, `NetworkOrderShipmentConfirmed`, notify the network. Idempotent on an already-`CONFIRMED` order; a label failure leaves the order `ACKNOWLEDGED` and retryable (ADR 0014, ADR 0026) |
+| `POST` | `/network-orders/{networkRef}/shipment-confirmation` | the one write route, the operator fallback to the `ShipmentConfirmed` consumer: label request, `ACKNOWLEDGED -> CONFIRMED`, `NetworkOrderShipmentConfirmed`, notify the network. Idempotent on an already-`CONFIRMED` order; a label failure leaves the order `ACKNOWLEDGED` and retryable (ADR 0014, ADR 0026) |
 | `GET` | `/capability-offers` | the persisted offers (when capability offers are enabled — they always are unless `CAPABILITY_OFFER_ENABLED=false`, which fails the boot) |
 | `GET` | `/reports/acknowledgement` | the acknowledgement report (`cmd/netfulfil-reports`, `:8092`) |
 | `GET` | `/reports/acknowledgement/freshness` | the report's freshness |

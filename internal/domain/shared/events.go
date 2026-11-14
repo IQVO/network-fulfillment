@@ -131,9 +131,11 @@ func (e NetworkOrderRejected) OccurredAt() time.Time { return e.At }
 // confirmed back to the network, closing the order.
 //
 // It is raised by ConfirmNetworkOrderShipment, which is driven by the
-// explicit POST /network-orders/{networkRef}/shipment-confirmation
-// endpoint (ADR 0014) rather than by a PackageManifested consumer: no
-// persisted WorkUnitId -> NetworkRef mapping exists yet to correlate one.
+// ShipmentConfirmed consumer of outbound-shipping's events (the primary
+// trigger, joined on NetworkOrder.localOrderId) and by the explicit
+// POST /network-orders/{networkRef}/shipment-confirmation endpoint (the
+// operator fallback), per ADR 0014 and its 2026-11-06 addendum. It is not
+// driven by a PackageManifested consumer.
 type NetworkOrderShipmentConfirmed struct {
 	NetworkRef   NetworkRef
 	SiteId       SiteId

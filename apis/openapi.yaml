@@ -296,9 +296,12 @@ paths:
         `NetworkOrderShipmentConfirmed`. Takes no request body.
 
 
-        The trigger is an explicit call naming the `networkRef` rather than
-        a `PackageManifested` correlation, because no persisted mapping
-        from a work unit back to a `networkRef` exists (ADR 0014).
+        This route is the operator fallback. The primary trigger is the
+        `ShipmentConfirmed` event of outbound-shipping, which the service
+        consumes and joins on `localOrderId` (ADR 0014, addendum of
+        2026-11-06); both go through the same use case. The label is
+        requested from the network first, so a label failure leaves the
+        order `ACKNOWLEDGED`.
 
 
         Idempotent twice over: the request carries a required
@@ -420,8 +423,9 @@ paths:
         The figure this context would tell the network it can ship for each
         (SKU, site) it knows about: `min(physicalAvailable,
         throughputFeasibleBefore(nextCutoff))` (ADR 0001 §8). Offers are
-        persisted by the recompute loop; they are not yet submitted to the
-        network.
+        persisted by the recompute loop. In live mode `FeedInventory`
+        submits them to the network as a per-site inventory feed
+        (ADR 0027 part 2); in stub mode nothing is sent.
 
 
         Always registered: the capability-offer recompute loop and its

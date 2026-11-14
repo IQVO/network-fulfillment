@@ -17,11 +17,12 @@ in [operations/configuration.md](/docs/operations/configuration).
 
 ```mermaid
 flowchart LR
-    RN["retail-network role<br/>stub gateway only"]
+    RN["retail-network role<br/>stub or live gateway"]
     OM["order-management<br/>REST"]
     INV["inventory-storage<br/>REST"]
     PPM["process-path-management<br/>Kafka"]
     WWP["wes-work-planning<br/>Kafka"]
+    OSH["outbound-shipping<br/>Kafka"]
     NF["network-fulfillment<br/>netfulfil"]
     MCP["cmd/mcp"]
     PROJ["netfulfil-projector"]
@@ -35,6 +36,7 @@ flowchart LR
     NF -.->|"GET /inventory/sku/usable<br/>always on"| INV
     PPM -.->|"warehouse.process-path-management.events<br/>always on"| NF
     WWP -.->|"warehouse.work-planning.events<br/>always on"| NF
+    OSH -->|"warehouse.outbound-shipping.events<br/>ShipmentConfirmed, every mode"| NF
     NF -.->|"warehouse.network-fulfillment.events<br/>always published (outbox)"| SUB
     NF -.->|"warehouse.network-fulfillment.analytics"| PROJ
     PROJ --> REP
@@ -48,6 +50,7 @@ Source: `internal/adapters/outbound/retailnetwork/mode.go`,
 `internal/adapters/outbound/inventoryclient/client.go`,
 `internal/adapters/outbound/processpathcache/consumer.go`,
 `internal/adapters/outbound/pathcapacitycache/consumer.go`,
+`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`,
 `internal/adapters/outbound/kafka/publisher.go`,
 `internal/adapters/outbound/kafka/analytics_publisher.go`,
 `internal/adapters/inbound/mcp/report_tool.go`, `cmd/mcp/main.go`.
@@ -63,6 +66,7 @@ inside the diagram for `{id}` / `{sku}`.
 | `inventory-storage` | upstream | REST, synchronous | `GET /inventory/{sku}/usable` | always on | SKU skipped for that recompute pass |
 | `process-path-management` | upstream | Kafka, CloudEvents | 4 event types on `warehouse.process-path-management.events` | always on | bad message logged and skipped, no DLQ |
 | `wes-work-planning` | upstream | Kafka, CloudEvents | `PathCapacityChanged` on `warehouse.work-planning.events` | always on | bad message logged and skipped, no DLQ |
+| `outbound-shipping` | upstream | Kafka, CloudEvents | `ShipmentConfirmed` on `warehouse.outbound-shipping.events` (ADR 0014 addendum) | always on, every mode | handler retried, then `warehouse.outbound-shipping.events.dlq` |
 | any subscriber | downstream | Kafka, CloudEvents | 7 event types on `warehouse.network-fulfillment.events` | always on (outbox relay) | outbox keeps unsent rows |
 | own analytics (`netfulfil-projector`) | internal | Kafka, CloudEvents | same 7 types on `warehouse.network-fulfillment.analytics` (it ignores `NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk` and `OrphanedHoldCancelled`) | always on | retry 3 times, then `.dlq` |
 | `warehouse-console` (via `web/` remote) | downstream | REST | `GET /network-orders`, `GET /inbound-status` | on | n/a |
@@ -227,6 +231,33 @@ at boot, always on.
 `RecomputeCapabilityOffers` matches capacity on the exact `cutoff_at`
 instant of the site's next cutoff.
 
+## outbound-shipping
+
+Consumer: `internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`,
+started from `cmd/netfulfil/outbound_shipping.go`. Runs in every mode.
+
+- Topic `warehouse.outbound-shipping.events`, keyed by the load id, group id
+  `OUTBOUND_SHIPPING_CONSUMER_GROUP` (default
+  `network-fulfillment-outbound-shipping`), a stable group that starts at the
+  earliest offset when it is new.
+- One type handled:
+  `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed`, data
+  `load_id`, `orders[].order_id` and an optional `orders[].package_count`
+  (outbound-shipping's contract carries only `order_id` today). Each `order_id`
+  is joined on `NetworkOrder.localOrderId` and confirmed through
+  `ConfirmNetworkOrderShipment.ExecuteForShipment` with the load id as the
+  shipment reference. An `order_id` no `NetworkOrder` carries is a local order
+  and is skipped and logged. Other types are ignored.
+- A message that is not a CloudEvent or breaks the contract is dead-lettered
+  to `warehouse.outbound-shipping.events.dlq` without retry; any other handler
+  error is retried (3 attempts) and then dead-lettered too. The offset is
+  committed either way. If the consumer stops on its own the process shuts down
+  (exit code 1).
+
+The REST route `POST /network-orders/{networkRef}/shipment-confirmation` stays
+as the operator fallback through the same use case, so neither path
+double-submits (ADR 0014 addendum).
+
 ## Events published
 
 Always on (ADR 0025). Every event goes through the transactional outbox
@@ -324,11 +355,13 @@ because the MCP charter is read-only (shipment confirmation stays REST only). Se
 
 ## Edges that do not exist
 
-- **No live network.** Only the stub gateway exists; `NETWORK_MODE=live`
-  refuses to boot.
 - **No `PackageManifested` consumer** from `fulfillment-execution`. Shipment
-  confirmation is an explicit REST call (ADR 0014) because there is no
-  persisted `WorkUnitId -> NetworkRef` mapping.
+  confirmation is driven by outbound-shipping's `ShipmentConfirmed` instead
+  (ADR 0014 addendum), joined on `NetworkOrder.localOrderId`.
 - **Capability offers reach the network only in live mode.** `FeedInventory` feeds them
   (ADR 0027 part 2); in stub mode no worker runs and nothing is sent.
-- **No call to `product-master`** or any other context not listed above.
+- **No other context is called.** The one exception is the inbound loop (live mode
+  only, ADR 0028, `cmd/netfulfil/inbound.go`): it calls `inbound-receiving` (register
+  an ASN), calls `product-master` (`GET /gtins/{gtin}`) and reads
+  `warehouse.inbound-receiving.events`; see the
+  [runbook](/docs/operations/runbook#the-inbound-loop-adr-0028).
