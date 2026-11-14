@@ -105,7 +105,7 @@ func (s *shipmentWorld) shipmentEvent(ctx context.Context, load string, table *g
 			ref := strings.TrimPrefix(spec, "held order of ")
 			o, err := s.w.orders.FindByRef(ctx, shared.NetworkRef(ref))
 			if err != nil || o == nil || o.LocalOrderId() == nil {
-				return nil, fmt.Errorf("network order %q has no held order to join on (%v)", ref, err)
+				return nil, fmt.Errorf("network order %q has no held order to join on: %w", ref, err)
 			}
 			entry["order_id"] = string(*o.LocalOrderId())
 		case strings.HasPrefix(spec, "local order "):
@@ -192,7 +192,7 @@ func (s *shipmentWorld) handledWithoutError() error {
 		return fmt.Errorf("no message was delivered")
 	}
 	if s.lastErr != nil {
-		return fmt.Errorf("expected the consumer to handle the message, it answered %v", s.lastErr)
+		return fmt.Errorf("expected the consumer to handle the message, it answered %w", s.lastErr)
 	}
 	return nil
 }
@@ -205,7 +205,7 @@ func (s *shipmentWorld) refusedWith(fragment string) error {
 		return fmt.Errorf("expected the consumer to refuse the message, it handled it")
 	}
 	if !strings.Contains(s.lastErr.Error(), fragment) {
-		return fmt.Errorf("expected the refusal to mention %q, got %v", fragment, s.lastErr)
+		return fmt.Errorf("expected the refusal to mention %q, got %w", fragment, s.lastErr)
 	}
 	return nil
 }

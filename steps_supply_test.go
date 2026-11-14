@@ -357,11 +357,6 @@ func (s *supplyWorld) fingerprints(site, which string) error {
 
 // ---- node profile: Given ------------------------------------------------------------
 
-var weekdayNames = map[string]time.Weekday{
-	"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday, "wednesday": time.Wednesday,
-	"thursday": time.Thursday, "friday": time.Friday, "saturday": time.Saturday,
-}
-
 func parseDays(spec string) ([]time.Weekday, error) {
 	lower := strings.ToLower(spec)
 	switch strings.TrimSpace(lower) {

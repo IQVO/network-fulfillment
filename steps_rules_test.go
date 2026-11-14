@@ -63,9 +63,9 @@ func (p *scriptedPlanner) CancelHeldOrder(ctx context.Context, id shared.LocalOr
 	if !scripted {
 		return p.fakePlanner.CancelHeldOrder(ctx, id)
 	}
-	p.fakePlanner.mu.Lock()
-	p.fakePlanner.cancelAttempts = append(p.fakePlanner.cancelAttempts, id)
-	p.fakePlanner.mu.Unlock()
+	p.mu.Lock()
+	p.cancelAttempts = append(p.cancelAttempts, id)
+	p.mu.Unlock()
 	return err
 }
 
@@ -149,7 +149,7 @@ func (r *rulesWorld) reset() {
 func (r *rulesWorld) holdOf(ctx context.Context, ref string) (shared.LocalOrderId, error) {
 	o, err := r.w.orders.FindByRef(ctx, shared.NetworkRef(ref))
 	if err != nil || o == nil {
-		return "", fmt.Errorf("network order %q not found (%v)", ref, err)
+		return "", fmt.Errorf("network order %q not found: %w", ref, err)
 	}
 	if o.LocalOrderId() == nil {
 		return "", fmt.Errorf("network order %q has no recorded hold", ref)
@@ -272,7 +272,7 @@ func (r *rulesWorld) stuckNewWithOpenHold(ctx context.Context, ref string) error
 
 	o, err := w.orders.FindByRef(ctx, d.NetworkRef)
 	if err != nil || o == nil {
-		return fmt.Errorf("fixture order %q was not recorded (%v)", ref, err)
+		return fmt.Errorf("fixture order %q was not recorded: %w", ref, err)
 	}
 	if o.State() != networkorder.StateNew || !o.HoldOpen() {
 		return fmt.Errorf("fixture order %q should be NEW with an open hold, is %s (open=%t)", ref, o.State(), o.HoldOpen())
