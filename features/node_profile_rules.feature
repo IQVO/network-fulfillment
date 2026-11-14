@@ -131,6 +131,50 @@ Feature: Node profile declaration, documented rules
     And the node profile declared for "site-1" allows 160 orders at the cutoff at "18:00"
 
   @bdd
+  Scenario: A merged cutoff is judged by its earliest next occurrence
+    Given the CPT schedule of site "site-1" is in timezone "America/Chicago"
+    And the schedule has a cutoff at "18:00" on Thursday and Friday, next in 54 hours
+    And path "p2" serves that cutoff with a cycle time of 600 minutes
+    And the schedule has a cutoff at "18:00" on Monday, Tuesday and Wednesday, next in 6 hours
+    And path "p1" serves that cutoff with a cycle time of 95 minutes
+    And path "p1" has 100 units of remaining capacity
+    And path "p2" has 60 units of remaining capacity
+    When the node profiles are declared
+    Then the node profile declared for "site-1" has 1 cutoff
+    And the node profile declared for "site-1" allows 100 orders at the cutoff at "18:00"
+    And the node profile declared for "site-1" has a handling time of 600 minutes
+
+  @bdd
+  Scenario Outline: The longest gap of the week, the weekend included, is the window a path has to finish in
+    Given the CPT schedule of site "site-1" is in timezone "America/Chicago"
+    And the schedule has a cutoff at "18:00" on weekdays, next in 6 hours
+    And path "p-fast" serves that cutoff with a cycle time of 30 minutes
+    And path "p-slow" serves that cutoff with a cycle time of <cycle> minutes
+    And path "p-fast" has 40 units of remaining capacity
+    When the node profiles are declared
+    Then the node profile declared for "site-1" has a handling time of <handling> minutes
+
+    Examples:
+      | cycle | handling | case                                                                       |
+      | 4320  | 4320     | Friday 18:00 to Monday 18:00 is 72h: a path of exactly 72h fits it         |
+      | 4321  | 30       | one minute more fits no gap of the week: that path is ruled out            |
+
+  @bdd
+  Scenario Outline: A single weekly cutoff gives a path the whole week
+    Given the CPT schedule of site "site-1" is in timezone "America/Chicago"
+    And the schedule has a cutoff at "18:00" on Monday, next in 6 hours
+    And path "p-fast" serves that cutoff with a cycle time of 30 minutes
+    And path "p-slow" serves that cutoff with a cycle time of <cycle> minutes
+    And path "p-fast" has 40 units of remaining capacity
+    When the node profiles are declared
+    Then the node profile declared for "site-1" has a handling time of <handling> minutes
+
+    Examples:
+      | cycle | handling | case                              |
+      | 10080 | 10080    | exactly seven days                |
+      | 10081 | 30       | one minute more than the week     |
+
+  @bdd
   Scenario: The throughput per day is what the busiest weekday's cutoffs can take together
     Given the CPT schedule of site "site-1" is in timezone "America/Chicago"
     And the schedule has a cutoff at "11:00" on weekdays, next in 23 hours
