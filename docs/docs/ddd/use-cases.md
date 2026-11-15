@@ -6,7 +6,7 @@ sidebar_label: Use cases
 
 # Application use cases
 
-The eleven application services in `internal/application/usecases`, as they are
+The thirteen application services in `internal/application/usecases`, as they are
 on `develop`: what triggers each one, what it takes, which invariants it
 relies on, what it calls and which events it raises. The step-by-step
 sequence diagrams are in [sequence-diagrams.md](/docs/ddd/sequence-diagrams); the
