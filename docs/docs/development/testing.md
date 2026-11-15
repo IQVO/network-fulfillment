@@ -14,7 +14,7 @@ run each layer, and what every CI job in `.github/workflows/ci.yml` does.
 | Layer | Where | How many | Run with | Needs |
 | --- | --- | --- | --- | --- |
 | Unit (domain, use cases, adapters with fakes, `httptest`) | `internal/**/*_test.go`, `cmd/netfulfil/*_test.go` | 68 test files without a build tag (not counting the BDD and architecture files below) | `make test` | Go only |
-| BDD / acceptance (godog) | `features/*.feature`, step code in `features_*_test.go` at the repo root | 10 feature files, 83 `Scenario`/`Scenario Outline` blocks that expand to 135 executed scenarios, 951 steps; no scenario is tagged `@known-bug` any more | `make bdd` | Go only |
+| BDD / acceptance (godog) | `features/*.feature`, step code in `features_*_test.go` at the repo root | 20 feature files, 192 `Scenario`/`Scenario Outline` blocks that expand to 279 executed scenarios, 2292 steps; no scenario is tagged `@known-bug` any more | `make bdd` | Go only |
 | Integration (testcontainers) | files with `//go:build integration` | 20 files | `make integration` | Docker |
 | Architecture fitness | `internal/architecture/` | 11 files, 25 `Test*` functions | `make arch-test` | Go only |
 | Mutation | `gremlins` on `./internal/domain/networkorder` | thresholds in `.gremlins.yaml` | `make mutation` | `gremlins` v0.6.0 |
@@ -131,14 +131,32 @@ real `StubGateway` and running the real poller.
 | --- | --- |
 | `acknowledgement_lifecycle.feature` | 9 |
 | `acknowledgement_report.feature` | 15 |
-| `capability_offers.feature` | 12 |
+| `capability_offers.feature` | 14 |
+| `inbound_receipt_return.feature` | 4 |
+| `inbound_shipment_intake.feature` | 4 |
 | `inbound_status.feature` | 6 |
 | `integration_events.feature` | 5 |
 | `network_order_intake.feature` | 10 |
 | `network_order_queries.feature` | 7 |
 | `operations.feature` | 6 |
 | `orphaned_holds.feature` | 7 (ADR 0024: cancel after the window and grace, a 404 is done, a 409 is not an orphan and not retried, a failing cancel is retried and never marked done, `SUBMITTED` is never swept, `RejectOverdueOrders` frees a recorded hold first) |
+| `request_hardening.feature` | 3 |
 | `shipment_confirmation.feature` | 6 |
+
+Seven further files, named `*_rules.feature`, pin rules the documentation states
+(business context, use cases, aggregate canvas, troubleshooting and the ADRs they
+cite), one rule per scenario title, with concrete values; their step code is
+`steps_rules_test.go`, `steps_shipment_test.go` and `steps_supply_test.go`:
+
+| Feature file | Scenarios (blocks) | Rules |
+| --- | --- | --- |
+| `capability_offer_rules.feature` | 10 | the walk to the next feasible cutoff stops at exactly 7 days; a full cutoff is skipped for the next one with room (ADR 0033); capacity matched on the exact cutoff instant; zero cycle time stays eligible; an over-committed path never gives a negative offer; one SKU advertised once |
+| `hold_policy_rules.feature` | 18 | the deadline sweep, `RejectOverdueOrders` and `SweepOrphanedHolds` act only once their window has *strictly* closed; a failed cancel leaves the order `NEW` and is retried; 409/422 is `ALREADY_RELEASED`, an unclassified answer is retried; the hold id is shown only for an order we committed to |
+| `inventory_feed_rules.feature` | 13 | ADR 0027 part 2: complete feed sorted by SKU, stale offers and unlisted SKUs left out, split at 5000 lines, site skips, fingerprint |
+| `node_profile_rules.feature` | 17 | ADR 0027 part 1 and ADR 0017: what is declared and when, handling time rounded up, longest gap of the week, merged cutoffs, ceilings never lowered |
+| `order_intake_rules.feature` | 7 | resume only while the window is open, untranslatable demand recorded lineless, a refused order whose cancel failed is retried, one malformed unit never stops the poll |
+| `reconciliation_rules.feature` | 10 | pending submission settled later and released once, the documented residual hold of ADR 0024, one failure never stops the pass, only `SUBMITTED` orders looked at, event payloads |
+| `shipment_event_rules.feature` | 21 | `ShipmentConfirmed` by event: package count, redelivery, deferral until acknowledged, operator route and event never confirm twice, contract breaks |
 
 A scenario tagged `@known-bug` states the correct behaviour for a defect the
 suite found and is excluded until it is fixed. None is tagged today: the order
@@ -151,9 +169,9 @@ scenarios, and there are none).
 Output of `go test . -run TestFeatures -count=1 -v` on this branch:
 
 ```text
-135 scenarios (135 passed)
-951 steps (951 passed)
---- PASS: TestFeatures (0.31s)
+279 scenarios (279 passed)
+2292 steps (2292 passed)
+--- PASS: TestFeatures (11.12s)
 ```
 
 ## Integration tests

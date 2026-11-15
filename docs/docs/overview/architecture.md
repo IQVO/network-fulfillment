@@ -78,7 +78,7 @@ internal/
   application/
     contract/                  plain data crossing the ports (InboundDemand, HeldOrderRequest, NextCutoff, ...)
     ports/                     OUT ports, interfaces only
-    usecases/                  the eleven application services
+    usecases/                  the thirteen application services
   adapters/
     inbound/http/              REST routes, RFC 7807 errors, readiness, reports router
     inbound/poller/            the inbound leg: polls the gateway, feeds ReceiveNetworkDemand
