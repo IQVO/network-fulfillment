@@ -273,6 +273,7 @@ func newRESTAPI(t *testing.T, feasible bool) *restAPI {
 
 	api := &inboundhttp.Server{
 		Orders:          postgres.NewNetworkOrderRepo(pool),
+		PurchaseOrders:  retailnetwork.NewPGStore(pool),
 		Poller:          inbound,
 		Clock:           clock,
 		NetworkMode:     string(retailnetwork.ModeStub),
