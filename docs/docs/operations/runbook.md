@@ -203,9 +203,11 @@ Both writers set `AllowAutoTopicCreation: true`. Event types are listed in
 | `warehouse.network-fulfillment.analytics` | `netfulfil-projector` | `network-fulfillment-analytics-<hostname>-<pid>-<unix-nanos>`, new on every start | earliest | analytics read model |
 | `warehouse.process-path-management.events` | `netfulfil` | `network-fulfillment-process-path-capability-cache-<hostname>-<pid>-<unix-nanos>` | earliest | path cycle times and the site CPT schedule |
 | `warehouse.work-planning.events` | `netfulfil` | `network-fulfillment-path-capacity-cache-<hostname>-<pid>-<unix-nanos>` | earliest | remaining path capacity per `(pathId, cutoffAt)` |
+| `warehouse.outbound-shipping.events` | `netfulfil` | `OUTBOUND_SHIPPING_CONSUMER_GROUP`, default `network-fulfillment-outbound-shipping`, stable; every mode | earliest when the group is new | `ShipmentConfirmed` confirms the network orders of a departed load (ADR 0014 addendum) |
+| `warehouse.inbound-receiving.events` | `netfulfil`, live mode only | `INBOUND_RECEIPT_CONSUMER_GROUP`, stable | earliest when the group is new | receipt events for the ASNs this service registered (ADR 0028, see [the inbound loop](#the-inbound-loop-adr-0028)) |
 
-Every group id is unique per process on purpose: each process rebuilds its
-state from the whole topic, and a shared group would resume from an old
+The group ids of the projector and the two caches are unique per process on
+purpose: each process rebuilds its state from the whole topic, and a shared group would resume from an old
 offset and look ready with an empty cache. The side effect is that old groups
 pile up on the broker; they hold no partitions and can be deleted.
 
@@ -224,6 +226,18 @@ pile up on the broker; they hold no partitions and can be deleted.
   and adds `x-dlq-source-topic`, `x-dlq-error` and `x-dlq-failed-at`. The
   offset is committed either way, so one poison message never blocks the
   partition. Unknown event types are skipped and committed.
+- **`ShipmentConfirmed` consumer** (`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`):
+  a message that is not a CloudEvent, or whose data breaks outbound-shipping's contract,
+  goes to `warehouse.outbound-shipping.events.dlq` at once; any other handler error
+  (an order that is `NEW` or `REJECTED`, a failed label request or a database error) is retried
+  3 times and then goes there too. A load that departs while its order is still `SUBMITTED`
+  (the network has not settled the acknowledgement) is not an error: the consumer records the
+  shipment on the order, logs `shipment confirmed before the order was acknowledged; deferred`
+  and commits, and `ConfirmPendingShipments` confirms it once the order is `ACKNOWLEDGED` (ADR 0014
+  addendum D7). The offset is committed either way. The way to close a
+  confirmation that was dead-lettered is the REST route (see
+  [Confirm a shipment](#confirm-a-shipment)). If the consumer stops on its own the process
+  exits with code 1.
 - **Capability caches**: no DLQ. A non-CloudEvent or undecodable message is
   logged (`skipping non-CloudEvents message` or `... message handling failed`)
   and skipped.
@@ -297,6 +311,9 @@ for the same `networkRef` may already have been delivered.
 | `RecomputeCapabilityOffers` | every `RECOMPUTE_INTERVAL`, only when enabled | upserts one `capability_offers` row per known SKU. |
 | `DeclareNodeProfiles` | live mode only: immediately at start, then every `NETWORK_PROFILE_INTERVAL` (default `5m`; `0` disables) | derives each site's operational profile from the schedule, cycle-time and capacity caches and declares it to the network when its content changed (ADR 0027). See [the node profile](#the-node-profile). |
 | `FeedInventory` | live mode only: immediately at start, then every `NETWORK_INVENTORY_INTERVAL` (default `5m`; `0` disables) | plans one inventory feed per site from the persisted capability offers and the product dictionary and sends it when its content changed (an unchanged one at most hourly) (ADR 0027 part 2). See [the inventory feed](#the-inventory-feed). |
+| `ConfirmPendingShipments` | every `POLL_INTERVAL`, own ticker, always on | confirms the shipments that arrived while their order was still `SUBMITTED`, once it is `ACKNOWLEDGED`; drops the ones whose order is already `CONFIRMED` or `REJECTED`; skips a `SUBMITTED` order. Logs `pending shipments settled` (Info) when it confirmed, dropped or failed any (ADR 0014 addendum D7). |
+| `ShipmentConfirmed` consumer | continuous, every mode | confirms the network orders of a departed load through `ConfirmNetworkOrderShipment` (ADR 0014 addendum). See [Dead letters](#dead-letters). |
+| `IntakeInboundShipments`, `ReturnInboundReceipts` | live mode only: at once, then every `INBOUND_INTAKE_INTERVAL` (default `30s`) | register polled seller shipments as ASNs and report closed receipts to the network (ADR 0028). See [the inbound loop](#the-inbound-loop-adr-0028). |
 | Outbox relay | continuous | see above. |
 
 Use-case details: [ddd/use-cases.md](/docs/ddd/use-cases).
@@ -341,7 +358,27 @@ curl -s http://localhost:8000/api/network-fulfillment/network-orders
 the first clean pass; `overdue` should be 0. See
 [troubleshooting](/docs/operations/troubleshooting) when it is not.
 
+### Follow a purchase order to its order-management order
+
+When all you have is the network's purchase-order number (the `networkRef` is
+minted here and is not derived from it, ADR 0026), read the order by that number
+(ADR 0036). `localOrderId` is the order-management order raised for it, present
+once the order is acknowledged.
+
+```bash
+curl -s http://localhost:8000/api/network-fulfillment/purchase-orders/PO-7f3c
+```
+
+It is a keyed read: no query parameters and no paging. `404 purchase-order-not-found`
+means nothing was received for that number (yet); in `NETWORK_MODE=stub` it is always
+the answer, because the number-to-`networkRef` map is only written by the live
+adapter.
+
 ### Confirm a shipment
+
+Normally nothing to do: the `ShipmentConfirmed` event of outbound-shipping
+confirms the orders of the load. This route is the operator fallback, for an
+order whose event was dead-lettered or never arrived.
 
 ```bash
 curl -i -X POST -H "Idempotency-Key: $(uuidgen)" http://localhost:8000/api/network-fulfillment/network-orders/po-local-1/shipment-confirmation
@@ -349,7 +386,10 @@ curl -i -X POST -H "Idempotency-Key: $(uuidgen)" http://localhost:8000/api/netwo
 
 `204` on success or when the order is already `CONFIRMED`; `409
 confirm-before-acknowledge` unless the order is `ACKNOWLEDGED`; `404` for an
-unknown ref (ADR 0014).
+unknown ref (ADR 0014). A load that departed while the order was still `SUBMITTED`
+needs no manual call: the consumer recorded the shipment and the next
+`ConfirmPendingShipments` pass confirms it once the order is `ACKNOWLEDGED`. The
+route does not record a shipment itself, so on a `SUBMITTED` order it still answers 409.
 
 ### Change the product dictionary, the stub demand or the node definitions
 

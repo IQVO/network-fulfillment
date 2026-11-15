@@ -161,12 +161,19 @@ What exists today:
   next pass. It never changes the order's state. Counter
   `network_fulfillment.orphaned_holds.swept`. Runbook:
   [A held order is stuck in order-management](docs/docs/operations/runbook.md#a-held-order-is-stuck-in-order-management).
-- **`ConfirmNetworkOrderShipment`** (ADR 0014, ADR 0026) — the one write endpoint,
-  `POST /network-orders/{networkRef}/shipment-confirmation`: requests the label
-  from the gateway first (one package), then `ACKNOWLEDGED -> CONFIRMED`,
-  publishes `NetworkOrderShipmentConfirmed`, then tells the network. A label
-  failure leaves the order `ACKNOWLEDGED` and retryable. Idempotent on an
-  already-`CONFIRMED` order.
+- **`ConfirmNetworkOrderShipment`** (ADR 0014 and its 2026-11-06 addendum, ADR 0026)
+  — requests the label from the gateway first (one package, until the producer
+  sends a package count), then `ACKNOWLEDGED -> CONFIRMED`, publishes
+  `NetworkOrderShipmentConfirmed`, then tells the network. A label failure leaves
+  the order `ACKNOWLEDGED` and retryable. Two triggers, one use case: the primary
+  one is a Kafka consumer of outbound-shipping's `ShipmentConfirmed`
+  (`warehouse.outbound-shipping.events`, group `OUTBOUND_SHIPPING_CONSUMER_GROUP`,
+  default `network-fulfillment-outbound-shipping`, every mode), which joins each
+  `orders[].order_id` on `localOrderId`; the other is the one write endpoint,
+  `POST /network-orders/{networkRef}/shipment-confirmation`, kept as the operator
+  fallback. Idempotent on an already-`CONFIRMED` order and on a
+  `(shipment reference, order id)` pair already recorded, so neither path
+  double-submits.
 - **`RecomputeCapabilityOffers`** — every `RECOMPUTE_INTERVAL` (default
   `1m`), for every SKU in the
   translation dictionary at `SITE_ID`: physical stock from
@@ -276,9 +283,11 @@ What exists today:
 
 Not built yet:
 
-- **A `PackageManifested`-driven shipment confirmation.** ADR 0014 chose
-  the explicit endpoint until a persisted correlation exists.
-- **A real package count.** The label is requested for exactly one package.
+- **A `PackageManifested`-driven shipment confirmation.** Not built:
+  outbound-shipping's `ShipmentConfirmed` is the trigger (ADR 0014 addendum).
+- **A real package count.** The label is requested for exactly one package: the
+  consumer decodes `package_count`, but outbound-shipping's `ShipmentConfirmed`
+  does not carry it yet.
 - **Reconciling a shipment confirmation.** The network's `FAILURE` of one is
   logged at `ERROR` and recorded in `network_submissions`; no use case acts on it.
 
@@ -292,6 +301,7 @@ NetworkOrder      networkRef, siteId, requiredShipBy, acknowledgeBy, lines,
                   invariant: acknowledged in full or rejected in full
                   localOrderId = the order-management hold, recorded at raise;
                   holdOutcome = CANCELLED | ALREADY_RELEASED, unset while open
+                  pendingShipment = a shipment that left while SUBMITTED, confirmed once ACKNOWLEDGED
 
 CapabilityOffer   (sku, siteId) -> advertisedQuantity + basis + computedAt
                   PHYSICAL | THROUGHPUT_CONSTRAINED
@@ -457,6 +467,7 @@ Stub mode (the default) needs no credential and no sibling: seed demand from
 | `OUTBOX_MAX_ATTEMPTS` | `20` | outbox relay attempt cap (ADR 0021): a row that failed this many sends is logged at ERROR and excluded until re-armed (`UPDATE outbox_events SET attempts = 0 WHERE id = ...`); `0` = unlimited |
 | `CAPABILITY_OFFER_ENABLED` | unset | only `true` (or unset, which means `true`) is accepted; anything else fails the boot. The two Kafka caches, the inventory client, the recompute ticker and `GET /capability-offers` are always wired; boot blocks until both caches replay |
 | `SITE_ID` | `site-1` | the single site capability offers are computed for |
+| `NETWORK_SITE_MAP` | unset | optional, every mode: comma-separated `networkSite=warehouseSite` pairs (ADR 0035), e.g. `site-1=AUS3`. A held order carries the warehouse site as `fulfillmentSiteId` (order-management only accepts `^[A-Z0-9]+$`); an unmapped site is sent only if it is already a site code. Strict: a duplicate, an empty half or entry, or a warehouse site that is not a site code refuses to boot |
 | `RECOMPUTE_INTERVAL` | `1m` | Go duration; capability-offer recompute cadence |
 | `INVENTORY_STORAGE_URL` | `http://localhost:8080` | base URL for `GET /inventory/{sku}/usable` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTel Collector (OTLP/gRPC); see [Observability](#observability) |
@@ -511,7 +522,8 @@ still arrives only by polling — there is no create-order endpoint.
 | `GET` | `/inbound-status` | network mode, poller counters, unanswered/overdue counts |
 | `GET` | `/network-orders` | unanswered orders |
 | `GET` | `/network-orders/{networkRef}` | one order (with `localOrderId` from `SUBMITTED` on) |
-| `POST` | `/network-orders/{networkRef}/shipment-confirmation` | the one write route: label request, `ACKNOWLEDGED -> CONFIRMED`, `NetworkOrderShipmentConfirmed`, notify the network. Idempotent on an already-`CONFIRMED` order; a label failure leaves the order `ACKNOWLEDGED` and retryable (ADR 0014, ADR 0026) |
+| `GET` | `/purchase-orders/{poNumber}` | the same order, found by the network's purchase-order number instead of the minted `networkRef` (ADR 0036): a keyed read, not a listing, no query parameters; `404 purchase-order-not-found` |
+| `POST` | `/network-orders/{networkRef}/shipment-confirmation` | the one write route, the operator fallback to the `ShipmentConfirmed` consumer: label request, `ACKNOWLEDGED -> CONFIRMED`, `NetworkOrderShipmentConfirmed`, notify the network. Idempotent on an already-`CONFIRMED` order; a label failure leaves the order `ACKNOWLEDGED` and retryable (ADR 0014, ADR 0026) |
 | `GET` | `/capability-offers` | the persisted offers (when capability offers are enabled — they always are unless `CAPABILITY_OFFER_ENABLED=false`, which fails the boot) |
 | `GET` | `/reports/acknowledgement` | the acknowledgement report (`cmd/netfulfil-reports`, `:8092`) |
 | `GET` | `/reports/acknowledgement/freshness` | the report's freshness |

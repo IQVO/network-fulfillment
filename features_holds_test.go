@@ -30,10 +30,12 @@ func (w *world) orderManagementAnswersTheCancel(status int) error {
 	switch status {
 	case 404:
 		w.planner.cancelErr = fmt.Errorf("order-management DELETE: status 404: %w", contract.ErrHeldOrderNotFound)
-	case 409:
-		w.planner.cancelErr = fmt.Errorf("order-management DELETE: status 409: %w", contract.ErrHeldOrderAlreadyReleased)
+	case 409, 422:
+		w.planner.cancelErr = fmt.Errorf("order-management DELETE: status %d: %w", status, contract.ErrHeldOrderAlreadyReleased)
+	case 500, 503:
+		w.planner.cancelErr = fmt.Errorf("order-management DELETE: status %d", status)
 	default:
-		return fmt.Errorf("the scenario can only drive 404 or 409, got %d", status)
+		return fmt.Errorf("the scenario can only drive 404, 409, 422, 500 or 503, got %d", status)
 	}
 	return nil
 }

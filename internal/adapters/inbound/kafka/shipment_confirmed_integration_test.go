@@ -94,6 +94,7 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 	if err := orders.Save(ctx, seeded); err != nil {
 		t.Fatalf("seed order: %v", err)
 	}
+	seedDeferralOrders(t, ctx, orders)
 
 	// The ONE confirm use case, wired exactly like the composition root
 	// (wireConfirmShipment): real ledger, real unit of work, real outbox
@@ -107,6 +108,12 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 		Clock:         fixedClock{time.Date(2026, 11, 6, 16, 5, 0, 0, time.UTC)},
 		UnitOfWork:    postgres.NewUnitOfWork(pool),
 		Confirmations: postgres.NewShipmentConfirmationLog(pool),
+	}
+
+	deferShipment := &usecases.DeferShipmentConfirmation{
+		Orders:     orders,
+		Clock:      fixedClock{time.Date(2026, 11, 6, 16, 5, 0, 0, time.UTC)},
+		UnitOfWork: postgres.NewUnitOfWork(pool),
 	}
 
 	topic := fmt.Sprintf("warehouse.outbound-shipping.events.itest-%d", time.Now().UnixNano())
@@ -124,6 +131,7 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 		{Key: []byte("load-7f3a"), Value: eventBytes},
 		{Key: []byte("load-7f3a"), Value: eventBytes},
 	}
+	msgs = append(msgs, deferralMessages(t)...)
 	if err := writer.WriteMessages(ctx, msgs...); err != nil {
 		t.Fatalf("produce: %v", err)
 	}
@@ -132,7 +140,7 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 	runCtx, runCancel := context.WithCancel(ctx)
 	consumer := inboundkafka.NewShipmentConfirmedConsumer(brokers, topic,
 		fmt.Sprintf("nf-shipment-confirmed-itest-%d", time.Now().UnixNano()),
-		orders, confirm, nil)
+		orders, confirm, deferShipment, nil)
 	errCh := make(chan error, 1)
 	go func() { errCh <- consumer.Run(runCtx) }()
 
@@ -152,6 +160,9 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	waitForPendingShipment(t, ctx, orders, "po-2", deadline.Add(60*time.Second), runCancel)
+	dlqReader, dlqMsgs := readDeadLetters(t, ctx, brokers, topic+".dlq", 2, runCancel)
+	defer func() { _ = dlqReader.Close() }()
 	// Give the consumer a moment to commit past the messages, then stop.
 	time.Sleep(2 * time.Second)
 	runCancel()
@@ -197,17 +208,7 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 
 	// The malformed message is on the dead-letter topic, committed past,
 	// and did not block the confirmation behind it.
-	dlqReader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers: brokers, Topic: topic + ".dlq", Partition: 0,
-		MinBytes: 1, MaxBytes: 10e6,
-	})
-	defer func() { _ = dlqReader.Close() }()
-	dlqCtx, dlqCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer dlqCancel()
-	dlqMsg, err := dlqReader.ReadMessage(dlqCtx)
-	if err != nil {
-		t.Fatalf("read DLQ message (the malformed one must be dead-lettered): %v", err)
-	}
+	dlqMsg := dlqMsgs[0]
 	if string(dlqMsg.Value) != `{"not":"a cloudevent"}` {
 		t.Errorf("DLQ payload = %s, want the raw malformed bytes for manual replay", dlqMsg.Value)
 	}
@@ -216,6 +217,8 @@ func TestShipmentConfirmedConsumer_RoundTripKafkaPostgres(t *testing.T) {
 			t.Errorf("DLQ x-dlq-source-topic = %s, want %s", h.Value, topic)
 		}
 	}
+
+	assertDeferredShipmentSettles(t, ctx, pool, orders, confirm, dlqReader, dlqMsgs)
 }
 
 // shipmentConfirmedFixture is outbound-shipping's own example event,

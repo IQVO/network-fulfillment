@@ -34,15 +34,17 @@ sequenceDiagram
     NF->>K: evt: networkorder.NetworkOrderAcknowledged.v2
     NF->>OM: cmd: POST /orders/{id}/releases
     Note over NF: order is ACKNOWLEDGED
-    OP->>NF: cmd: POST /network-orders/networkRef/shipment-confirmation
+    K-->>NF: evt: outbound-shipping ShipmentConfirmed, orders[].order_id = localOrderId
+    NF->>RN: cmd: RequestLabel networkRef
     NF->>K: evt: networkorder.NetworkOrderShipmentConfirmed
     NF->>RN: cmd: SubmitShipmentConfirmation networkRef
-    NF-->>OP: cmd: reply 204 No Content
+    Note over OP,NF: operator fallback: POST /network-orders/networkRef/shipment-confirmation runs the same steps and replies 204 No Content
 ```
 
 Source: `internal/application/usecases/receive_network_demand.go`,
 `reconcile_submitted_orders.go`, `confirm_network_order_shipment.go`;
 `internal/adapters/outbound/ordermanagement/planner.go`;
+`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`,
 `internal/adapters/inbound/http/server.go`.
 
 Omitted: translation (local, no message); the poller's idempotency check;

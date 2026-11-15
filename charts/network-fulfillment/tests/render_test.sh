@@ -166,6 +166,24 @@ if grep -qE '(^  |- name: )NETWORK_(CLIENT|REFRESH)' <<<"$(render "${live[@]}")"
 stub_cm="$(render --show-only templates/configmap.yaml)"
 if grep -qE '^  (NETWORK_(BASE_URL|VENDOR_ID|NODES_FILE|PROFILE_INTERVAL|INVENTORY_INTERVAL)|INBOUND_RECEIVING_URL|PRODUCT_MASTER_URL|INBOUND_INTAKE_INTERVAL|INBOUND_RECEIPT_CONSUMER_GROUP):' <<<"$stub_cm"; then fail "stub mode renders a live-only variable"; fi
 
+# --- NETWORK_SITE_MAP (ADR 0035) -------------------------------------------
+# Optional and read in EVERY mode (the order-management planner is wired in
+# both), so it renders in stub and live when set and in neither when empty. The
+# binary validates the value at boot; the chart only carries it.
+if grep -q 'NETWORK_SITE_MAP' <<<"$stub_cm"; then fail "stub: NETWORK_SITE_MAP is rendered with no config.networkSiteMap (an empty map must render nothing)"; fi
+if grep -q 'NETWORK_SITE_MAP' <<<"$live_cm"; then fail "live: NETWORK_SITE_MAP is rendered with no config.networkSiteMap (an empty map must render nothing)"; fi
+stub_map_cm="$(render --set config.networkSiteMap=site-1=AUS3 --show-only templates/configmap.yaml)" || fail "stub: config.networkSiteMap must render"
+grep -q 'NETWORK_SITE_MAP: "site-1=AUS3"' <<<"$stub_map_cm" || fail "stub: NETWORK_SITE_MAP is not rendered from config.networkSiteMap"
+live_map_cm="$(render "${live[@]}" --set config.networkSiteMap=site-1=AUS3 --show-only templates/configmap.yaml)" || fail "live: config.networkSiteMap must render"
+grep -q 'NETWORK_SITE_MAP: "site-1=AUS3"' <<<"$live_map_cm" || fail "live: NETWORK_SITE_MAP is not rendered from config.networkSiteMap"
+pairs_cm="$(render --set 'config.networkSiteMap=site-1=AUS3\,site-2=DAL1' --show-only templates/configmap.yaml)" || fail "several pairs must render"
+grep -q 'NETWORK_SITE_MAP: "site-1=AUS3,site-2=DAL1"' <<<"$pairs_cm" || fail "NETWORK_SITE_MAP does not carry several pairs verbatim"
+# The map is data for the binary, not a reason to refuse a render: a value the
+# binary would refuse still renders, and the boot is where it is refused.
+render --set config.networkSiteMap=site-1=aus3 >/dev/null || fail "the chart must not validate NETWORK_SITE_MAP itself (the binary refuses to boot on a bad map)"
+# Nothing else moves: the node the service adopts is SITE_ID, never a chart value.
+if grep -q 'SITE_ID' <<<"$stub_map_cm"; then fail "NETWORK_SITE_MAP must not render SITE_ID"; fi
+
 # Tolerated: a legacy kafka.enabled: true, and the explicit real values.
 render --set kafka.enabled=true >/dev/null || fail "kafka.enabled=true (legacy) must still render"
 render --set config.eventPublisher=kafka \

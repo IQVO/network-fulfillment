@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/ordermanagement"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/postgres"
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/retailnetwork"
 	"github.com/claudioed/network-fulfillment/internal/domain/shared"
@@ -28,6 +29,9 @@ type bootConfig struct {
 	kafkaBrokers []string
 	network      networkConfig
 	inbound      inboundConfig
+	// siteMap is NETWORK_SITE_MAP (ADR 0035), already validated: empty means
+	// no translation, which is the behaviour before the variable existed.
+	siteMap networkSiteMap
 }
 
 // networkConfig is the retail-network side of the boot configuration (ADR 0009
@@ -100,6 +104,12 @@ func loadBootConfig(get func(string) string) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	cfg.inbound = inbound
+	// The planner is wired in every mode, so the map is read in every mode.
+	siteMap, err := parseNetworkSiteMap(get("NETWORK_SITE_MAP"))
+	if err != nil {
+		return bootConfig{}, err
+	}
+	cfg.siteMap = siteMap
 	return cfg, nil
 }
 
@@ -186,6 +196,61 @@ func siteId() shared.SiteId {
 		return shared.SiteId(v)
 	}
 	return shared.SiteId("site-1")
+}
+
+// networkSiteMap translates the network's site id (what SITE_ID and the
+// network node are called: "site-1") to the warehouse site id that order-
+// management accepts as fulfillmentSiteId (the facility-layout code of the
+// building that serves it: "AUS3"). ADR 0035.
+type networkSiteMap = map[shared.SiteId]shared.SiteId
+
+// parseNetworkSiteMap parses NETWORK_SITE_MAP: comma-separated
+// networkSite=warehouseSite pairs, whitespace around every part trimmed.
+// Empty or blank means no map. It is strict because the planner has no way to
+// tell a typo from an intent: a duplicate key, an empty half, an entry with no
+// "=", an empty entry (a stray comma) or a warehouse site that is not a site
+// code refuses the boot, naming the variable and the entry, instead of
+// leaving held orders without a site that looks healthy. Two network sites may
+// share one warehouse site (one building serving two nodes).
+func parseNetworkSiteMap(raw string) (networkSiteMap, error) {
+	siteMap := networkSiteMap{}
+	if strings.TrimSpace(raw) == "" {
+		return siteMap, nil
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		network, warehouse, err := parseSiteMapEntry(entry)
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := siteMap[network]; dup {
+			return nil, fmt.Errorf("NETWORK_SITE_MAP: duplicate network site %q (entry %q)", network, entry)
+		}
+		siteMap[network] = warehouse
+	}
+	return siteMap, nil
+}
+
+// parseSiteMapEntry parses one already-trimmed networkSite=warehouseSite pair.
+func parseSiteMapEntry(entry string) (network, warehouse shared.SiteId, err error) {
+	if entry == "" {
+		return "", "", errors.New("NETWORK_SITE_MAP: empty entry (a stray comma?); each entry is networkSite=warehouseSite")
+	}
+	left, right, found := strings.Cut(entry, "=")
+	if !found {
+		return "", "", fmt.Errorf("NETWORK_SITE_MAP: entry %q is not networkSite=warehouseSite", entry)
+	}
+	left, right = strings.TrimSpace(left), strings.TrimSpace(right)
+	if left == "" {
+		return "", "", fmt.Errorf("NETWORK_SITE_MAP: entry %q has an empty network site", entry)
+	}
+	if right == "" {
+		return "", "", fmt.Errorf("NETWORK_SITE_MAP: entry %q has an empty warehouse site", entry)
+	}
+	if !ordermanagement.ValidSiteCode(right) {
+		return "", "", fmt.Errorf("NETWORK_SITE_MAP: entry %q: warehouse site %q is not a site code (uppercase ASCII letters and digits only)", entry, right)
+	}
+	return shared.SiteId(left), shared.SiteId(right), nil
 }
 
 // recomputeInterval bounds how often RecomputeCapabilityOffers runs.

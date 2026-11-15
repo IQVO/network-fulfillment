@@ -64,7 +64,13 @@ Copied from the fleet table in `warehouse-docs`
 | `inventory-storage` | Core | `wms` | Usable quantity over REST for capability offers (always on) |
 | `process-path-management` | Generic | `wes` | Path cycle times and the CPT schedule over Kafka (always on) |
 | `wes-work-planning` | Core | `wes` | Remaining path capacity over Kafka (always on) |
-| `fulfillment-execution` | Core | `wes` | No edge: shipment confirmation is an explicit REST call, not a `PackageManifested` consumer (ADR 0014) |
+| `fulfillment-execution` | Core | `wes` | No edge: `PackageManifested` is not consumed (ADR 0014) |
+| `outbound-shipping` | Supporting | `wms` | Shipment confirmation: a Kafka consumer of its `ShipmentConfirmed` event confirms the network orders on the load (ADR 0014 addendum); the REST route is the operator fallback |
+| `inbound-receiving` | Supporting | `wms` | The inbound loop registers an ASN there over REST and reads its receipt events over Kafka (live mode, ADR 0028) |
+| `product-master` | Supporting | `wms` | The inbound loop resolves each GTIN to a SKU over REST (live mode, ADR 0028) |
+
+The `outbound-shipping`, `inbound-receiving` and `product-master` rows were
+added on 2026-11-13 from the same fleet table (`warehouse-docs`, `origin/main`).
 
 The counterpart network (played by `retail-network`, ADR 0009) is outside
 the fleet's fifteen contexts and has no row in that table.

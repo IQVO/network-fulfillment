@@ -242,6 +242,16 @@ func (p *ledgerProbe) localOrderIdIndex() int {
 	return p.count(`SELECT count(*) FROM pg_indexes WHERE indexname = 'network_orders_local_order_id_idx'`)
 }
 
+// pendingShipmentColumns counts the three network_orders.pending_* columns plus
+// the partial index of migration 0015: 4 once 0015 is up, 0 after its DOWN ran.
+func (p *ledgerProbe) pendingShipmentColumns() int {
+	p.t.Helper()
+	return p.count(`SELECT
+		(SELECT count(*) FROM information_schema.columns
+		  WHERE table_name = 'network_orders' AND column_name IN ('pending_shipment_ref', 'pending_package_count', 'pending_shipment_noted_at'))
+		+ (SELECT count(*) FROM pg_indexes WHERE indexname = 'network_orders_pending_shipments')`)
+}
+
 func (p *ledgerProbe) kindRows(kind string) int {
 	p.t.Helper()
 	return p.count(`SELECT count(*) FROM network_submissions WHERE kind = $1`, kind)
@@ -333,6 +343,25 @@ func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
 	five := []string{"ACKNOWLEDGEMENT", "SHIPMENT_CONFIRMATION", "NODE_REGISTRATION", "NODE_PROFILE", "INBOUND_RECEIPT"}
 	six := append(slices.Clone(five), "INVENTORY")
 	p.expectLedgerKinds(six)
+	if p.pendingShipmentColumns() != 4 {
+		t.Fatal("after Up the pending-shipment columns and their index must exist (migration 0015)")
+	}
+
+	// The newest step down is 0015: it takes only the pending-shipment columns,
+	// their CHECKs and their index with it, and back up they return. The walk
+	// below then starts from 0014 (top is rebased to it) and finishes by
+	// bringing 0015 up again.
+	p.step(-1)
+	if got := p.version(); got != top-1 {
+		t.Fatalf("version after stepping 0015 down = %d, want %d", got, top-1)
+	}
+	if p.pendingShipmentColumns() != 0 {
+		t.Fatal("after 0015's down the pending-shipment columns and index must be gone")
+	}
+	if p.shipmentConfirmationsTable() != 1 || p.orderVersionColumn() != 1 {
+		t.Fatal("after 0015's down the 0013 and 0014 schema must survive")
+	}
+	top--
 
 	// One step down is 0014: it takes the confirmation ledger and the
 	// local_order_id join index with it — nothing else, so every table,
@@ -433,6 +462,14 @@ func TestMigrations_FreshDatabaseUpAllDownOneStepUpAgain(t *testing.T) {
 		t.Fatal("after the fifth up the local_order_id join index must exist again")
 	}
 	p.expectLedgerKinds(six)
+
+	p.step(1)
+	if got := p.version(); got != top+1 {
+		t.Fatalf("version after the sixth up = %d, want %d", got, top+1)
+	}
+	if p.pendingShipmentColumns() != 4 {
+		t.Fatal("after the sixth up the pending-shipment columns and index must exist again")
+	}
 }
 
 // TestMigration0010_UpDownUp proves the node profile migration both ways on a

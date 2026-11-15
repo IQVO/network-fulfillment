@@ -158,12 +158,18 @@ func loadProductTranslation(logger *slog.Logger) (*producttranslation.Dictionary
 // is no degraded-but-non-fatal branch to log, unlike order-management's
 // OTel-instrument-name variant. The metrics are built by the caller because the
 // retail-network breaker (ADR 0026 Decision 8) reports into the same gauge.
-func wirePlanner(metrics *telemetry.CircuitBreakerMetrics) ports.FulfillmentPlanner {
+// siteMap is NETWORK_SITE_MAP, validated at boot (ADR 0035): the planner
+// translates the network's site to the warehouse site with it, and holds no
+// other copy of it.
+func wirePlanner(metrics *telemetry.CircuitBreakerMetrics, siteMap networkSiteMap, logger *slog.Logger) ports.FulfillmentPlanner {
 	omBase := os.Getenv("ORDER_MANAGEMENT_URL")
 	if omBase == "" {
 		omBase = "http://localhost:8080"
 	}
-	rawPlanner := ordermanagement.NewPlanner(omBase, nil)
+	if len(siteMap) > 0 {
+		logger.Info("network site map loaded; held orders carry the warehouse site", "entries", len(siteMap))
+	}
+	rawPlanner := ordermanagement.NewPlanner(omBase, nil, ordermanagement.WithSiteMap(siteMap))
 	return ordermanagement.NewBreakerClient(rawPlanner, metrics)
 }
 
@@ -254,6 +260,24 @@ func wireReconcile(
 	}
 }
 
+// wireConfirmPending builds the pass that confirms the shipments noted before
+// their order was ACKNOWLEDGED (ADR 0014 addendum D7). It confirms through the
+// ONE shared ConfirmNetworkOrderShipment, so the (shipment-ref, order-id)
+// ledger keeps it exactly-once next to the event and manual paths.
+func wireConfirmPending(
+	orders ports.NetworkOrderRepo,
+	confirm *usecases.ConfirmNetworkOrderShipment,
+	pool *pgxpool.Pool,
+	logger *slog.Logger,
+) *usecases.ConfirmPendingShipments {
+	return &usecases.ConfirmPendingShipments{
+		Orders:     orders,
+		Confirm:    confirm,
+		UnitOfWork: postgres.NewUnitOfWork(pool),
+		Logger:     logger,
+	}
+}
+
 // apiDeps are the collaborators wireAPI assembles the REST server from.
 type apiDeps struct {
 	orders      ports.NetworkOrderRepo
@@ -287,6 +311,10 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 		Offers:          d.offers,
 		Logger:          d.logger,
 		ServiceName:     d.serviceName,
+		// The poNumber -> networkRef map of ADR 0026 lives in this service's
+		// Postgres in every mode (empty in stub), so the lookup of ADR 0036 is
+		// always wired and answers 404 for a number nothing recorded.
+		PurchaseOrders: retailnetwork.NewPGStore(d.pool),
 	}
 
 	api.ConfirmShipment = d.confirm

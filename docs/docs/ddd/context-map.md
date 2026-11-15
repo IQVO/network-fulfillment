@@ -14,6 +14,7 @@ flowchart LR
     PPM["process-path-management<br/>Generic"]
     WWP["wes-work-planning<br/>Core"]
     FE["fulfillment-execution<br/>Core"]
+    OSH["outbound-shipping<br/>Supporting"]
     CON["warehouse-console<br/>frontend shell"]
     AGT["MCP clients<br/>AI agents"]
     SUB["any subscriber<br/>none found"]
@@ -26,7 +27,8 @@ flowchart LR
     NF -->|"U to D: OHS<br/>REST GET /network-orders, /inbound-status<br/>web remote"| CON
     NF -->|"U to D: OHS<br/>MCP read-only tools"| AGT
     NF -.->|"U to D: OHS+PL<br/>Kafka networkorder.* CloudEvents"| SUB
-    FE -. "U/D none: deliberately absent, no PackageManifested correlation, ADR 0014" .- NF
+    OSH -->|"U to D: C/S<br/>Kafka ShipmentConfirmed<br/>every mode"| NF
+    FE -. "U/D none: PackageManifested is not consumed, ADR 0014" .- NF
 ```
 
 Source: `internal/adapters/outbound/retailnetwork/mode.go`,
@@ -35,7 +37,8 @@ Source: `internal/adapters/outbound/retailnetwork/mode.go`,
 `internal/adapters/outbound/processpathcache/consumer.go`,
 `internal/adapters/outbound/pathcapacitycache/consumer.go`,
 `internal/adapters/outbound/kafka/publisher.go`,
-`internal/adapters/inbound/http/server.go`, `internal/adapters/inbound/mcp/tools.go`,
+`internal/adapters/inbound/http/server.go`, `internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`,
+`internal/adapters/inbound/mcp/tools.go`,
 `web/src/screens/NetworkFulfillmentScreen.tsx`, `cmd/netfulfil/main.go`,
 `docs/adr/0014-explicit-shipment-confirmation-endpoint.md`.
 
@@ -67,7 +70,8 @@ quantities per SKU and never reads a SKU's classification or dimensions.
 | network-fulfillment | `warehouse-console` (via `web/` remote) | **Open Host** | REST `GET /network-orders`, `GET /inbound-status` | **Live** | `web/src/screens/NetworkFulfillmentScreen.tsx`; ADR 0010 |
 | network-fulfillment | MCP clients | **Open Host** (read-only) | MCP `get_network_order`, `list_network_orders`, `list_capability_offers`, `get_acknowledgement_report` | **Live** (`cmd/mcp`). No fleet MCP client found in the local `warehouse-ops-agent` checkout | `internal/adapters/inbound/mcp/tools.go`, `report_tool.go` |
 | network-fulfillment | any subscriber | **Open Host + Published Language** | Kafka `warehouse.network-fulfillment.events`, `com.warehouse.wes.network-fulfillment.networkorder.<Event>` | **Wired-but-unused.** Published through the outbox relay (always on); no consumer found in the local fleet checkouts | `internal/adapters/outbound/kafka/publisher.go`; `apis/asyncapi.yaml` |
-| `fulfillment-execution` | network-fulfillment | none | would be Kafka `PackageManifested` | **Deliberately absent** (ADR 0014): there is no persisted `WorkUnitId -> NetworkRef` mapping, so shipment confirmation is an explicit REST call instead | `internal/application/usecases/confirm_network_order_shipment.go` doc comment |
+| `outbound-shipping` | network-fulfillment | **Customer/Supplier** (outbound-shipping ADR 0001) | Kafka `warehouse.outbound-shipping.events`, CE type `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed`; group `OUTBOUND_SHIPPING_CONSUMER_GROUP` | **Wired, every mode.** Primary trigger of shipment confirmation: `orders[].order_id` joins `NetworkOrder.localOrderId` (ADR 0014 addendum) | `internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`, `cmd/netfulfil/outbound_shipping.go` |
+| `fulfillment-execution` | network-fulfillment | none | would be Kafka `PackageManifested` | **Deliberately absent** (ADR 0014): `PackageManifested` is not consumed; the trigger is outbound-shipping's `ShipmentConfirmed`, joined on `localOrderId` (ADR 0014 addendum) | `internal/application/usecases/confirm_network_order_shipment.go` doc comment |
 
 ## Notes on the patterns
 

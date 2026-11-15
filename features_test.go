@@ -73,6 +73,7 @@ func TestFeatures(t *testing.T) {
 type world struct {
 	clock     *fixedClock
 	orders    *memory.NetworkOrderRepo
+	poIndex   *memory.PurchaseOrderIndex
 	offers    *memory.CapabilityOfferRepo
 	dict      *producttranslation.Dictionary
 	gateway   *recordingGateway
@@ -92,6 +93,7 @@ type world struct {
 	sweepHolds    *usecases.SweepOrphanedHolds
 	rejectOverdue *usecases.RejectOverdueOrders
 	recompute     *usecases.RecomputeCapabilityOffers
+	confirm       *usecases.ConfirmNetworkOrderShipment
 	poller        *poller.Poller
 	inboundW      *inboundWorld
 
@@ -117,6 +119,7 @@ func (w *world) reset() {
 
 	w.clock = newFixedClock(time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC))
 	w.orders = memory.NewNetworkOrderRepo()
+	w.poIndex = memory.NewPurchaseOrderIndex()
 	w.offers = memory.NewCapabilityOfferRepo()
 	w.dict = producttranslation.New()
 	w.gateway = newRecordingGateway(retailnetwork.NewStubGateway(logger))
@@ -152,6 +155,12 @@ func (w *world) reset() {
 		Offers: w.offers, Clock: w.clock, Logger: logger, SiteId: "site-1",
 	}
 	w.poller = poller.New(w.gateway, w.receive, w.clock, poller.Config{Interval: time.Hour}, logger)
+	// One confirmation use case for the REST route and the shipment consumer,
+	// wired as cmd/netfulfil wires it, ledger included (ADR 0014 addendum).
+	w.confirm = &usecases.ConfirmNetworkOrderShipment{
+		Orders: w.orders, Gateway: w.gateway, Events: w.bus, Clock: w.clock,
+		Confirmations: memory.NewShipmentConfirmationLog(),
+	}
 
 	w.offersEnabled = true
 	w.demands = map[string]contract.InboundDemand{}
@@ -168,15 +177,14 @@ func (w *world) apiServer() *httptest.Server {
 	if w.api == nil {
 		s := &inboundhttp.Server{
 			Orders:          w.orders,
+			PurchaseOrders:  w.poIndex,
 			Poller:          w.poller,
 			Clock:           w.clock,
 			NetworkMode:     string(retailnetwork.ModeStub),
 			Readiness:       w.readiness,
 			MetricsRegistry: w.metrics.Registry,
-			ConfirmShipment: &usecases.ConfirmNetworkOrderShipment{
-				Orders: w.orders, Gateway: w.gateway, Events: w.bus, Clock: w.clock,
-			},
-			Idempotency: memory.NewIdempotencyStore(),
+			ConfirmShipment: w.confirm,
+			Idempotency:     memory.NewIdempotencyStore(),
 		}
 		if w.offersEnabled {
 			s.Offers = w.offers
@@ -341,6 +349,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^(\d+) (second|minute|hour)s? (?:pass|passes)$`, w.timePasses)
 
 	w.registerOrderSteps(sc)
+	w.registerPurchaseOrderSteps(sc)
 	w.registerLifecycleSteps(sc)
 	w.registerHoldSteps(sc)
 	w.registerOpsSteps(sc)
@@ -349,4 +358,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w.registerReportSteps(sc)
 	w.registerHardeningSteps(sc)
 	w.registerInboundSteps(sc)
+	w.registerRuleSteps(sc)
+	w.registerSupplySteps(sc)
+	w.registerShipmentSteps(sc)
 }

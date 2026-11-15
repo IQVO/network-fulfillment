@@ -425,3 +425,8 @@ before merge, in this order:
    below physical stock", and "demand whose required ship-by precedes
    the earliest feasible cutoff is rejected rather than accepted".
    Neither can pass by accident.
+
+## Addendum 2026-11-13: current state
+
+- §6: the sweep does not find orders "approaching" `acknowledgeBy`. `SweepAcknowledgementDeadlines` lists the unanswered orders (`ListUnanswered`) and raises `AcknowledgementDeadlineAtRisk` only for an order already past `acknowledgeBy` (`NetworkOrder.AcknowledgementOverdue`: state `NEW` and `now` after `acknowledgeBy`), in `internal/application/usecases/sweep_acknowledgement_deadlines.go` and `internal/domain/networkorder/network_order.go`. It still never mutates the aggregate; `RejectOverdueOrders` does the rejecting.
+- Rollout step 6: shipment confirmation is not driven by `PackageManifested`. ADR 0014 and its 2026-11-06 addendum replaced that trigger with a consumer of outbound-shipping's `ShipmentConfirmed` (`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`).

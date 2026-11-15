@@ -25,6 +25,9 @@ Three assertions, for a stub render and for a live render:
   3. The mode-specific variables appear only in their mode: NETWORK_BASE_URL,
      NETWORK_VENDOR_ID, NETWORK_NODES_FILE, NETWORK_PROFILE_INTERVAL and NETWORK_INVENTORY_INTERVAL only in live,
      NETWORK_SEED_FILE only in stub (the binary refuses it against the live gateway).
+     NETWORK_SITE_MAP (ADR 0035) is read in every mode, so both renders set
+     config.networkSiteMap and must render it (render_test.sh owns the "empty
+     renders nothing" half).
 
 Run: python3 charts/network-fulfillment/tests/test_env_parity.py
 """
@@ -59,6 +62,9 @@ LIVE_ONLY = {"NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE", "NET
              "INBOUND_RECEIVING_URL", "PRODUCT_MASTER_URL", "INBOUND_INTAKE_INTERVAL",
              "INBOUND_RECEIPT_CONSUMER_GROUP"}
 STUB_ONLY = {"NETWORK_SEED_FILE"}
+# Read in both modes (the order-management planner is wired in every mode) and
+# rendered from an optional chart value: both renders below set it.
+BOTH_MODES = {"NETWORK_SITE_MAP"}
 
 # The calls that read the environment. `get(` is the accessor loadBootConfig and
 # loadNetworkConfig are handed (os.Getenv in production, a map in the tests).
@@ -69,6 +75,8 @@ _READERS = [
 ]
 
 STUB_VALUES = """
+config:
+  networkSiteMap: site-1=AUS3
 productTranslation:
   mappings:
     - networkProductId: LST-1
@@ -92,6 +100,7 @@ config:
   inboundReceivingUrl: http://inbound-receiving.invalid
   productMasterUrl: http://product-master.invalid
   inboundReceiptConsumerGroup: network-fulfillment-inbound-receipts
+  networkSiteMap: site-1=AUS3
 productTranslation:
   mappings:
     - networkProductId: LST-1
@@ -192,12 +201,13 @@ def check_mode(label: str, values: str, binary: set[str], only_here: set[str], n
 def main() -> int:
     binary = binary_env()
     expected_core = {"NETWORK_MODE", "NETWORK_BASE_URL", "NETWORK_VENDOR_ID", "NETWORK_NODES_FILE", "NETWORK_SEED_FILE",
-                     "DATABASE_URL", "KAFKA_BROKERS", "PORT", "SITE_ID", "ENVIRONMENT", "CORS_ALLOWED_ORIGINS"}
+                     "DATABASE_URL", "KAFKA_BROKERS", "PORT", "SITE_ID", "ENVIRONMENT", "CORS_ALLOWED_ORIGINS",
+                     "NETWORK_SITE_MAP"}
     missed = sorted(expected_core - binary)
     assert not missed, f"the source scan did not find {missed}: it no longer recognises how the binary reads them"
 
-    check_mode("stub", STUB_VALUES, binary, only_here=STUB_ONLY, not_here=LIVE_ONLY)
-    check_mode("live", LIVE_VALUES, binary, only_here=LIVE_ONLY, not_here=STUB_ONLY)
+    check_mode("stub", STUB_VALUES, binary, only_here=STUB_ONLY | BOTH_MODES, not_here=LIVE_ONLY)
+    check_mode("live", LIVE_VALUES, binary, only_here=LIVE_ONLY | BOTH_MODES, not_here=STUB_ONLY)
     print("\nAll environment parity assertions passed.")
     return 0
 

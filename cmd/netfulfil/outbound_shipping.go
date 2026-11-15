@@ -50,6 +50,19 @@ func wireConfirmShipment(in infra, events ports.EventPublisher) *usecases.Confir
 	}
 }
 
+// wireDeferShipment builds the use case the ShipmentConfirmed consumer falls
+// back to when a load departs before its order is ACKNOWLEDGED (ADR 0014
+// addendum D7): it records the shipment on the order, in the Postgres
+// UnitOfWork like every other write, for runConfirmPending to settle.
+func wireDeferShipment(in infra, logger *slog.Logger) *usecases.DeferShipmentConfirmation {
+	return &usecases.DeferShipmentConfirmation{
+		Orders:     in.orders,
+		Clock:      system.Clock{},
+		UnitOfWork: postgres.NewUnitOfWork(in.pool),
+		Logger:     logger,
+	}
+}
+
 // shipmentConfirmedLoop runs the ShipmentConfirmed consumer until its
 // context ends. onDeath is called when the consumer stops on its own: the
 // process must not keep running half deaf, so it asks for the whole
@@ -71,13 +84,14 @@ func startShipmentConfirmedLoop(
 	group string,
 	orders ports.NetworkOrderRepo,
 	confirm *usecases.ConfirmNetworkOrderShipment,
+	deferShipment *usecases.DeferShipmentConfirmation,
 	brokers []string,
 	logger *slog.Logger,
 ) (*shipmentConfirmedLoop, context.CancelFunc) {
 	loopCtx, cancel := context.WithCancel(ctx)
 	loop := &shipmentConfirmedLoop{
 		consumer: inboundkafka.NewShipmentConfirmedConsumer(
-			brokers, inboundkafka.OutboundShippingTopic, group, orders, confirm, logger),
+			brokers, inboundkafka.OutboundShippingTopic, group, orders, confirm, deferShipment, logger),
 		logger:  logger,
 		onDeath: requestShutdown,
 	}

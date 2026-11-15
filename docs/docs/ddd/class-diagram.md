@@ -22,6 +22,7 @@ classDiagram
         -receivedAt time.Time
         -holdOutcome HoldOutcome nullable
         -holdSettledAt time.Time nullable
+        -pendingShipment PendingShipment nullable
         +Receive(ref, siteId, requiredShipBy, lines, receivedAt)$ NetworkOrder
         +ReceiveUntranslatable(ref, siteId, requiredShipBy, receivedAt)$ NetworkOrder
         +Rehydrate(...)$ NetworkOrder
@@ -35,6 +36,9 @@ classDiagram
         +HoldOpen() bool
         +HoldOrphaned(now, grace) bool
         +CommittedLocalOrderId() LocalOrderId nullable
+        +NoteShipmentBeforeAcknowledge(shipmentRef, packageCount, now) error
+        +PendingShipment() PendingShipment nullable
+        +DropPendingShipment()
         +ConfirmShipment() error
         +AcknowledgementOverdue(now) bool
         +SKUQuantities() Map~SKU,int~
@@ -93,6 +97,7 @@ classDiagram
         +ListSubmitted(ctx) NetworkOrder[]
         +ListAll(ctx) NetworkOrder[]
         +ListOpenHolds(ctx) NetworkOrder[]
+        +ListPendingShipments(ctx, limit) NetworkOrder[]
     }
 
     NetworkOrder "1" *-- "0..*" Line : lines
@@ -109,11 +114,12 @@ classDiagram
 
 Source: `internal/domain/networkorder/network_order.go`,
 `internal/domain/networkorder/hold.go`,
+`internal/domain/networkorder/pending_shipment.go`,
 `internal/domain/shared/shared.go`, `internal/application/ports/ports.go`.
 
 Omitted: the read accessors (`NetworkRef()`, `State()`, `HoldOutcome()`,
-`HoldSettledAt()` and so on), `RestoreHold` (the repository's way to rebuild a
-persisted outcome), the `AcknowledgementWindow` constant (24h), and the error
+`HoldSettledAt()` and so on), `RestoreHold` and `RestorePendingShipment` (the repository's
+way to rebuild a persisted outcome or pending shipment), the `AcknowledgementWindow` constant (24h), and the error
 variables (listed on
 [aggregate-design-canvas.md](/docs/ddd/aggregate-design-canvas)). The hold is not a
 `State`: `HoldOutcome` is orthogonal to it (ADR 0024), and unset means the hold

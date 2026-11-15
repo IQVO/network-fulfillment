@@ -221,6 +221,20 @@ config:
   # Only read when config.networkMode is "live"; rendered only then. No default.
   networkVendorId: ""
 
+  # NETWORK_SITE_MAP (ADR 0035): comma-separated networkSite=warehouseSite pairs,
+  # for example "site-1=AUS3". The network's site id is what SITE_ID and the
+  # network node are called ("site-1"); the warehouse site is the facility-layout
+  # code of the building that serves it ("AUS3", uppercase letters and digits).
+  # A held order carries the warehouse site as fulfillmentSiteId, which
+  # order-management only accepts in that form; without an entry a site that is
+  # not a site code is omitted and the order reaches downstream with no site.
+  # Read in EVERY network mode. EMPTY BY DEFAULT: not rendered, and the held
+  # order is sent exactly as before. The binary is strict and REFUSES TO BOOT on
+  # a duplicate network site, an empty half or entry, or a warehouse site that is
+  # not a site code, so a typo is a failed rollout, not a silent no-op. It does
+  # not change which node the service adopts (SITE_ID), nor any other id.
+  networkSiteMap: ""
+
   # NETWORK_PROFILE_INTERVAL, how often the node profile (cutoffs, handling time,
   # throughput) is re-derived from the local caches and, when its content changed,
   # declared to the network (ADR 0027). A Go duration; "0" switches the

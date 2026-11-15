@@ -60,15 +60,18 @@ packages and never hand-roll an envelope struct.
 - Published types: `com.warehouse.wes.network-fulfillment.networkorder.`
   + `NetworkOrderReceived` | `NetworkOrderSubmitted` |
   `NetworkOrderAcknowledged.v2` | `NetworkOrderRejected` |
-  `NetworkOrderShipmentConfirmed` | `AcknowledgementDeadlineAtRisk` — six
-  events, all on BOTH topics (ADR 0015, 0016). `NetworkOrderSubmitted` fires
+  `NetworkOrderShipmentConfirmed` | `AcknowledgementDeadlineAtRisk` |
+  `OrphanedHoldCancelled` — seven events, all on BOTH topics (ADR 0015, 0016,
+  0024). `NetworkOrderSubmitted` fires
   when the order moves to SUBMITTED (what `NetworkOrderAcknowledged` v1 used
   to announce); `NetworkOrderAcknowledged` (v2 type + `:v2` dataschema) fires
   only when reconciliation settles the order ACKNOWLEDGED. Both are raised in
   the same atomic save as the state change. The analytics projector handles
   Received/Acknowledged/Rejected, claims Submitted with no report effect, and
   still recognises the historic unsuffixed Acknowledged v1 forever (a replay
-  must keep the same report numbers); it ignores the other two.
+  must keep the same report numbers); it ignores the other three
+  (`NetworkOrderShipmentConfirmed`, `AcknowledgementDeadlineAtRisk`,
+  `OrphanedHoldCancelled`).
 
 ## Consumer rules
 

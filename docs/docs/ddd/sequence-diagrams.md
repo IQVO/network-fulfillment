@@ -204,7 +204,9 @@ non-2xx answer; the orphaned-hold sweep is the one that reads `404` and
 (default `1h`), so it normally finds nothing. It never calls `Reject()`. It is
 not started when `ORPHAN_HOLD_SWEEP_ENABLED=false`.
 
-## 4. ConfirmNetworkOrderShipment (REST)
+## 4. ConfirmNetworkOrderShipment (REST route and ShipmentConfirmed consumer)
+
+The REST route, the operator fallback:
 
 ```mermaid
 sequenceDiagram
@@ -218,40 +220,101 @@ sequenceDiagram
     participant PUB as Publisher
     participant GW as NetworkGateway (stub)
     C->>H: POST /network-orders/networkRef/shipment-confirmation
-    H->>UC: Execute(ref)
+    H->>UC: Execute(ref) = ExecuteForShipment(ref, ref, 1)
     UC->>R: FindByRef(ref)
     alt not found
         UC-->>H: ErrOrderNotFound
         H-->>C: 404 problem+json network-order-not-found
-    else already CONFIRMED
+    else already CONFIRMED or (shipment, order) already in the ledger
         UC-->>H: order unchanged
         H-->>C: 204
     else found
-        UC->>A: ConfirmShipment()
+        UC->>A: CheckConfirmable()
         alt state is not ACKNOWLEDGED
             A-->>UC: ErrConfirmBeforeAcknowledge
             H-->>C: 409 problem+json confirm-before-acknowledge
         else ACKNOWLEDGED
-            UC->>U: Execute: Save CONFIRMED + Publish NetworkOrderShipmentConfirmed
-            UC->>GW: SubmitShipmentConfirmation(ref)
+            UC->>GW: RequestLabel(ref, 1)
+            UC->>A: ConfirmShipment()
+            UC->>U: Execute: Save CONFIRMED + record ledger row + Publish NetworkOrderShipmentConfirmed
+            UC->>GW: SubmitShipmentConfirmation(ref, now)
             UC-->>H: order
             H-->>C: 204
         end
     end
 ```
 
+The event path, the primary trigger (every mode):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant K as Kafka (outbound-shipping.events)
+    participant SC as ShipmentConfirmedConsumer
+    participant R as NetworkOrderRepo
+    participant UC as ConfirmNetworkOrderShipment
+    participant D as DeferShipmentConfirmation
+    K->>SC: ShipmentConfirmed (load_id, orders[])
+    loop each orders[].order_id
+        SC->>R: FindByLocalOrderId(order_id)
+        alt no NetworkOrder carries it
+            SC->>SC: log and skip (a local order)
+        else found
+            SC->>UC: ExecuteForShipment(ref, load_id, package_count)
+            Note right of UC: the steps of the diagram above, from FindByRef on
+            opt ErrConfirmBeforeAcknowledge
+                SC->>D: Execute(ref, load_id, package_count)
+                alt the order is SUBMITTED
+                    D->>R: Save the order with the pending shipment
+                    SC->>SC: log "deferred" and go on to the next order
+                else any other state
+                    D-->>SC: ErrConfirmBeforeAcknowledge (retried, then the .dlq)
+                end
+            end
+        end
+    end
+    SC->>K: commit the offset (a message that keeps failing goes to the .dlq first)
+```
+
+The pending shipment is settled by a ticker, once the order is `ACKNOWLEDGED`:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as runConfirmPending ticker
+    participant P as ConfirmPendingShipments
+    participant R as NetworkOrderRepo
+    participant UC as ConfirmNetworkOrderShipment
+    T->>P: Execute() every POLL_INTERVAL
+    P->>R: ListPendingShipments(100)
+    loop each order that carries a pending shipment
+        alt ACKNOWLEDGED
+            P->>UC: ExecuteForShipment(ref, shipment_ref, package_count)
+            Note right of UC: the steps of the first diagram; the confirm clears the shipment
+        else SUBMITTED
+            P->>P: skip, the shipment waits
+        else CONFIRMED or REJECTED
+            P->>R: Save with the shipment dropped
+        end
+    end
+```
+
 Source: `internal/application/usecases/confirm_network_order_shipment.go`,
+`internal/adapters/inbound/kafka/shipment_confirmed_consumer.go`,
 `internal/adapters/inbound/http/server.go` (`handleConfirmShipment`),
 `internal/adapters/inbound/http/errors.go`.
 
-Omitted: an empty `networkRef` returns 422 (`ErrEmptyNetworkRef`). A failed
-`SubmitShipmentConfirmation` returns 500 after the record has committed;
-a retry is then a no-op that returns 204 without re-submitting. The 409
-for `ErrConfirmBeforeAcknowledge` is a case in `statusFor`/`problemFor`
-(`errors.go`), pinned by `TestHandleConfirmShipment_BeforeAcknowledgeReturns409`.
-The route is registered only when `ConfirmShipment` is wired,
-which `cmd/netfulfil` always does. CORS allows `GET/POST/OPTIONS`, so a
-browser can call this route cross-origin.
+Omitted: an empty `networkRef` returns 422 (`ErrEmptyNetworkRef`). The label is
+requested before `ConfirmShipment`, so a failed label leaves the order
+`ACKNOWLEDGED` and the call retryable. A failed `SubmitShipmentConfirmation`
+returns 500 after the record has committed; a retry is then a no-op that
+returns 204 without re-submitting. On the event path the same error, for an order still `SUBMITTED`, defers the
+shipment onto the order (ADR 0014 addendum D7); for a `NEW` or `REJECTED` order it is
+retried and then dead-lettered. The 409 for `ErrConfirmBeforeAcknowledge` is a case in
+`statusFor`/`problemFor` (`errors.go`), pinned by
+`TestHandleConfirmShipment_BeforeAcknowledgeReturns409`. The route is registered
+only when `ConfirmShipment` is wired, which `cmd/netfulfil` always does. CORS
+allows `GET/POST/OPTIONS`, so a browser can call this route cross-origin.
 
 ## 5. RecomputeCapabilityOffers (ticker, RECOMPUTE_INTERVAL)
 
