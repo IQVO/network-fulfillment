@@ -27,6 +27,14 @@ case — every route is a pure projection of stored state.
 - `GET /network-orders` — orders still `NEW` (`{"networkOrders": [...]}`).
 - `GET /network-orders/{networkRef}` — one order with its lines, `state`,
   `acknowledgeBy`, `acknowledgementOverdue` and `localOrderId` (once linked).
+- `GET /purchase-orders/{poNumber}` — the same order as the line above, found by
+  the network's purchase-order number (ADR 0036); registered only when
+  `Server.PurchaseOrders` (`ports.PurchaseOrderIndex`, the poNumber -> networkRef map
+  the `retailnetwork` adapter keeps) is set. A keyed read, never a listing: any query
+  parameter is 400 `unknown-query-parameter`, a number that is not 1-128 URL-safe
+  characters is 400 `invalid-purchase-order-number`, an unknown one is 404
+  `purchase-order-not-found` (`usecases.ErrPurchaseOrderNotFound`). The number
+  appears in this route, that port and the Postgres adapter only.
 - `GET /readyz` — readiness; `GET /metrics` only when a metrics registry is wired.
 - `GET /capability-offers` — registered only when `Server.Offers` is set
   (ADR 0001 section 8).

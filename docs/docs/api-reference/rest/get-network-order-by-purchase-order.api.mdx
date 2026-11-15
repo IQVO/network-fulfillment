@@ -1,0 +1,77 @@
+---
+id: get-network-order-by-purchase-order
+title: "Get the network order of one purchase order"
+description: "The same `NetworkOrder` that `GET /network-orders/{networkRef}` returns (state, site, `requiredShipBy`, `acknowledgeBy`, `receivedAt`, `acknowledgementOverdue`, `networkRef`, the lines, and `localOrderId` once the order was acknowledged), found by the network's purchase-order number instead of by `networkRef`."
+sidebar_label: "Get the network order of one purchase order"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/network-fulfillment-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Get the network order of one purchase order"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/purchase-orders/{poNumber}"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+The same `NetworkOrder` that `GET /network-orders/{networkRef}` returns (state, site, `requiredShipBy`, `acknowledgeBy`, `receivedAt`, `acknowledgementOverdue`, `networkRef`, the lines, and `localOrderId` once the order was acknowledged), found by the network's purchase-order number instead of by `networkRef`.
+
+This route exists for a caller that knows only the purchase-order number. The `networkRef` is minted by this context the first time a purchase order is seen and is never derived from the number (ADR 0026), so nobody outside can work it out; the purchase-order number is known outside. With this route such a caller can follow a purchase order to the order-management order raised for it: read `localOrderId` from the answer (ADR 0036).
+
+It is a KEYED READ, not a listing. It answers for exactly one purchase-order number, takes no query parameter (any is a 400 `unknown-query-parameter`) and has no paging, so it does not widen `GET /network-orders`, which stays the only list. It reads the same stored order as its sibling, so the two always agree.
+
+A `404 purchase-order-not-found` means this context holds no demand for that number: it was never polled, or the poll that would bring it has not run yet (a caller waiting for a purchase order it expects should retry). In `NETWORK_MODE=stub` nothing keeps the map from purchase-order number to `networkRef` (ADR 0026: the map tables stay empty), so every number is a 404 there; the stub's demand is read by `networkRef`.
+
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./get-network-order-by-purchase-order.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./get-network-order-by-purchase-order.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./get-network-order-by-purchase-order.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

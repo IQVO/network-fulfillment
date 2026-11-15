@@ -158,6 +158,7 @@ func TestLiveDemand_PollToShipmentConfirmation(t *testing.T) {
 
 	t.Run("the demand loop ran against the network", func(t *testing.T) { expectDemandLoopRan(t, ctx, rig, ref) })
 	t.Run("one held order, one acknowledgement, then the release", func(t *testing.T) { expectOneAnswerThenRelease(t, ctx, rig, ref) })
+	t.Run("the order is read by its purchase-order number, with its local order", func(t *testing.T) { expectReadByPurchaseOrder(t, ctx, rig, ref) })
 	t.Run("an explicit shipment confirmation requests the label and confirms once", func(t *testing.T) { expectShipmentConfirmedOnce(t, ctx, rig, ref) })
 	t.Run("the events leave through the outbox", func(t *testing.T) { expectOutboxEvents(t, ctx, rig, ref) })
 
@@ -211,6 +212,37 @@ func expectOneAnswerThenRelease(t *testing.T, ctx context.Context, rig *liveRig,
 	expectEqual(t, "acknowledgement ledger", rig.text(t, ctx, `SELECT status FROM network_submissions WHERE kind = 'ACKNOWLEDGEMENT' AND subject = $1`, ref), "SUCCESS")
 	if body := rig.network.bodyOf("/vendor/acknowledgements"); !strings.Contains(body, `"decision":"ACCEPT"`) || !strings.Contains(body, `"quantity":2`) {
 		t.Fatalf("acknowledgement body = %s, want an ACCEPT echoing the ordered quantity", body)
+	}
+}
+
+// expectReadByPurchaseOrder checks the keyed read of ADR 0036 through the real entry point: a caller
+// that knows only the network's purchase-order number reaches the order the service minted a
+// NetworkRef for, and its local order, and the number is not the ref.
+func expectReadByPurchaseOrder(t *testing.T, ctx context.Context, rig *liveRig, ref string) {
+	t.Helper()
+	code, body := e2eDo(t, ctx, http.MethodGet, rig.env.url("/purchase-orders/"+livePO), "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /purchase-orders/%s = %d %s, want 200", livePO, code, body)
+	}
+	for _, want := range []string{`"networkRef":"` + ref + `"`, `"state":"ACKNOWLEDGED"`, `"localOrderId":"om-live-1"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET /purchase-orders/%s = %s, want it to contain %s", livePO, body, want)
+		}
+	}
+	// The very representation of the sibling route, for the ref the service minted.
+	byRefCode, byRef := e2eDo(t, ctx, http.MethodGet, rig.env.url("/network-orders/"+ref), "")
+	if byRefCode != http.StatusOK || byRef != body {
+		t.Fatalf("GET /network-orders/%s = %d %s, want 200 and the same body as by purchase order: %s", ref, byRefCode, byRef, body)
+	}
+	// The number is not the ref (ADR 0026 stays: the ref is minted), and the ref is not a number.
+	if code, body := e2eDo(t, ctx, http.MethodGet, rig.env.url("/network-orders/"+livePO), ""); code != http.StatusNotFound || !strings.Contains(body, "network-order-not-found") {
+		t.Fatalf("GET /network-orders/%s = %d %s, want the sibling's 404", livePO, code, body)
+	}
+	if code, body := e2eDo(t, ctx, http.MethodGet, rig.env.url("/purchase-orders/"+ref), ""); code != http.StatusNotFound || !strings.Contains(body, "purchase-order-not-found") {
+		t.Fatalf("GET /purchase-orders/%s = %d %s, want 404 purchase-order-not-found", ref, code, body)
+	}
+	if code, body := e2eDo(t, ctx, http.MethodGet, rig.env.url("/purchase-orders/PO-LIVE-UNKNOWN"), ""); code != http.StatusNotFound || !strings.Contains(body, "purchase-order-not-found") {
+		t.Fatalf("GET /purchase-orders/PO-LIVE-UNKNOWN = %d %s, want 404 purchase-order-not-found", code, body)
 	}
 }
 

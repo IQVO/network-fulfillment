@@ -20,7 +20,8 @@ const problemMalformedBody = "malformed-request-body"
 // statusFor maps a typed domain/application error to an HTTP status code.
 func statusFor(err error) int {
 	switch {
-	case errors.Is(err, usecases.ErrOrderNotFound):
+	case errors.Is(err, usecases.ErrOrderNotFound),
+		errors.Is(err, usecases.ErrPurchaseOrderNotFound):
 		return http.StatusNotFound
 
 	// The order exists but is in the wrong lifecycle state for this
@@ -81,6 +82,9 @@ func problemFor(err error) problemInfo {
 	switch {
 	case errors.Is(err, usecases.ErrOrderNotFound):
 		return problemInfo{"network-order-not-found", "Network order not found"}
+
+	case errors.Is(err, usecases.ErrPurchaseOrderNotFound):
+		return problemInfo{"purchase-order-not-found", "Purchase order not found"}
 
 	case errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge):
 		return problemInfo{"confirm-before-acknowledge", "Shipment cannot be confirmed before the order is acknowledged"}

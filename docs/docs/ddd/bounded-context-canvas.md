@@ -157,6 +157,7 @@ ship-to PII enters this context at all.
 | Operator (fallback) | Confirm shipment | Command | REST `POST /network-orders/{networkRef}/shipment-confirmation` (ADR 0014) | Open Host (unauthenticated) |
 | Operators, `web/` remote in `warehouse-console` | List unanswered orders | Query | REST `GET /network-orders` | Open Host |
 | Operators | Get one order | Query | REST `GET /network-orders/{networkRef}` | Open Host |
+| Any caller that knows the network's purchase-order number (first: the e2e retail-day collector) | Get the order of one purchase order | Query | REST `GET /purchase-orders/{poNumber}` (ADR 0036): a keyed read of the same order, with its `localOrderId`; not a listing | Open Host |
 | Operators, `web/` remote | Inbound leg health | Query | REST `GET /inbound-status` | Open Host |
 | Operators | Capability offers | Query | REST `GET /capability-offers` | Open Host |
 | Kubernetes / Prometheus | Liveness, readiness, metrics | Query | REST `GET /healthz`, `GET /readyz`, `GET /metrics` | — |

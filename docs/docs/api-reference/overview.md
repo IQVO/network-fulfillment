@@ -36,6 +36,7 @@ protocol, described by the Agent Card and by the A2A rows above and in
 | --- | --- | --- | --- |
 | network-orders | `GET /network-orders` | `listUnansweredNetworkOrders` | `200 {networkOrders: [...]}`, only `NEW` orders, soonest `acknowledgeBy` first |
 | network-orders | `GET /network-orders/{networkRef}` | `getNetworkOrder` | `200`, one order in any state, with both vocabularies per line; `404 network-order-not-found` |
+| network-orders | `GET /purchase-orders/{poNumber}` | `getNetworkOrderByPurchaseOrder` | `200`, the same order as `GET /network-orders/{networkRef}` (with `localOrderId` once acknowledged), found by the network's purchase-order number: a keyed read, not a listing, no query parameter; `404 purchase-order-not-found`, `400 invalid-purchase-order-number`, `400 unknown-query-parameter` (ADR 0036) |
 | network-orders | `POST /network-orders/{networkRef}/shipment-confirmation` | `confirmNetworkOrderShipment` | `204`, empty body; `404 network-order-not-found`, `409 confirm-before-acknowledge` (ADR 0014) |
 | capability-offers | `GET /capability-offers` | `listCapabilityOffers` | `200 {capabilityOffers: [...]}` per SKU and site, `basis` `PHYSICAL` or `THROUGHPUT_CONSTRAINED` |
 | operations | `GET /inbound-status` | `getInboundStatus` | `200`, network mode, poller counters, `unanswered`, `overdue` |

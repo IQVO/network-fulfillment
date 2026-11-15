@@ -311,6 +311,10 @@ func wireAPI(d apiDeps) *inboundhttp.Server {
 		Offers:          d.offers,
 		Logger:          d.logger,
 		ServiceName:     d.serviceName,
+		// The poNumber -> networkRef map of ADR 0026 lives in this service's
+		// Postgres in every mode (empty in stub), so the lookup of ADR 0036 is
+		// always wired and answers 404 for a number nothing recorded.
+		PurchaseOrders: retailnetwork.NewPGStore(d.pool),
 	}
 
 	api.ConfirmShipment = d.confirm

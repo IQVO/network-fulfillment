@@ -358,6 +358,22 @@ curl -s http://localhost:8000/api/network-fulfillment/network-orders
 the first clean pass; `overdue` should be 0. See
 [troubleshooting](/docs/operations/troubleshooting) when it is not.
 
+### Follow a purchase order to its order-management order
+
+When all you have is the network's purchase-order number (the `networkRef` is
+minted here and is not derived from it, ADR 0026), read the order by that number
+(ADR 0036). `localOrderId` is the order-management order raised for it, present
+once the order is acknowledged.
+
+```bash
+curl -s http://localhost:8000/api/network-fulfillment/purchase-orders/PO-7f3c
+```
+
+It is a keyed read: no query parameters and no paging. `404 purchase-order-not-found`
+means nothing was received for that number (yet); in `NETWORK_MODE=stub` it is always
+the answer, because the number-to-`networkRef` map is only written by the live
+adapter.
+
 ### Confirm a shipment
 
 Normally nothing to do: the `ShipmentConfirmed` event of outbound-shipping

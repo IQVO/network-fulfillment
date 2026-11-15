@@ -33,6 +33,7 @@ func TestEveryMappedErrorHasItsOwnProblemType(t *testing.T) {
 	// the list is explicit rather than derived.
 	mapped := []error{
 		usecases.ErrOrderNotFound,
+		usecases.ErrPurchaseOrderNotFound,
 		shared.ErrUnknownProduct,
 		shared.ErrEmptyNetworkRef,
 		shared.ErrEmptyNetworkLineRef,

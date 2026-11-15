@@ -324,6 +324,7 @@ specified in `apis/openapi.yaml`:
 | `GET /inbound-status` | network mode, poller counters, unanswered and overdue counts |
 | `GET /network-orders` | unanswered (`NEW`) orders, soonest deadline first |
 | `GET /network-orders/{networkRef}` | one order, any state |
+| `GET /purchase-orders/{poNumber}` | the same order by the network's purchase-order number, for a caller that does not know the minted `networkRef` (ADR 0036): `200`, `400`, `404 purchase-order-not-found`; a keyed read, not a listing |
 | `POST /network-orders/{networkRef}/shipment-confirmation` | the one write route (ADR 0014): `204`, `404`, `409` |
 | `GET /capability-offers` | always |
 

@@ -77,6 +77,10 @@ type Server struct {
 	// sits behind (fleet REST guideline section 2). Required whenever
 	// ConfirmShipment is set.
 	Idempotency ports.IdempotencyStore
+	// PurchaseOrders backs GET /purchase-orders/{poNumber} (ADR 0036): the
+	// persisted map from a purchase-order number to the NetworkRef the demand
+	// was filed under. A nil value means that route is not registered.
+	PurchaseOrders ports.PurchaseOrderIndex
 	// Logger backs the request logger (ADR 0013 Tier 1 item 2). A nil
 	// Logger (every pre-existing caller/test) falls back to
 	// slog.Default(), matching NewReportsRouter's own convention.
@@ -138,6 +142,9 @@ func (s *Server) Routes() http.Handler {
 	if s.Offers != nil {
 		r.Get("/capability-offers", s.handleListCapabilityOffers)
 	}
+	if s.PurchaseOrders != nil {
+		r.Get("/purchase-orders/{poNumber}", s.handleGetNetworkOrderByPurchaseOrder)
+	}
 	if s.ConfirmShipment != nil {
 		if s.Idempotency == nil {
 			panic("inbound http: ConfirmShipment is wired without an Idempotency store")
@@ -185,6 +192,15 @@ func (s *Server) handleGetNetworkOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.writeNetworkOrder(w, r, ref, usecases.ErrOrderNotFound)
+}
+
+// writeNetworkOrder answers with the order stored under ref: the ONE read and
+// mapping behind GET /network-orders/{networkRef} and GET
+// /purchase-orders/{poNumber} (ADR 0036), so the two can never disagree about
+// an order. notFound is the problem a missing order is answered with, because
+// each route names the thing the caller asked for.
+func (s *Server) writeNetworkOrder(w http.ResponseWriter, r *http.Request, ref shared.NetworkRef, notFound error) {
 	o, err := s.Orders.FindByRef(r.Context(), ref)
 	if err != nil {
 		writeError(w, r, err)
@@ -193,7 +209,7 @@ func (s *Server) handleGetNetworkOrder(w http.ResponseWriter, r *http.Request) {
 	// The repository's (nil, nil) convention becomes the application's
 	// not-found here, which is exactly where that translation belongs.
 	if o == nil {
-		writeError(w, r, usecases.ErrOrderNotFound)
+		writeError(w, r, notFound)
 		return
 	}
 

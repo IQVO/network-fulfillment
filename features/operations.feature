@@ -46,6 +46,9 @@ Feature: Operations surface
       | DELETE | /network-orders/po-1  |
       | POST   | /inbound-status       |
       | POST   | /capability-offers    |
+      | POST   | /purchase-orders/PO-1 |
+      | PUT    | /purchase-orders/PO-1 |
+      | DELETE | /purchase-orders/PO-1 |
 
   @bdd
   Scenario Outline: Every endpoint answers without credentials

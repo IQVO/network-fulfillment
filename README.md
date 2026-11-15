@@ -522,6 +522,7 @@ still arrives only by polling — there is no create-order endpoint.
 | `GET` | `/inbound-status` | network mode, poller counters, unanswered/overdue counts |
 | `GET` | `/network-orders` | unanswered orders |
 | `GET` | `/network-orders/{networkRef}` | one order (with `localOrderId` from `SUBMITTED` on) |
+| `GET` | `/purchase-orders/{poNumber}` | the same order, found by the network's purchase-order number instead of the minted `networkRef` (ADR 0036): a keyed read, not a listing, no query parameters; `404 purchase-order-not-found` |
 | `POST` | `/network-orders/{networkRef}/shipment-confirmation` | the one write route, the operator fallback to the `ShipmentConfirmed` consumer: label request, `ACKNOWLEDGED -> CONFIRMED`, `NetworkOrderShipmentConfirmed`, notify the network. Idempotent on an already-`CONFIRMED` order; a label failure leaves the order `ACKNOWLEDGED` and retryable (ADR 0014, ADR 0026) |
 | `GET` | `/capability-offers` | the persisted offers (when capability offers are enabled — they always are unless `CAPABILITY_OFFER_ENABLED=false`, which fails the boot) |
 | `GET` | `/reports/acknowledgement` | the acknowledgement report (`cmd/netfulfil-reports`, `:8092`) |
