@@ -32,6 +32,12 @@ const sidebar: SidebarsConfig = {
           label: "Confirm shipment of one network order",
           className: "api-method post",
         },
+        {
+          type: "doc",
+          id: "api-reference/rest/get-network-order-by-purchase-order",
+          label: "Get the network order of one purchase order",
+          className: "api-method get",
+        },
       ],
     },
     {

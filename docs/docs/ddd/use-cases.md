@@ -14,7 +14,9 @@ event payloads are in
 [ecosystem/integration.md](/docs/ecosystem/integration#events-published).
 
 Reads are not use cases here. `GET /network-orders`,
-`GET /network-orders/{networkRef}`, `GET /capability-offers` and the MCP
+`GET /network-orders/{networkRef}`, `GET /purchase-orders/{poNumber}` (which
+first resolves the number through the `ports.PurchaseOrderIndex`, ADR 0036),
+`GET /capability-offers` and the MCP
 tools read the repositories directly (`internal/adapters/inbound/http/server.go`,
 `internal/adapters/inbound/mcp/tools.go`).
 
