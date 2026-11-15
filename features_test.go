@@ -73,6 +73,7 @@ func TestFeatures(t *testing.T) {
 type world struct {
 	clock     *fixedClock
 	orders    *memory.NetworkOrderRepo
+	poIndex   *memory.PurchaseOrderIndex
 	offers    *memory.CapabilityOfferRepo
 	dict      *producttranslation.Dictionary
 	gateway   *recordingGateway
@@ -118,6 +119,7 @@ func (w *world) reset() {
 
 	w.clock = newFixedClock(time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC))
 	w.orders = memory.NewNetworkOrderRepo()
+	w.poIndex = memory.NewPurchaseOrderIndex()
 	w.offers = memory.NewCapabilityOfferRepo()
 	w.dict = producttranslation.New()
 	w.gateway = newRecordingGateway(retailnetwork.NewStubGateway(logger))
@@ -175,6 +177,7 @@ func (w *world) apiServer() *httptest.Server {
 	if w.api == nil {
 		s := &inboundhttp.Server{
 			Orders:          w.orders,
+			PurchaseOrders:  w.poIndex,
 			Poller:          w.poller,
 			Clock:           w.clock,
 			NetworkMode:     string(retailnetwork.ModeStub),
@@ -346,6 +349,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^(\d+) (second|minute|hour)s? (?:pass|passes)$`, w.timePasses)
 
 	w.registerOrderSteps(sc)
+	w.registerPurchaseOrderSteps(sc)
 	w.registerLifecycleSteps(sc)
 	w.registerHoldSteps(sc)
 	w.registerOpsSteps(sc)
