@@ -46,12 +46,26 @@ func TestSpec_TheLookupIsAKeyedReadOfTheSameNetworkOrder(t *testing.T) {
 	if len(op.Parameters) != 1 || op.Parameters[0].Value.Name != "poNumber" || op.Parameters[0].Value.In != "path" || !op.Parameters[0].Value.Required {
 		t.Fatal("the route must declare exactly one parameter, the required path parameter poNumber: no query parameter, no paging")
 	}
+	assertSameRepresentationAsTheSibling(t, doc, op)
+	assertDeclaredProblems(t, op)
+	for _, want := range []string{"keyed read", "not a listing", "unknown-query-parameter", "purchase-order-not-found"} {
+		if !strings.Contains(strings.ToLower(op.Description), want) {
+			t.Errorf("the description must say %q so a caller can tell what this route is", want)
+		}
+	}
+}
 
+func assertSameRepresentationAsTheSibling(t *testing.T, doc *openapi3.T, op *openapi3.Operation) {
+	t.Helper()
 	sibling := doc.Paths.Find("/network-orders/{networkRef}").Get.Responses.Value("200").Value.Content["application/json"].Schema
 	ok := op.Responses.Value("200").Value.Content["application/json"].Schema
 	if ok.Ref != sibling.Ref || ok.Ref != "#/components/schemas/NetworkOrder" {
 		t.Fatalf("200 schema = %q, want the sibling's %q: one representation", ok.Ref, sibling.Ref)
 	}
+}
+
+func assertDeclaredProblems(t *testing.T, op *openapi3.Operation) {
+	t.Helper()
 	for code, slug := range map[string]string{"400": "invalid-purchase-order-number", "404": "purchase-order-not-found"} {
 		resp := op.Responses.Value(code)
 		if resp == nil || resp.Value.Content["application/problem+json"] == nil {
@@ -63,11 +77,6 @@ func TestSpec_TheLookupIsAKeyedReadOfTheSameNetworkOrder(t *testing.T) {
 	}
 	if op.Responses.Value("500") == nil {
 		t.Fatal("the route must declare its 500 problem")
-	}
-	for _, want := range []string{"keyed read", "not a listing", "unknown-query-parameter", "purchase-order-not-found"} {
-		if !strings.Contains(strings.ToLower(op.Description), want) {
-			t.Errorf("the description must say %q so a caller can tell what this route is", want)
-		}
 	}
 }
 
