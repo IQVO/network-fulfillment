@@ -61,6 +61,10 @@ tags:
   description: Poll and read the SHIPPED inbound shipments bound for the vendor's nodes (seller cartons with SSCC and GTIN).
 - name: Inbound Receipts
   description: Report what the dock received against an inbound shipment (asynchronous).
+- name: Return Advices
+  description: Poll and read the network's return authorizations addressed to the vendor's nodes.
+- name: Return Outcomes
+  description: Report graded return quantities against a return advice (asynchronous).
 - name: Transactions
   description: Reconcile every asynchronous write by its transactionId.
 - name: Vendors
@@ -617,6 +621,152 @@ paths:
           $ref: '#/components/responses/ValidationProblem'
         '429':
           $ref: '#/components/responses/RateLimited'
+  /vendor/return-advices:
+    get:
+      tags:
+      - Return Advices
+      operationId: pollReturnAdvices
+      summary: Poll return advices (PollReturnAdvices)
+      description: |
+        Returns the `AUTHORIZED` return advices of the vendor's nodes after `readyAt`,
+        oldest first, in pages. An advice is a network return authorization as the
+        vendor's work item: its lines and, as reverse labels are issued, their tracking
+        numbers. `readyAfter` compares with `readyAt`, the instant the advice became the
+        vendor's business (the authorization's `authorizedAt`). Pass the returned
+        `nextCursor` as `cursor` for the next page (repeat the filters); an absent
+        `nextCursor` means the last page. An advice leaves the poll once the network
+        records its outcome or the authorization is cancelled.
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - name: readyAfter
+        in: query
+        required: false
+        description: Only advices with `readyAt` strictly after this instant.
+        schema:
+          type: string
+          format: date-time
+      - name: nodeId
+        in: query
+        required: false
+        description: Only advices addressed to this node.
+        schema:
+          type: string
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '200':
+          description: One page of return advices.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnAdvicePage'
+              example:
+                items:
+                - authorizationId: ret-1001
+                  orderId: ord-100
+                  groupNo: 1
+                  vendorId: V-WS
+                  nodeId: n-1
+                  disposition: NEAREST_RETURNS_CENTER
+                  method: DROP_OFF
+                  state: AUTHORIZED
+                  expiresAt: '2026-12-14T10:00:00Z'
+                  lines:
+                  - lineNo: 1
+                    catalogItemId: ci-100
+                    quantity: 2
+                    ownerRef: seller-7
+                  trackingNumbers:
+                  - TRK-RET-9
+                  readyAt: '2026-11-14T10:00:00Z'
+                nextCursor: eyJ0IjoiMjAyNi0xMS0xNFQxMDowMDowMFoiLCJhIjoicmV0LTEwMDEifQ
+        '400':
+          $ref: '#/components/responses/PageBadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/return-advices/{authorizationId}:
+    get:
+      tags:
+      - Return Advices
+      operationId: getReturnAdvice
+      summary: Get one return advice (GetReturnAdvice)
+      description: |
+        One return advice. Unlike the poll, this read also answers for a closed advice
+        (`state` `CANCELLED` or `OUTCOME_RECORDED`); an advice that is unknown, or is
+        addressed to another vendor's node, is `not-found`.
+      parameters:
+      - $ref: '#/components/parameters/VendorId'
+      - $ref: '#/components/parameters/AuthorizationId'
+      responses:
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '200':
+          description: The return advice.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnAdvice'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /vendor/return-outcomes:
+    post:
+      tags:
+      - Return Outcomes
+      operationId: submitReturnOutcome
+      summary: Report a return outcome (SubmitReturnOutcome)
+      description: |
+        Asynchronous (`SubmissionKind` `RETURN_OUTCOME`). The authorization must be
+        known and still `AUTHORIZED`, `nodeId` must be the advice's node and belong to
+        the vendor. Lines the advice never authorized are reported, never refused
+        (goods on the dock are never turned away); the network records them as
+        unexpected and restocks nothing of them. On `202` the advice leaves the poll
+        and the network publishes `VendorReturnOutcomeSubmitted`.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReturnOutcomeRequest'
+            example:
+              vendorId: V-WS
+              authorizationId: ret-1001
+              nodeId: n-1
+              receivedAt: '2026-11-14T12:30:00Z'
+              lines:
+              - catalogItemId: ci-100
+                qtyRestockable: 2
+                qtyUnsellable: 1
+              - catalogItemId: ci-100
+                ownerRef: seller-7
+                qtyRestockable: 0
+                qtyUnsellable: 3
+      responses:
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /vendor/transactions/{transactionId}:
     get:
       tags:
@@ -787,6 +937,13 @@ components:
       in: path
       required: true
       description: The seller-inbound shipment id.
+      schema:
+        type: string
+    AuthorizationId:
+      name: authorizationId
+      in: path
+      required: true
+      description: The customer-returns return authorization id.
       schema:
         type: string
     NodeId:
@@ -1719,6 +1876,134 @@ components:
         nextCursor:
           type: string
           description: Absent on the last page.
+    ReturnAdviceLine:
+      type: object
+      required:
+      - lineNo
+      - catalogItemId
+      - quantity
+      properties:
+        lineNo:
+          type: integer
+        catalogItemId:
+          type: string
+        quantity:
+          type: integer
+          minimum: 1
+        ownerRef:
+          type: string
+          description: The stock owner of the line; omitted for operator-owned stock.
+    ReturnAdvice:
+      type: object
+      required:
+      - authorizationId
+      - vendorId
+      - nodeId
+      - disposition
+      - method
+      - state
+      - lines
+      - trackingNumbers
+      - readyAt
+      properties:
+        authorizationId:
+          type: string
+        orderId:
+          type: string
+        groupNo:
+          type: integer
+        vendorId:
+          type: string
+          description: The operator vendor of the advice's node (never taken from the event).
+        nodeId:
+          type: string
+        disposition:
+          type: string
+          enum:
+          - KEEP
+          - NEAREST_RETURNS_CENTER
+          - ORIGIN_NODE
+        method:
+          type: string
+          enum:
+          - DROP_OFF
+          - PICKUP
+        state:
+          type: string
+          enum:
+          - AUTHORIZED
+          - CANCELLED
+          - OUTCOME_RECORDED
+        expiresAt:
+          type: string
+          format: date-time
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReturnAdviceLine'
+        trackingNumbers:
+          type: array
+          description: The reverse labels issued for the return so far.
+          items:
+            type: string
+        readyAt:
+          type: string
+          format: date-time
+    ReturnAdvicePage:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReturnAdvice'
+        nextCursor:
+          type: string
+          description: Absent on the last page.
+    ReturnOutcomeLine:
+      type: object
+      required:
+      - catalogItemId
+      - qtyRestockable
+      - qtyUnsellable
+      properties:
+        catalogItemId:
+          type: string
+        ownerRef:
+          type: string
+          description: The stock owner the quantities belong to; omitted for operator-owned stock.
+        qtyRestockable:
+          type: integer
+          minimum: 0
+          description: Graded units that may be restocked.
+        qtyUnsellable:
+          type: integer
+          minimum: 0
+          description: Graded units that may not.
+    ReturnOutcomeRequest:
+      type: object
+      required:
+      - vendorId
+      - authorizationId
+      - nodeId
+      - receivedAt
+      - lines
+      properties:
+        vendorId:
+          type: string
+        authorizationId:
+          type: string
+        nodeId:
+          type: string
+        receivedAt:
+          type: string
+          format: date-time
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ReturnOutcomeLine'
     InboundReceiptItem:
       type: object
       required:
