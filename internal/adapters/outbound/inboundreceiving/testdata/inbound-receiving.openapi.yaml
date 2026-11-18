@@ -59,7 +59,9 @@ info:
     `unsupported-gtin`, `invalid-scan-kind`, `invalid-scan`, `invalid-cases`,
     `invalid-counted-contents`, `counted-contents-not-mixed`,
     `counted-sku-unknown`, `carton-not-found`, `duplicate-sscc`, `homogeneous-carton-mixed`, `carton-contents-mismatch`,
-    `scan-kind-mismatch`, `unsupported-pack-level`, `version-mismatch`,
+    `scan-kind-mismatch`, `unsupported-pack-level`, `invalid-override-reason`,
+    `invalid-tolerance-band`, `receiving-policy-not-found`,
+    `tolerance-override-required`, `tolerance-blocked`, `version-mismatch`,
     `concurrent-modification`, `resource-not-found` (a NUL character in the
     request path), `dependency-unavailable` (`/readyz` while Postgres or Kafka
     is unreachable), `internal-error`. A NUL (U+0000) in a JSON body is a 400
@@ -88,6 +90,11 @@ tags:
       Owned by dock-scheduling since ADR 0019: writes answer 410, the reads are a deprecated local copy.
   - name: Receipts
     description: Counted receiving of one ASN and its close-time discrepancies (ADR 0002).
+  - name: Receiving policies
+    description: |
+      The declared receiving tolerance bands per (ownerRef, supplierRef): auto-accept
+      within the band, override with a reason code beyond it, hard stop at the
+      ceiling (ADR 0026).
   - name: Docks
     description: The inbound dock doors known from facility-layout events (ADR 0003).
   - name: Health
@@ -824,10 +831,29 @@ paths:
         dock-scheduling). Closing a receipt that
         is already `Closed` is 409 `receipt-closed`. A line nothing was received
         for is `Short`.
+
+        With a receiving policy declared for the ASN's (owner, supplier)
+        (ADR 0026), the close judges every line's variance against it: inside
+        the tolerance band the variance is accepted and raises no finding;
+        between the band and its hard stop the close needs `overrideReason`
+        (409 `tolerance-override-required` without a valid one, 400
+        `invalid-override-reason` for a code outside the list) and the line
+        closes with an `OverTolerance` or `UnderTolerance` finding carrying
+        that code; at or beyond the hard stop the close is 409
+        `tolerance-blocked` and the receipt stays open. The body is optional:
+        without a policy it is ignored.
       tags: [Receipts]
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
         - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CloseReceiptRequest"
+            example:
+              overrideReason: supplier-agreed
       responses:
         "200":
           description: The closed receipt with its final discrepancies.
@@ -936,6 +962,115 @@ paths:
           $ref: "#/components/responses/VersionMismatch"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /receiving-policies:
+    post:
+      operationId: declareReceivingPolicy
+      summary: Declare a receiving tolerance policy
+      description: |
+        Creates or replaces the tolerance policy of one (`ownerRef`,
+        `supplierRef`) pair (ADR 0026) and publishes `ReceivingPolicyDeclared`.
+        An absent `ownerRef` declares the house default (a client-owned
+        receipt does not fall back to it: the lookup is exact-match). Per side
+        `0 <= tolerance < hardStop <= 1`, else 400 `invalid-tolerance-band`.
+        201 on create, 200 on replace; both answer the stored policy with its
+        `version`.
+      tags: [Receiving policies]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeclareReceivingPolicyRequest"
+            example:
+              supplierRef: ACME
+              overTolerance: 0.05
+              underTolerance: 0.05
+              overHardStop: 0.2
+              underHardStop: 0.3
+      responses:
+        "200":
+          description: The policy was replaced.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceivingPolicy"
+        "201":
+          description: The policy was created.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceivingPolicy"
+              example:
+                supplierRef: ACME
+                overTolerance: 0.05
+                underTolerance: 0.05
+                overHardStop: 0.2
+                underHardStop: 0.3
+                version: 1
+                declaredAt: "2026-11-13T10:00:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /receiving-policies/{supplierRef}:
+    parameters:
+      - name: supplierRef
+        in: path
+        required: true
+        description: The supplier reference (1 to 64 characters).
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+        example: ACME
+    get:
+      operationId: getReceivingPolicy
+      summary: Read a receiving tolerance policy
+      description: |
+        The policy of the exact (`ownerRef`, supplier) key: the house default
+        when `ownerRef` is absent, that owner's own policy when present (ADR
+        0026). 404 `receiving-policy-not-found` when the exact key has no
+        policy.
+      tags: [Receiving policies]
+      parameters:
+        - name: ownerRef
+          in: query
+          required: false
+          description: Opaque tenant tag; absent reads the house default.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The stored policy.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceivingPolicy"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -1103,6 +1238,7 @@ paths:
                     dock_dwell: { count: 14, p50_seconds: 3300, p95_seconds: 8100 }
                     dock_to_stock: { count: 12, p50_seconds: 9300, p90_seconds: 15600, under_target: 8, share_under_target: 0.6666666666666666 }
                     advice: { count: 14, within_sla: 13, share_within_sla: 0.9285714285714286 }
+                    tolerance: { closed: 14, overrides: 2, share_without_override: 0.8571428571428572, with_policy: 9, auto_accepted: 7, reasons: [{ reason: supplier-agreed, count: 2 }] }
                     asn_timeliness:
                       - { supplier_ref: ACME, registered: 9, late: 3, share_on_time: 0.6666666666666666 }
                       - { supplier_ref: BOLT, registered: 5, late: 0, share_on_time: 1 }
@@ -1118,6 +1254,7 @@ paths:
                     dock_to_stock: { count: 0, p50_seconds: null, p90_seconds: null, under_target: 0, share_under_target: null }
                     advice: { count: 0, within_sla: 0, share_within_sla: null }
                     asn_timeliness: []
+                    tolerance: { closed: 0, overrides: 0, share_without_override: null, with_policy: 0, auto_accepted: 0, reasons: [] }
                 current:
                   open_receipts: 2
                   expected_today: 9
@@ -1293,7 +1430,9 @@ components:
         (`idempotency-key-required`, `idempotency-key-invalid`), or a value that breaks a domain rule
         (the `invalid-*`, `*-requires-*`, `duplicate-*` and
         `invalid-condition`, `invalid-carton*`, `invalid-scan*`, `invalid-counted-contents`, `invalid-cases`,
-        `invalid-gtin`, `invalid-sscc` and `invalid-owner-ref` slugs).
+        `invalid-gtin`, `invalid-sscc` and `invalid-owner-ref` slugs), a reason code outside the list
+        (`invalid-override-reason`) or a tolerance band that breaks `0 <= tolerance < hardStop <= 1`
+        (`invalid-tolerance-band`).
       content:
         application/problem+json:
           schema:
@@ -1352,7 +1491,8 @@ components:
     NotFound:
       description: |
         The resource in the path does not exist: `asn-not-found`,
-        `appointment-not-found`, `receipt-not-found` or `carton-not-found`.
+        `appointment-not-found`, `receipt-not-found`, `carton-not-found` or
+        `receiving-policy-not-found` (no policy declared for the exact owner and supplier).
       content:
         application/problem+json:
           schema:
@@ -1379,7 +1519,10 @@ components:
         The request conflicts with current state: `asn-already-exists`,
         `asn-in-progress`, `asn-terminal`, `asn-not-receivable`,
         `appointment-cancelled`, `receipt-already-open`, `receipt-closed`, `sscc-prefix-not-configured` and
-        `sscc-serial-exhausted` (receiver-assigned SSCCs, ADR 0024), a write that lost a race
+        `sscc-serial-exhausted` (receiver-assigned SSCCs, ADR 0024), `tolerance-override-required`
+        (a line sits between the declared band and its hard stop and no valid override reason was given) and
+        `tolerance-blocked` (a line is at or beyond the hard stop: no override passes, the receipt stays
+        open; ADR 0026), a write that lost a race
         (`concurrent-modification`), or an `Idempotency-Key` already used with
         a different request (`idempotency-key-reused`).
       content:
@@ -1540,6 +1683,40 @@ components:
         `Short` = received below expected, `Over` = received above expected,
         `Damaged` = at least one damaged unit.
       enum: [Short, Over, Damaged]
+    OverrideReason:
+      type: string
+      description: |
+        Why an operator accepted a variance beyond the tolerance band (ADR 0026). Our own closed
+        vocabulary: the research names no codes and W13 has none for it.
+      enum: [supplier-agreed, damaged-in-transit-recounted, mislabelled-recounted, recount-confirmed]
+    CloseReceiptRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        overrideReason: { $ref: "#/components/schemas/OverrideReason" }
+    DeclareReceivingPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [supplierRef, overTolerance, underTolerance, overHardStop, underHardStop]
+      properties:
+        ownerRef: { type: string, description: Opaque tenant tag; omitted for the house default. }
+        supplierRef: { type: string, minLength: 1, maxLength: 64 }
+        overTolerance: { type: number, format: double, minimum: 0, maximum: 1, description: "Auto-accept up to this share above expected (`0.05` = 5 %)." }
+        underTolerance: { type: number, format: double, minimum: 0, maximum: 1, description: Auto-accept down to this share below expected. }
+        overHardStop: { type: number, format: double, minimum: 0, maximum: 1, description: Above-band ceiling; `overTolerance < overHardStop <= 1`. }
+        underHardStop: { type: number, format: double, minimum: 0, maximum: 1, description: Below-band ceiling; `underTolerance < underHardStop <= 1`. }
+    ReceivingPolicy:
+      type: object
+      required: [supplierRef, overTolerance, underTolerance, overHardStop, underHardStop, version, declaredAt]
+      properties:
+        ownerRef: { type: string }
+        supplierRef: { type: string }
+        overTolerance: { type: number, format: double }
+        underTolerance: { type: number, format: double }
+        overHardStop: { type: number, format: double }
+        underHardStop: { type: number, format: double }
+        version: { type: integer, format: int64, description: "1 on create, +1 per replace." }
+        declaredAt: { type: string, format: date-time }
 
     AsnLine:
       type: object
@@ -1669,6 +1846,13 @@ components:
       properties:
         gtin: { type: string, pattern: '^[0-9]{14}$', description: "The CASE GTIN of the case (it must be in the PackagingView at the CASE level)." }
         condition: { $ref: "#/components/schemas/Condition" }
+        overrideReason:
+          allOf:
+            - $ref: "#/components/schemas/OverrideReason"
+          description: |
+            ADR 0026: required when the booking pushes a line beyond the declared over band
+            (409 `tolerance-override-required` without it, 409 `tolerance-blocked` at or beyond the
+            hard stop); ignored without a policy.
         lot: { type: string, maxLength: 20 }
         expiry: { type: string, description: "`YYYY-MM-DD`." }
     SsccAssignment:
@@ -2180,7 +2364,7 @@ components:
           $ref: "#/components/schemas/ReceivingCurrent"
     ReceivingPerformanceDay:
       type: object
-      required: [day, receipts_closed, lines_received, units_good, units_damaged, discrepancies, receipt_cycle, appointments, dock_dwell, dock_to_stock, advice, asn_timeliness]
+      required: [day, receipts_closed, lines_received, units_good, units_damaged, discrepancies, receipt_cycle, appointments, dock_dwell, dock_to_stock, advice, asn_timeliness, tolerance]
       properties:
         day:
           type: string
@@ -2226,6 +2410,30 @@ components:
             top ten suppliers of the day; `[]` when none registered.
           items:
             $ref: "#/components/schemas/SupplierTimeliness"
+        tolerance:
+          $ref: "#/components/schemas/ToleranceSummary"
+    ToleranceSummary:
+      type: object
+      description: |
+        How the declared receiving bands changed the close answers of the day (ADR 0026), counted
+        in the UTC day of the close.
+      required: [closed, overrides, share_without_override, with_policy, auto_accepted, reasons]
+      properties:
+        closed: { type: integer, format: int32, minimum: 0, description: Receipts closed in the day (all of them). }
+        overrides: { type: integer, format: int32, minimum: 0, description: Receipts closed with at least one `OverTolerance` or `UnderTolerance` finding. }
+        share_without_override: { type: number, format: double, nullable: true, minimum: 0, maximum: 1, description: "`1 - overrides / closed`; null when `closed` is 0." }
+        with_policy: { type: integer, format: int32, minimum: 0, description: Receipts closed under a declared policy. }
+        auto_accepted: { type: integer, format: int32, minimum: 0, description: "`with_policy` receipts whose every variance was inside the band." }
+        reasons:
+          type: array
+          maxItems: 5
+          description: The override-reason Pareto, biggest `count` first, ties by `reason` ascending, at most five.
+          items:
+            type: object
+            required: [reason, count]
+            properties:
+              reason: { $ref: "#/components/schemas/OverrideReason" }
+              count: { type: integer, format: int32, minimum: 1 }
     DiscrepancyCounts:
       type: object
       description: Discrepancies of the receipts closed in the window, by kind.
