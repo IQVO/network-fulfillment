@@ -1146,6 +1146,7 @@ components:
       - NODE_PROFILE
       - SHIPMENT_CONFIRMATION
       - INBOUND_RECEIPT
+      - RETURN_OUTCOME
     SubmissionStatus:
       type: string
       enum:
@@ -1890,6 +1891,7 @@ components:
         quantity:
           type: integer
           minimum: 1
+          maximum: 2147483647
         ownerRef:
           type: string
           description: The stock owner of the line; omitted for operator-owned stock.
@@ -1939,13 +1941,17 @@ components:
           format: date-time
         lines:
           type: array
+          minItems: 1
+          maxItems: 50
           items:
             $ref: '#/components/schemas/ReturnAdviceLine'
         trackingNumbers:
           type: array
           description: The reverse labels issued for the return so far.
+          maxItems: 5
           items:
             type: string
+            maxLength: 64
         readyAt:
           type: string
           format: date-time
@@ -1976,11 +1982,11 @@ components:
         qtyRestockable:
           type: integer
           minimum: 0
-          description: Graded units that may be restocked.
+          description: Graded units that may be restocked, 0 to 2147483647 (a larger value is `422 validation-failed`).
         qtyUnsellable:
           type: integer
           minimum: 0
-          description: Graded units that may not.
+          description: Graded units that may not, 0 to 2147483647 (a larger value is `422 validation-failed`).
     ReturnOutcomeRequest:
       type: object
       required:
@@ -2002,6 +2008,7 @@ components:
         lines:
           type: array
           minItems: 1
+          description: Between 1 and 50 lines; an outcome with more is `422 validation-failed`.
           items:
             $ref: '#/components/schemas/ReturnOutcomeLine'
     InboundReceiptItem:
