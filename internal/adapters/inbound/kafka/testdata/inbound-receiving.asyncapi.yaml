@@ -115,6 +115,7 @@ channels:
       tags:
         - name: asn
         - name: receipt
+        - name: policy
       message:
         oneOf:
           - $ref: "#/components/messages/ASNRegistered"
@@ -128,6 +129,7 @@ channels:
           - $ref: "#/components/messages/ReceiptStowCompleted"
           - $ref: "#/components/messages/ReceivingAdviceIssued"
           - $ref: "#/components/messages/ReceivingAdviceOverdue"
+          - $ref: "#/components/messages/ReceivingPolicyDeclared"
 
   warehouse.inbound-receiving.analytics:
     description: |
@@ -167,6 +169,7 @@ channels:
           - $ref: "#/components/messages/ReceiptStowCompletedAnalytics"
           - $ref: "#/components/messages/ReceivingAdviceIssuedAnalytics"
           - $ref: "#/components/messages/ReceivingAdviceOverdueAnalytics"
+          - $ref: "#/components/messages/ReceivingPolicyDeclaredAnalytics"
 
   warehouse.product-master.events:
     description: |
@@ -688,6 +691,41 @@ components:
               kind: "UnexpectedCarton"
               at: "2026-10-09T08:10:00Z"
 
+    ReceivingPolicyDeclared:
+      x-no-consumer-reason: "none yet: a declaration others will copy later (supplier-compliance scorecards, quality-inspection sampling, trusted-ASN); no consumer exists and none is invented (ADR 0026)"
+      name: ReceivingPolicyDeclared
+      title: Receiving policy declared
+      summary: A receiving tolerance policy was created or replaced.
+      description: |
+        `type` = `com.warehouse.wms.inbound-receiving.policy.ReceivingPolicyDeclared`; subject and
+        key = the supplier reference (owner variants of one supplier are independent declarations).
+        Raised by `POST /receiving-policies` in the same transaction as the upsert (ADR 0026).
+      contentType: application/cloudevents+json
+      tags:
+        - name: policy
+      payload:
+        $ref: "#/components/schemas/ReceivingPolicyDeclaredEvent"
+      examples:
+        - name: declared
+          summary: ACME house-default policy created.
+          payload:
+            specversion: "1.0"
+            id: "7c9e1b3d-5a2f-4d68-8b04-1e2f3a4b5c6d"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.policy.ReceivingPolicyDeclared"
+            subject: "ACME"
+            time: "2026-11-13T10:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:events:ReceivingPolicyDeclared:v1"
+            data:
+              supplier_ref: "ACME"
+              over_tolerance: 0.05
+              under_tolerance: 0.05
+              over_hard_stop: 0.2
+              under_hard_stop: 0.3
+              version: 1
+              declared_at: "2026-11-13T10:00:00Z"
+
     ReceiptClosed:
       x-no-consumer-reason: "planned warehouse-planning consumer not built (K28)"
       name: ReceiptClosed
@@ -698,7 +736,11 @@ components:
         subject = the receipt id, key = the ASN number. `discrepancies` is
         present and empty when everything matched; a line can appear once per
         kind (`Short`, `Over`, `Damaged`); each carries `w13_code` and
-        `cbv_disposition` (ADR 0023).
+        `cbv_disposition` (ADR 0023). Under a declared receiving policy (ADR 0026) the
+        close judges each line against the band: a within-band variance raises no finding,
+        an override raises `OverTolerance` (W13 `03`) or `UnderTolerance` (W13 `02`) with
+        the `reason_code` the operator gave, and the optional `tolerance` object names the
+        band the close was judged under (present exactly when a policy was applied).
       contentType: application/cloudevents+json
       tags:
         - name: receipt
@@ -1275,6 +1317,37 @@ components:
               kind: "UnexpectedCarton"
               at: "2026-10-09T08:10:00Z"
 
+    ReceivingPolicyDeclaredAnalytics:
+      name: ReceivingPolicyDeclared
+      title: Receiving policy declared (analytics)
+      summary: A receiving tolerance policy was created or replaced, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.inbound-receiving.policy.ReceivingPolicyDeclared` (the same as on the integration topic); dataschema `urn:warehouse:inbound-receiving:analytics:ReceivingPolicyDeclared:v1`; payload equal to the integration payload. The projector does not fold it (the tolerance block reads closes, not declarations)."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ReceivingPolicyDeclaredEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "7c9e1b3d-5a2f-4d68-8b04-1e2f3a4b5c6d"
+            source: "/warehouse/inbound-receiving"
+            type: "com.warehouse.wms.inbound-receiving.policy.ReceivingPolicyDeclared"
+            subject: "ACME"
+            time: "2026-11-13T10:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:inbound-receiving:analytics:ReceivingPolicyDeclared:v1"
+            data:
+              supplier_ref: "ACME"
+              over_tolerance: 0.05
+              under_tolerance: 0.05
+              over_hard_stop: 0.2
+              under_hard_stop: 0.3
+              version: 1
+              declared_at: "2026-11-13T10:00:00Z"
+
     ReceiptClosedAnalytics:
       name: ReceiptClosed
       title: Receipt closed (analytics)
@@ -1472,12 +1545,13 @@ components:
       properties:
         line_no: { type: integer, minimum: 1 }
         sku: { type: string }
-        kind: { type: string, enum: [Short, Over, Damaged] }
+        kind: { type: string, enum: [Short, Over, Damaged, OverTolerance, UnderTolerance], description: "`OverTolerance` and `UnderTolerance` (ADR 0026) replace `Over`/`Short` on a line whose variance an operator overrode; a within-band variance raises no kind." }
         expected_qty: { type: integer, minimum: 1 }
         received_qty: { type: integer, minimum: 0, description: Good plus damaged. }
         damaged_qty: { type: integer, minimum: 0 }
-        w13_code: { type: string, enum: ["01", "02", "03"], description: "X12 W13 receiving condition code of the kind (ADR 0023): Damaged 01, Short 02, Over 03." }
+        w13_code: { type: string, enum: ["01", "02", "03"], description: "X12 W13 receiving condition code of the kind (ADR 0023): Damaged 01, Short 02, Over 03; UnderTolerance 02, OverTolerance 03 (ADR 0026)." }
         cbv_disposition: { type: string, enum: [damaged, mismatch_quantity], description: "GS1 CBV disposition of the kind (ADR 0023)." }
+        reason_code: { type: string, enum: [supplier-agreed, damaged-in-transit-recounted, mislabelled-recounted, recount-confirmed], description: "The override reason (ADR 0026); present exactly on `OverTolerance` and `UnderTolerance`." }
 
     ASNRegisteredEvent:
       allOf:
@@ -1741,6 +1815,33 @@ components:
                   type: array
                   description: Empty when everything matched.
                   items: { $ref: "#/components/schemas/DiscrepancyData" }
+                tolerance:
+                  type: object
+                  description: "The receiving policy the close was judged under (ADR 0026); present exactly when a policy was applied."
+                  required: [over_tolerance, under_tolerance, over_hard_stop, under_hard_stop]
+                  properties:
+                    over_tolerance: { type: number, format: double, minimum: 0, maximum: 1 }
+                    under_tolerance: { type: number, format: double, minimum: 0, maximum: 1 }
+                    over_hard_stop: { type: number, format: double, minimum: 0, maximum: 1 }
+                    under_hard_stop: { type: number, format: double, minimum: 0, maximum: 1 }
+
+    ReceivingPolicyDeclaredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [supplier_ref, over_tolerance, under_tolerance, over_hard_stop, under_hard_stop, version, declared_at]
+              properties:
+                supplier_ref: { type: string, minLength: 1, maxLength: 64 }
+                owner_ref: { type: string, description: "The 3PL depositor; omitted for the house default." }
+                over_tolerance: { type: number, format: double, minimum: 0, maximum: 1 }
+                under_tolerance: { type: number, format: double, minimum: 0, maximum: 1 }
+                over_hard_stop: { type: number, format: double, minimum: 0, maximum: 1 }
+                under_hard_stop: { type: number, format: double, minimum: 0, maximum: 1 }
+                version: { type: integer, format: int64, minimum: 1, description: "1 on create, +1 per replace." }
+                declared_at: { type: string, format: date-time }
 
     ReceivingAdviceIssuedEvent:
       allOf:
@@ -1790,10 +1891,11 @@ components:
                           type: object
                           required: [kind, quantity, cbv_disposition]
                           properties:
-                            kind: { type: string, enum: [Short, Over, Damaged, IncorrectProduct, Hold] }
+                            kind: { type: string, enum: [Short, Over, Damaged, IncorrectProduct, Hold, OverTolerance, UnderTolerance] }
                             quantity: { type: integer, minimum: 1 }
                             w13_code: { type: string, enum: ["01", "02", "03", "05", "09"] }
                             cbv_disposition: { type: string, enum: [damaged, mismatch_quantity, mismatch_class, non_conformant] }
+                            reason_code: { type: string, enum: [supplier-agreed, damaged-in-transit-recounted, mislabelled-recounted, recount-confirmed], description: "The override reason (ADR 0026); present exactly on OverTolerance and UnderTolerance." }
                 lines_total: { type: integer, minimum: 0, description: The real number of lines. }
                 lines_truncated: { type: boolean, description: "True when lines lists fewer than lines_total. Omitted when false." }
                 carton_findings:
