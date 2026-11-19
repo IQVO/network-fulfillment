@@ -30,7 +30,7 @@ info:
       against it (`ErrNodeNotOwnedByVendor`); this is a consistency check, not security.
       A suspended vendor's writes are refused (`ErrVendorSuspended`, `vendor-suspended`).
     - Rate limits are part of the contract: `429` with `Retry-After` (`RATE_LIMIT_RPS`).
-    - Every state-changing `POST`/`PUT` takes `Idempotency-Key`; a repeat replays the first response.
+    - Every state-changing `POST`/`PUT` takes `Idempotency-Key`; a repeat replays the first response when that response is final for the request (a success, or a refusal that does not depend on state that can change). A refusal that can pass on a retry is not stored and its key is released (see the `Idempotency-Key` parameter).
     - Errors are RFC 9457 `application/problem+json`; the shared problem types are
       `not-found` 404, `illegal-transition` 409, `concurrent-update` 409 and
       `validation-failed` 422, plus one slug per model `Err...` name.
@@ -957,7 +957,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: 'Client-chosen key, 1 to 128 printable ASCII characters (`400 idempotency-key-required` when absent, `400 idempotency-key-invalid` when malformed). A retry with the same key, method, path and body returns the first response with `Idempotency-Replayed: true`; the same key with anything else is `409 idempotency-key-reused`.'
+      description: 'Client-chosen key, 1 to 128 printable ASCII characters (`400 idempotency-key-required` when absent, `400 idempotency-key-invalid` when malformed). A retry with the same key, method, path and body returns the first response with `Idempotency-Replayed: true` when that response is stored: every 2xx, and the refusals that are final for the request (`partial-acknowledgement`, `ack-window-closed`). Every other refusal is NOT stored and its key is released, so the same request under the same key executes again and a different body under that key is a new request: `validation-failed`, `ack-window-out-of-range`, `not-found`, `node-not-owned-by-vendor`, `vendor-suspended`, `already-acknowledged`, `label-before-acceptance`, `confirm-without-label`, `illegal-transition` and `concurrent-update` (retry the same key once the state changed), and every 5xx (`upstream-unavailable`, `upstream-refused`). While the key is stored, the same key with a different method, path or body is `409 idempotency-key-reused`.'
       schema:
         type: string
         minLength: 1
@@ -1003,7 +1003,7 @@ components:
         type: string
   headers:
     IdempotencyReplayed:
-      description: '`true` when this response is a replay of the first response stored for the `Idempotency-Key`; absent otherwise.'
+      description: '`true` when this response is a replay of the first response stored for the `Idempotency-Key` (a 2xx or a final refusal); absent otherwise. A refusal that can pass on a retry is never stored, so it is never replayed.'
       schema:
         type: string
         enum:
