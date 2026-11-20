@@ -72,6 +72,8 @@ called order-management's retired `POST /orders/{id}/release`.
 - **Consumers in this repository.**
   - `internal/adapters/outbound/ordermanagement/planner.go`: release is
     `POST /orders/{id}/releases` with a stable key `netful-release-<id>`.
+    _(2026-11-19: a refusal on the keyed calls is read by order-management's replay
+    class, see [ADR 0037](./0037-retry-the-refusals-the-callees-release.md).)_
   - `web/` (netfulfil_mfe remote): reads `items`, calls with `limit=500` and
     reports a returned `nextCursor` (guideline 5.2, bounded single page).
   - BDD, unit and integration HTTP clients send a fresh key per submit.

@@ -163,7 +163,9 @@ Failure behaviour:
 - `POST /orders` is sent with a stable `Idempotency-Key`,
   `netful-raise-<networkRef>`, which order-management requires and replays
   for 24 hours, so the poller's retry of a raise returns the same order id
-  instead of reserving stock twice.
+  instead of reserving stock twice. A refusal order-management does not store
+  (its replay class `RETRYABLE`, ADR 0054) is retried under the same key and may
+  pass; the adapter's slug table is in ADR 0037.
 
 ## inventory-storage
 

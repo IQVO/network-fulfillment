@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,29 +88,101 @@ func TestRegisterAsn_Refusals(t *testing.T) {
 		status    int
 		slug      string
 		retryable bool
-		refused   bool
 	}{
-		{"unknown sku waits", http.StatusUnprocessableEntity, "unknown-sku", true, true},
-		{"duplicate sscc is a verdict", http.StatusUnprocessableEntity, "duplicate-sscc", false, true},
-		{"a bad request is a verdict", http.StatusBadRequest, "invalid-request", false, true},
-		{"another conflict is an error to retry", http.StatusConflict, "concurrent-update", false, false},
-		{"a 404 is an error to retry", http.StatusNotFound, "not-found", false, false},
+		// RETRYABLE at inbound-receiving (ADR 0027): released, the same key may pass.
+		{"unknown sku waits: the product projection lags", http.StatusUnprocessableEntity, "unknown-sku", true},
+		{"concurrent-modification is the slug inbound-receiving answers", http.StatusConflict, "concurrent-modification", true},
+		{"duplicate sscc is released: cancelling the other ASN frees it", http.StatusUnprocessableEntity, "duplicate-sscc", true},
+		{"idempotency-key-reused is never stored", http.StatusConflict, "idempotency-key-reused", true},
+		{"a 404 the callee releases", http.StatusNotFound, "asn-not-found", true},
+		{"a 409 state not reached yet", http.StatusConflict, "asn-in-progress", true},
+		// FINAL at inbound-receiving, or never able to pass from here: terminal.
+		{"a bad carton is a verdict", http.StatusBadRequest, "invalid-carton", false},
+		{"a bad sscc is a verdict", http.StatusUnprocessableEntity, "invalid-sscc", false},
+		{"a terminal ASN is a verdict, not an error to loop on", http.StatusConflict, "asn-terminal", false},
+		{"a closed receipt is a verdict", http.StatusConflict, "receipt-closed", false},
+		{"our own body is the same on every attempt: malformed-request cannot pass", http.StatusBadRequest, "malformed-request", false},
+		{"the slug this repo used to look for is not one inbound-receiving answers", http.StatusConflict, "concurrent-update", false},
+		{"an unknown slug is terminal", http.StatusUnprocessableEntity, "a-slug-nobody-declared", false},
+		{"an unknown 404 slug is terminal", http.StatusNotFound, "not-found", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) { problem(w, tc.status, tc.slug, "detail text") })
 			err := c.RegisterAsn(context.Background(), asn())
 			var refused *contract.AsnRefusedError
-			if got := errors.As(err, &refused); got != tc.refused {
-				t.Fatalf("err = %v, refused=%v want %v", err, got, tc.refused)
+			if !errors.As(err, &refused) {
+				t.Fatalf("err = %v, want a refusal", err)
 			}
-			if tc.refused && (refused.Retryable != tc.retryable || refused.Problem != tc.slug || !strings.Contains(refused.Detail, "detail text")) {
-				t.Errorf("refusal = %+v", refused)
-			}
-			if err == nil {
-				t.Error("a refusal is an error")
+			if refused.Retryable != tc.retryable || refused.Problem != tc.slug || !strings.Contains(refused.Detail, "detail text") {
+				t.Errorf("refusal = %+v, want retryable=%v problem=%s", refused, tc.retryable, tc.slug)
 			}
 		})
+	}
+}
+
+// A 4xx the table reads (400, 404, 409, 422) without a problem document has no
+// slug, and an unknown refusal never loops: terminal.
+func TestRegisterAsn_AClientErrorWithoutAProblemDocumentIsTerminal(t *testing.T) {
+	bodies := map[string]string{"empty": "", "html": "<html>nope</html>", "json without a type": `{"detail":"x"}`}
+	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity} {
+		for name, body := range bodies {
+			t.Run(http.StatusText(status)+" "+name, func(t *testing.T) {
+				c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status); _, _ = io.WriteString(w, body) })
+				err := c.RegisterAsn(context.Background(), asn())
+				var refused *contract.AsnRefusedError
+				if !errors.As(err, &refused) || refused.Retryable || refused.Problem != "" {
+					t.Fatalf("err = %v (%+v), want a terminal refusal without a slug", err, refused)
+				}
+				if !strings.Contains(err.Error(), strconv.Itoa(status)) {
+					t.Errorf("the operator must see the status in %q", err)
+				}
+			})
+		}
+	}
+}
+
+// Every other answer stays an error the next pass retries: it was never a verdict.
+func TestRegisterAsn_OtherAnswersAreErrorsNotVerdicts(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
+				problem(w, status, "unknown-sku", "looks like a released slug")
+			})
+			err := c.RegisterAsn(context.Background(), asn())
+			var refused *contract.AsnRefusedError
+			if err == nil || errors.As(err, &refused) {
+				t.Fatalf("status %d: err = %v, want a plain error", status, err)
+			}
+		})
+	}
+}
+
+// The point of the change: a released refusal is retried under the SAME key
+// with the SAME body, and the later 201 completes it.
+func TestRegisterAsn_AReleasedRefusalIsRetriedUnderTheSameKeyAndPasses(t *testing.T) {
+	var keys, bodies []string
+	calls := 0
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		keys, bodies = append(keys, r.Header.Get("Idempotency-Key")), append(bodies, string(b))
+		calls++
+		if calls == 1 {
+			problem(w, http.StatusUnprocessableEntity, "unknown-sku", "SKU-A is not known yet")
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	err := c.RegisterAsn(context.Background(), asn())
+	var refused *contract.AsnRefusedError
+	if !errors.As(err, &refused) || !refused.Retryable {
+		t.Fatalf("first attempt: %v, want a released refusal", err)
+	}
+	if err := c.RegisterAsn(context.Background(), asn()); err != nil {
+		t.Fatalf("second attempt: %v", err)
+	}
+	if len(keys) != 2 || keys[0] != "nf-asn-NF-SHP-1" || keys[0] != keys[1] || bodies[0] != bodies[1] {
+		t.Errorf("keys = %v, bodies equal = %v: a retry must carry the same key and the same body", keys, bodies[0] == bodies[1])
 	}
 }
 
