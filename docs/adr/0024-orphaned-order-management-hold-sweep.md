@@ -18,6 +18,11 @@ follow-up that `order-management` ADR 0020 ("Accepted deferral") asks for:
 order-management's cancel"*. Migration `0005` and one additive event
 (`OrphanedHoldCancelled`); no existing contract changes.
 
+> **2026-11-19:** order-management now declares a replay class per problem type and releases
+> the key of a `RETRYABLE` refusal, and this service reads its refusals by class, see
+> [ADR 0037](./0037-retry-the-refusals-the-callees-release.md). P7 below is unchanged: a refused
+> release is still not retried, and ADR 0037 records why.
+
 ## Context
 
 A network-originated order reaches `order-management` as a HELD order

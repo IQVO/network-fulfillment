@@ -105,7 +105,11 @@ attempts every due `PENDING` shipment, oldest first, at most 100 per pass.
   identifies one `(sku, level)` for good, so only the activity flag can change). Only an
   answer is cached: a `404` is `ErrGtinNotFound` and is never stored. A GTIN that is not an
   `EACH` GTIN is a verdict about the data (the manifest counts eaches of an each GTIN).
-- **Failures are recorded, never guessed.** An unknown GTIN, a transport failure, an SKU
+- **Failures are recorded, never guessed.** _(2026-11-19: which refusals are retried follows
+  inbound-receiving's replay classes, one slug table in the adapter, and the retry is bounded,
+  see [ADR 0037](./0037-retry-the-refusals-the-callees-release.md). The slug is
+  `concurrent-modification`, not `concurrent-update`, and `duplicate-sscc` and the other
+  `RETRYABLE` slugs wait; a FINAL refusal or an unknown slug is `REJECTED`.)_ An unknown GTIN, a transport failure, an SKU
   inbound-receiving has not caught up with (`unknown-sku`), a `409 concurrent-update`: the
   shipment stays `PENDING` with `last_error`, `attempts + 1` and `next_attempt_at` after a
   backoff of one minute doubling to one hour (`IntakeBackoff`), logged at `WARN`. A verdict
