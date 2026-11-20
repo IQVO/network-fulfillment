@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/fleetrest"
+	"github.com/claudioed/network-fulfillment/internal/adapters/outbound/replayclass"
 	"github.com/claudioed/network-fulfillment/internal/application/contract"
 	"github.com/claudioed/network-fulfillment/internal/application/ports"
 )
@@ -85,14 +86,13 @@ func Body(asn contract.AsnRegistration) ([]byte, error) {
 // idempotencyKey is deterministic per ASN number: a replay is a replay.
 func idempotencyKey(asnNumber string) string { return "nf-asn-" + asnNumber }
 
-// retryableProblems are refusals that waiting can fix: the product projection of
-// inbound-receiving has not caught up with an SKU product-master already knows.
-var retryableProblems = map[string]bool{"unknown-sku": true, "concurrent-update": true}
-
 // RegisterAsn registers the ASN. 201 is success; 409 asn-already-exists is
 // success too (this ASN was registered by an earlier attempt: its number is
-// derived from the shipment, so it can only be ours); a 422 is a verdict, except
-// unknown-sku which is retried; 400 is a verdict; anything else is an error.
+// derived from the shipment, so it can only be ours). A 400, 404, 409 or 422 is
+// a refusal (*contract.AsnRefusedError): Retryable when inbound-receiving
+// releases the slug under the key (asnRefusals, ADR 0037), terminal when it
+// stores it, when the slug is unknown and when there is no problem document.
+// Anything else (401, 403, 429, 5xx) is a plain error.
 func (c *Client) RegisterAsn(ctx context.Context, asn contract.AsnRegistration) error {
 	body, err := Body(asn)
 	if err != nil {
@@ -105,30 +105,26 @@ func (c *Client) RegisterAsn(ctx context.Context, asn contract.AsnRegistration) 
 	if err != nil {
 		return err
 	}
-	problem, detail := problemOf(resp.Body)
+	slug, detail := replayclass.ProblemOf(resp.Body)
 	switch {
 	case resp.Status == http.StatusCreated || resp.Status == http.StatusOK:
 		return nil
-	case resp.Status == http.StatusConflict && problem == "asn-already-exists":
+	case resp.Status == http.StatusConflict && slug == "asn-already-exists":
 		return nil
-	case resp.Status == http.StatusUnprocessableEntity || resp.Status == http.StatusBadRequest:
-		return &contract.AsnRefusedError{Problem: problem, Detail: detail, Retryable: retryableProblems[problem]}
+	case isRefusalStatus(resp.Status):
+		if slug == "" {
+			detail = fmt.Sprintf("HTTP %d without a problem document", resp.Status)
+		}
+		return &contract.AsnRefusedError{Problem: slug, Detail: detail, Retryable: asnRefusals.Retryable(slug)}
 	}
-	return fmt.Errorf("inbound-receiving: POST /asns: %d %s: %s", resp.Status, problem, detail)
+	return fmt.Errorf("inbound-receiving: POST /asns: %d %s: %s", resp.Status, slug, detail)
 }
 
-// problemOf reads the slug (the last path element of `type`) and the detail of
-// an application/problem+json body.
-func problemOf(body []byte) (slug, detail string) {
-	var p struct {
-		Type   string `json:"type"`
-		Detail string `json:"detail"`
+// isRefusalStatus is the set of statuses a refusal of POST /asns can carry.
+func isRefusalStatus(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity:
+		return true
 	}
-	_ = json.Unmarshal(body, &p)
-	for i := len(p.Type) - 1; i >= 0; i-- {
-		if p.Type[i] == '/' {
-			return p.Type[i+1:], p.Detail
-		}
-	}
-	return p.Type, p.Detail
+	return false
 }
