@@ -128,10 +128,21 @@ func readRegisterOperation(t *testing.T, doc *openapi3.T) specReading {
 
 // auditTable returns what is wrong between a table and the spec's reading.
 func auditTable(table replayclass.Table, r specReading) []string {
-	var problems []string
 	released := map[string]bool{}
 	for _, s := range r.released {
 		released[s] = true
+	}
+	problems := auditReleased(table, released)
+	problems = append(problems, auditAdrOnly(table, released)...)
+	problems = append(problems, auditNamedAndRetried(table, r, released)...)
+	sort.Strings(problems)
+	return problems
+}
+
+// auditReleased: every released slug is retryable here but the documented exceptions.
+func auditReleased(table replayclass.Table, released map[string]bool) []string {
+	var problems []string
+	for s := range released {
 		_, excepted := releasedButTerminalHere[s]
 		switch {
 		case excepted && table.Retryable(s):
@@ -145,6 +156,12 @@ func auditTable(table replayclass.Table, r specReading) []string {
 			problems = append(problems, "the exception for "+s+" is stale: the pin no longer releases it")
 		}
 	}
+	return problems
+}
+
+// auditAdrOnly: the slugs only the callee's ADR releases are still unlisted by the pin and retryable here.
+func auditAdrOnly(table replayclass.Table, released map[string]bool) []string {
+	var problems []string
 	for s := range retryableByTheAdrOnly {
 		switch {
 		case released[s]:
@@ -153,6 +170,12 @@ func auditTable(table replayclass.Table, r specReading) []string {
 			problems = append(problems, "the exception for "+s+" is stale: the table does not map it retryable")
 		}
 	}
+	return problems
+}
+
+// auditNamedAndRetried: every named slug is classified, and nothing retried is a stored refusal.
+func auditNamedAndRetried(table replayclass.Table, r specReading, released map[string]bool) []string {
+	var problems []string
 	for _, s := range r.named {
 		if _, skip := answeredBeforeTheTable[s]; !skip && table.Class(s) == replayclass.Unset {
 			problems = append(problems, "spec names "+s+" and the table classifies it neither retryable nor terminal")
@@ -163,7 +186,6 @@ func auditTable(table replayclass.Table, r specReading) []string {
 			problems = append(problems, "the table retries "+s+" but the spec does not release it: a stored refusal would only be replayed")
 		}
 	}
-	sort.Strings(problems)
 	return problems
 }
 

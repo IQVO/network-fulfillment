@@ -88,21 +88,18 @@ func TestReceiveRefusals_AReleasedRefusalKeepsTheOrderNewAndALaterPollAnswersItU
 // stays NEW inside its window (the poll retries), the window closes, the re-delivery
 // leaves it to the sweep and RejectOverdueOrders rejects it ACKNOWLEDGEMENT_DEADLINE_MISSED.
 func TestReceiveRefusals_ARaiseThatNeverPassesEndsRejectedAtTheDeadline(t *testing.T) {
-	cases := map[string]omRefusing{
-		"released (RETRYABLE) forever": {refusals: -1, status: http.StatusBadRequest, slug: "unknown-process-path"},
-		"final (FINAL)":                {refusals: -1, status: http.StatusBadRequest, slug: "invalid-fulfillment-site-id"},
+	cases := map[string]string{
+		"released (RETRYABLE) forever": "unknown-process-path",
+		"final (FINAL)":                "invalid-fulfillment-site-id",
 	}
-	for name, tc := range cases {
+	for name, slug := range cases {
 		t.Run(name, func(t *testing.T) {
-			om := tc
+			om := &omRefusing{refusals: -1, status: http.StatusBadRequest, slug: slug}
 			srv := om.serve(t)
 			f := newFixture(true)
 			planner := ordermanagement.NewPlanner(srv.URL, srv.Client())
-			for poll := range 3 {
-				if _, err := f.receiveVia(planner, fixedClock{t: now()}).Execute(context.Background(), demand("po-1", "ASIN-1")); err == nil {
-					t.Fatalf("poll %d: a refused raise must not answer the order", poll)
-				}
-			}
+			f.pollRefused(t, planner, 3)
+
 			late := fixedClock{t: now().Add(networkorder.AcknowledgementWindow + time.Minute)}
 			if o, err := f.receiveVia(planner, late).Execute(context.Background(), demand("po-1", "ASIN-1")); err != nil || o.State() != networkorder.StateNew {
 				t.Fatalf("late poll = %v, %v: a closed window is left to the sweep", o, err)
@@ -118,5 +115,15 @@ func TestReceiveRefusals_ARaiseThatNeverPassesEndsRejectedAtTheDeadline(t *testi
 				t.Errorf("order-management saw %d raises, want 3 (one per poll inside the window, none after)", len(om.keys))
 			}
 		})
+	}
+}
+
+// pollRefused runs n polls of the same demand inside the window; each must fail.
+func (f *fixture) pollRefused(t *testing.T, planner *ordermanagement.Planner, n int) {
+	t.Helper()
+	for poll := range n {
+		if _, err := f.receiveVia(planner, fixedClock{t: now()}).Execute(context.Background(), demand("po-1", "ASIN-1")); err == nil {
+			t.Fatalf("poll %d: a refused raise must not answer the order", poll)
+		}
 	}
 }

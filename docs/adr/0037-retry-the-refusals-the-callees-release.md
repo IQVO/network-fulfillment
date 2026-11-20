@@ -91,11 +91,14 @@ treated the refusals by guesses that did not follow those classes:
      when a slug the spec names is unclassified, a released slug is not retryable, a retryable
      slug is not released, or an exception below is stale; a second test proves the audit catches
      each drift.
-   - order-management: its PR #305 (ADR 0054) was still open, so its pinned OpenAPI does not yet
-     say which slugs are released. `refusal_classes_test.go` holds the table equal to a COPY of the
-     class table of ADR 0054 (`testdata/order-management-adr-0054-classes.tsv`, 32 rows, 18
-     `RETRYABLE`) and checks that every problem type the pinned OpenAPI names on the two keyed
-     routes is classified. When #305 merges, refresh the pin and the copy.
+   - order-management: its ADR 0054 (PR #305, merged) put the replayed and the released slugs
+     in the `Idempotency-Key` text of its OpenAPI, so the pin (refreshed in this change) holds
+     both lists: `refusal_classes_test.go` fails when a slug the pin replays is not terminal
+     here, a slug it releases is not retryable here, or a problem type named on the two keyed
+     routes is unclassified. The pin does not say the class of every problem type, so the
+     table is also held equal to a COPY of the class table of ADR 0054
+     (`testdata/order-management-adr-0054-classes.tsv`, 32 rows, 18 `RETRYABLE`): no slug is
+     missing and none is invented. Refresh the copy when ADR 0054 changes.
 
 ### The tables
 

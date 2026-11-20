@@ -1,8 +1,7 @@
-# The class table of order-management ADR 0054 section 4 (docs/docs/adr/0054-idempotency-replay-classes.md),
-# one row per problem type: slug, status, replay class. A COPY, not a pin: PR IQVO/order-management#305
-# (branch feature/idempotency-replay-classes @ 0a632d9) was open when it was taken; refresh = copy the table
-# again, never edit a row. Once the PR merges, refresh the pinned openapi (contracts/pinned.json) too: its
-# Idempotency-Key text then lists the released slugs and refusal_classes_test.go can read them from the pin.
+# The class table of order-management ADR 0054 section 4 (docs/docs/adr/0054-idempotency-replay-classes.md on
+# develop since PR IQVO/order-management#305, merge b11825c), one row per problem type: slug, status, replay class.
+# A COPY, not a pin: the pinned OpenAPI lists the stored and the released slugs of the keyed routes but not the
+# class of every problem type. Refresh = copy the table again, never edit a row.
 concurrent-modification	409	RETRYABLE
 downstream-not-configured	503	RETRYABLE
 downstream-unavailable	503	RETRYABLE
