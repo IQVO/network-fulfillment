@@ -12,9 +12,13 @@ info:
 
     Every `POST` except the three retired appointment writes requires an
     `Idempotency-Key` header (fleet REST API guideline): a missing key is a 400 `idempotency-key-required`, a retry with
-    the same key and request (method, path, body) replays the original response
+    the same key and request (method, path, body) replays the stored response
     with `Idempotency-Replayed: true`, the same key with a different request is
-    a 409 `idempotency-key-reused`. Lifecycle transitions are transition
+    a 409 `idempotency-key-reused`. Only an answer that is final for the request is stored: every
+    2xx and the refusals that are a function of the request or of a state that never changes back.
+    A refusal that depends on state that can change (an optimistic-lock conflict, a fact not
+    delivered yet, a state not reached yet; the list is under the `Idempotency-Key` parameter) and every 5xx
+    is not stored: the key is released and a retry under it executes again. Lifecycle transitions are transition
     resources: `POST /asns/{asnNumber}/cancellations` and
     `/receipts/{receiptId}/closures`.
 
@@ -1346,6 +1350,28 @@ components:
         key is 400 `idempotency-key-required` and one longer than 128
         characters or with non-printable characters is 400
         `idempotency-key-invalid`.
+
+        What is stored. A 2xx is stored. A 5xx is never stored. A refusal is
+        stored (and replayed) only when it is final for the request: the
+        validation problems (the `invalid-*`, `*-requires-*`, `duplicate-sku`,
+        `duplicate-asn-number`, `unsupported-gtin`, `homogeneous-carton-mixed`,
+        `carton-contents-mismatch` slugs), `asn-already-exists`, `asn-terminal`,
+        `appointment-cancelled`, `receipt-closed` and `receipt-not-found`.
+        A refusal that depends on state that can change is NOT stored: its key is
+        released, a retry with the same key and request executes again (it can
+        succeed once the state allows), and a different request under the
+        released key is a new request, not `idempotency-key-reused`. These are
+        `concurrent-modification`, `version-mismatch` (re-read, then retry with
+        the new `If-Match`), `malformed-request`, `asn-not-found`,
+        `appointment-not-found`, `receiving-policy-not-found`, `carton-not-found`,
+        `unknown-asn`, `unknown-appointment`, `unknown-sku`, `unknown-gtin`,
+        `counted-sku-unknown`, `asn-not-on-appointment`, `line-not-on-asn`,
+        `duplicate-sscc`, `asn-in-progress`, `asn-not-receivable`,
+        `receipt-already-open`, `tolerance-override-required`, `tolerance-blocked`,
+        `sscc-prefix-not-configured`, `sscc-serial-exhausted`,
+        `counted-contents-not-mixed`, `scan-kind-mismatch` and
+        `unsupported-pack-level`. Rows are kept for the retention window
+        (default 24 hours).
       schema:
         type: string
         minLength: 1
