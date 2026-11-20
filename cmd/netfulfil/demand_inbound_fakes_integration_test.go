@@ -179,11 +179,13 @@ type fakeInboundReceiving struct {
 	keys     map[string]string
 	requests int
 	refuse   map[string]string // asn number -> problem slug to answer with
+	// attempted is the Idempotency-Key of every POST /asns per ASN number, refused or not.
+	attempted map[string][]string
 }
 
 func newFakeInboundReceiving(t *testing.T) *fakeInboundReceiving {
 	t.Helper()
-	f := &fakeInboundReceiving{asns: map[string]string{}, keys: map[string]string{}, refuse: map[string]string{}}
+	f := &fakeInboundReceiving{asns: map[string]string{}, keys: map[string]string{}, refuse: map[string]string{}, attempted: map[string][]string{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -202,6 +204,7 @@ func (f *fakeInboundReceiving) serve(w http.ResponseWriter, r *http.Request) {
 		AsnNumber string `json:"asnNumber"`
 	}
 	_ = json.Unmarshal(raw, &body)
+	f.attempted[body.AsnNumber] = append(f.attempted[body.AsnNumber], r.Header.Get("Idempotency-Key"))
 	if slug := f.refuse[body.AsnNumber]; slug != "" {
 		fakeProblem(w, http.StatusUnprocessableEntity, slug)
 		return
@@ -212,6 +215,21 @@ func (f *fakeInboundReceiving) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.asns[body.AsnNumber], f.keys[body.AsnNumber] = string(raw), r.Header.Get("Idempotency-Key")
 	fakeOK(w, http.StatusCreated, map[string]any{"asnNumber": body.AsnNumber, "state": "Registered"})
+}
+
+// stopRefusing makes the fake accept the ASN from now on: inbound-receiving released the
+// refusal (its state changed), the same request under the same key may pass.
+func (f *fakeInboundReceiving) stopRefusing(asn string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.refuse, asn)
+}
+
+// keysAsked is the Idempotency-Key of every attempt to register the ASN.
+func (f *fakeInboundReceiving) keysAsked(asn string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.attempted[asn]...)
 }
 
 func (f *fakeInboundReceiving) asnCount() int {
