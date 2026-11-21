@@ -44,7 +44,7 @@ Feature: Inbound shipment intake
 
   @bdd
   Scenario: A verdict from inbound-receiving parks the shipment
-    Given inbound-receiving refuses ASN "NF-SHP-3" as a duplicate SSCC
+    Given inbound-receiving refuses ASN "NF-SHP-3" with a final "receipt-closed"
     And the network has shipment "SHP-3" from seller "S-100" with a pallet carton of 12 of "00614141000036" and a mixed carton of 6 of "00614141000036" and 4 of "00614141000043"
     When the inbound intake runs
     And 2 hours pass
