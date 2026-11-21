@@ -394,7 +394,7 @@ func (w *world) theRaiseFailedAsAPlainError() error {
 		return fmt.Errorf("the raise succeeded, want a plain error")
 	}
 	if errors.As(x.lastErr, &refused) {
-		return fmt.Errorf("the failure %v is a refusal, want a plain error", x.lastErr)
+		return fmt.Errorf("the failure %w is a refusal, want a plain error", x.lastErr)
 	}
 	return nil
 }
@@ -416,7 +416,7 @@ func (w *world) theHeldOrderIsReleased(id string) error {
 	}
 	x.lastErr = x.planner.ReleaseHeldOrder(context.Background(), shared.LocalOrderId(id))
 	if x.lastErr != nil {
-		return fmt.Errorf("the release failed: %v", x.lastErr)
+		return fmt.Errorf("the release failed: %w", x.lastErr)
 	}
 	return nil
 }
