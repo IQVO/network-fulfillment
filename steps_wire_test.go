@@ -345,7 +345,7 @@ func (w *world) theRetriedRaiseWasByteIdentical() error {
 func (w *world) theVerdictWasFeasible() error {
 	x := w.wire()
 	if x.lastErr != nil {
-		return fmt.Errorf("the raise failed: %v", x.lastErr)
+		return fmt.Errorf("the raise failed: %w", x.lastErr)
 	}
 	if !x.lastResult.Feasible || x.lastResult.LocalOrderId != bddWireOrder || !x.lastResult.PromisedCutoff.Equal(bddWirePromise) {
 		return fmt.Errorf("the verdict was %+v, want feasible with %s and the promise %s",
@@ -357,7 +357,7 @@ func (w *world) theVerdictWasFeasible() error {
 func (w *world) theVerdictWasInfeasible(local string) error {
 	x := w.wire()
 	if x.lastErr != nil {
-		return fmt.Errorf("no promise is a verdict, not an error: %v", x.lastErr)
+		return fmt.Errorf("no promise is a verdict, not an error: %w", x.lastErr)
 	}
 	if x.lastResult.Feasible || string(x.lastResult.LocalOrderId) != local {
 		return fmt.Errorf("the verdict was %+v, want infeasible keeping %s", x.lastResult, local)
@@ -368,7 +368,7 @@ func (w *world) theVerdictWasInfeasible(local string) error {
 func (w *world) theRaiseWasRefusedRetryably() error {
 	var refused *ordermanagement.RefusalError
 	if !errors.As(w.wire().lastErr, &refused) {
-		return fmt.Errorf("the raise failed with %v, want a classified refusal", w.wire().lastErr)
+		return fmt.Errorf("the raise failed with %w, want a classified refusal", w.wire().lastErr)
 	}
 	if !refused.Released {
 		return fmt.Errorf("the refusal %q was final, want released", refused.Problem)
@@ -379,7 +379,7 @@ func (w *world) theRaiseWasRefusedRetryably() error {
 func (w *world) theRaiseWasRefusedFinally() error {
 	var refused *ordermanagement.RefusalError
 	if !errors.As(w.wire().lastErr, &refused) {
-		return fmt.Errorf("the raise failed with %v, want a classified refusal", w.wire().lastErr)
+		return fmt.Errorf("the raise failed with %w, want a classified refusal", w.wire().lastErr)
 	}
 	if refused.Released {
 		return fmt.Errorf("the refusal %q was released, want final", refused.Problem)
