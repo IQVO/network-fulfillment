@@ -96,6 +96,7 @@ type world struct {
 	confirm       *usecases.ConfirmNetworkOrderShipment
 	poller        *poller.Poller
 	inboundW      *inboundWorld
+	wireW         *bddWireWorld
 
 	// offersEnabled mirrors CAPABILITY_OFFER_ENABLED: when false the route is
 	// not registered at all.
@@ -124,6 +125,7 @@ func (w *world) reset() {
 	w.dict = producttranslation.New()
 	w.gateway = newRecordingGateway(retailnetwork.NewStubGateway(logger))
 	w.inboundW = nil
+	w.wireW = nil
 	w.planner = newFakePlanner()
 	w.readiness = &inboundhttp.Readiness{}
 	w.metrics = telemetry.NewCircuitBreakerMetrics()
@@ -206,6 +208,10 @@ func (w *world) reportsServer() *httptest.Server {
 }
 
 func (w *world) stop() {
+	if w.wireW != nil {
+		w.wireW.srv.Close()
+		w.wireW = nil
+	}
 	for _, s := range []*httptest.Server{w.api, w.reports} {
 		if s != nil {
 			s.Close()
@@ -361,4 +367,6 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w.registerRuleSteps(sc)
 	w.registerSupplySteps(sc)
 	w.registerShipmentSteps(sc)
+	w.registerRefusalClassSteps(sc)
+	w.registerHeldOrderWireSteps(sc)
 }

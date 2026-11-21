@@ -104,16 +104,34 @@ func (b bddBook) ResolveGtin(_ context.Context, gtin string) (contract.GtinResol
 	return contract.GtinResolution{}, contract.ErrGtinNotFound
 }
 
+// bddRefusal is the double's stand-in for one classified refusal of an ASN:
+// the real adapter derives this from inbound-receiving's problem slug and its
+// replay class (ADR 0037), so the double answers with the class named in the
+// step and the use case never sees a slug it can read.
+type bddRefusal struct {
+	slug     string
+	released bool
+}
+
 type bddReceiving struct {
-	asns    map[string]contract.AsnRegistration
-	asked   int
-	refused map[string]string
+	asns  map[string]contract.AsnRegistration
+	asked int
+	// refused is keyed by ASN number; a refused registration is recorded in
+	// refusedAsns so a scenario can prove every retry asked for the same one.
+	refused     map[string]bddRefusal
+	refusedAsns []string
+	// down makes every call a transport failure: a plain error, never a refusal.
+	down bool
 }
 
 func (r *bddReceiving) RegisterAsn(_ context.Context, a contract.AsnRegistration) error {
 	r.asked++
-	if slug := r.refused[a.AsnNumber]; slug != "" {
-		return &contract.AsnRefusedError{Problem: slug, Detail: "refused in the suite"}
+	if r.down {
+		return fmt.Errorf("inbound-receiving is unreachable")
+	}
+	if ref, ok := r.refused[a.AsnNumber]; ok {
+		r.refusedAsns = append(r.refusedAsns, a.AsnNumber)
+		return &contract.AsnRefusedError{Problem: ref.slug, Detail: "refused in the suite", Retryable: ref.released}
 	}
 	r.asns[a.AsnNumber] = a
 	return nil
@@ -128,7 +146,7 @@ func (w *world) inbound() *inboundWorld {
 		gateway:   retailnetwork.NewStubGateway(nil),
 		repo:      &bddInboundRepo{rows: map[string]*bddInboundRow{}, cursors: map[shared.SiteId]time.Time{}},
 		book:      map[string]contract.GtinResolution{},
-		receiving: &bddReceiving{asns: map[string]contract.AsnRegistration{}, refused: map[string]string{}},
+		receiving: &bddReceiving{asns: map[string]contract.AsnRegistration{}, refused: map[string]bddRefusal{}},
 	}
 	iw.intake = &usecases.IntakeInboundShipments{
 		Sites: []shared.SiteId{bddInboundSite}, Gateway: iw.gateway, Shipments: iw.repo,
@@ -163,7 +181,9 @@ func (w *world) theInboundIntakeRuns() error {
 }
 
 func (w *world) receivingRefuses(asn, why string) error {
-	w.inbound().receiving.refused[asn] = strings.ToLower(strings.ReplaceAll(why, " ", "-"))
+	// The old vocabulary names a verdict; under the classes of ADR 0037 a
+	// verdict is a refusal the callee STORES (final), whatever its slug.
+	w.inbound().receiving.refused[asn] = bddRefusal{slug: strings.ToLower(strings.ReplaceAll(why, " ", "-"))}
 	return nil
 }
 
