@@ -303,7 +303,7 @@ func problemFromError(err error, ref ...string) *problem {
 		}
 		return problemOrderNotFound(r)
 	default:
-		slog.Error("a2a skill failed", "error", err)
+		slog.Error("a2a skill failed", "error", logReplacer.Replace(err.Error()))
 		return problemInternal()
 	}
 }
