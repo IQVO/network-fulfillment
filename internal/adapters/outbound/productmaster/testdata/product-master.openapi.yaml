@@ -840,7 +840,7 @@ paths:
 components:
   headers:
     IdempotencyReplayed:
-      description: "`true` when this answer is the stored response of an earlier request with the same `Idempotency-Key` (the operation did not run again). Never present on the first execution."
+      description: "`true` when this answer is the stored response of an earlier request with the same `Idempotency-Key` (the operation did not run again). Never present on the first execution. A refusal whose problem type is RETRYABLE (nothing committed, the answer depends on state that can change) is never stored, so it never replays: the same key executes again (ADR 0015)."
       schema:
         type: string
         enum: ["true"]
@@ -855,6 +855,13 @@ components:
         replays the stored answer with `Idempotency-Replayed: true`; with a different
         request it is 409 `idempotency-key-reused`. Missing: 400
         `idempotency-key-required`; malformed: 400 `idempotency-key-invalid`.
+        A refusal is stored only when its problem type's replay class is
+        FINAL (a function of the request, or of state that only ever moves
+        one way); a RETRYABLE refusal (nothing committed, the answer depends
+        on state that can change, e.g. `pack-level-not-found`,
+        `concurrent-modification`) is not stored and its key is released, so
+        the same key retries the real work (ADR 0015). 2xx answers are always
+        stored; 5xx never.
       schema:
         type: string
         minLength: 1
@@ -920,7 +927,7 @@ components:
         type: string
         minLength: 1
         maxLength: 64
-        pattern: "^[^\\s/]+$"
+        pattern: "^[^\\s/\\x00-\\x1f\\x7f-\\x9f]+$"
       example: SKU-1
 
   responses:

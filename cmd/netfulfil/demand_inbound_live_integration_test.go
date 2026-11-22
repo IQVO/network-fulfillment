@@ -187,14 +187,15 @@ func TestInboundIntake_UnknownGtinWaitsThenRegisters(t *testing.T) {
 }
 
 // TestInboundIntake_AVerdictFromInboundReceivingParksTheShipment: a refusal about
-// the data is recorded as REJECTED and not retried.
+// the data that inbound-receiving stores (replay class FINAL, ADR 0037) is recorded as
+// REJECTED and not retried.
 func TestInboundIntake_AVerdictFromInboundReceivingParksTheShipment(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 270*time.Second)
 	defer cancel()
 	rig := startInboundRig(t, ctx)
 	rig.master.declare(inGtinA, "SKU-A", "EACH", 1)
 	rig.master.declare(inGtinB, "SKU-B", "EACH", 1)
-	rig.receive.refuse["NF-SHP-3"] = "duplicate-sscc"
+	rig.receive.refuse["NF-SHP-3"] = "carton-contents-mismatch"
 	rig.inbound.ship(shipmentTree("SHP-3"))
 	stop := rig.start(t, ctx, nil)
 
@@ -202,5 +203,40 @@ func TestInboundIntake_AVerdictFromInboundReceivingParksTheShipment(t *testing.T
 	asked, polls := rig.receive.requestCount(), len(rig.inbound.pollQueries())
 	e2eWaitFor(t, ctx, 60*time.Second, "three more intake passes", func() bool { return len(rig.inbound.pollQueries()) >= polls+3 })
 	expectEqual(t, "attempts after the verdict", rig.receive.requestCount(), asked)
+	mustStop(t, stop)
+}
+
+// TestInboundIntake_AReleasedRefusalIsRetriedUnderTheSameKeyAndRegisters: a refusal that
+// inbound-receiving releases (replay class RETRYABLE, ADR 0037: here a duplicate SSCC
+// that a cancelled ASN frees) keeps the shipment PENDING with the refusal as its reason;
+// once the callee lets the request pass, the next due attempt registers it under the
+// SAME Idempotency-Key.
+func TestInboundIntake_AReleasedRefusalIsRetriedUnderTheSameKeyAndRegisters(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 270*time.Second)
+	defer cancel()
+	rig := startInboundRig(t, ctx)
+	rig.master.declare(inGtinA, "SKU-A", "EACH", 1)
+	rig.master.declare(inGtinB, "SKU-B", "EACH", 1)
+	rig.receive.refuse["NF-SHP-4"] = "duplicate-sscc"
+	rig.inbound.ship(shipmentTree("SHP-4"))
+	stop := rig.start(t, ctx, nil)
+
+	e2eWaitFor(t, ctx, 90*time.Second, "SHP-4 pending with the released refusal as its reason", func() bool {
+		return rig.count(t, ctx, `SELECT count(*) FROM inbound_shipments WHERE shipment_ref = 'SHP-4' AND status = 'PENDING' AND attempts >= 1 AND last_error LIKE '%duplicate-sscc%'`) == 1
+	})
+	expectEqual(t, "ASNs registered while refused", rig.receive.asnCount(), 0)
+
+	rig.receive.stopRefusing("NF-SHP-4")
+	if _, err := rig.pool.Exec(ctx, `UPDATE inbound_shipments SET next_attempt_at = now() WHERE shipment_ref = 'SHP-4'`); err != nil {
+		t.Fatal(err)
+	}
+	e2eWaitFor(t, ctx, 60*time.Second, "SHP-4 registers once the refusal is lifted", func() bool { return rig.shipmentStatus(t, ctx, "SHP-4") == "REGISTERED" })
+	keys := rig.receive.keysAsked("NF-SHP-4")
+	if len(keys) < 2 {
+		t.Fatalf("keys asked = %v, want the refused attempt and the one that passed", keys)
+	}
+	for _, k := range keys {
+		expectEqual(t, "Idempotency-Key of every attempt", k, "nf-asn-NF-SHP-4")
+	}
 	mustStop(t, stop)
 }

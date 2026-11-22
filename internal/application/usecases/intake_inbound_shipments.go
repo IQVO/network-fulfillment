@@ -25,8 +25,10 @@ import (
 // shipment that cannot be registered yet (a GTIN product-master does not know, an
 // SKU inbound-receiving has not caught up with, a transport failure) stays
 // PENDING with the error and is retried with backoff; one whose data
-// inbound-receiving refuses outright is REJECTED and surfaced at ERROR. Nothing
-// is guessed.
+// inbound-receiving refuses outright is REJECTED and surfaced at ERROR. A refusal
+// inbound-receiving RELEASES (replay class RETRYABLE, ADR 0037) is retried under the
+// same Idempotency-Key, bounded by MaxReleasedRefusalAttempts, and ends REJECTED as a
+// final refusal does. Nothing is guessed.
 type IntakeInboundShipments struct {
 	Sites     []shared.SiteId
 	Gateway   ports.InboundGateway
@@ -37,6 +39,9 @@ type IntakeInboundShipments struct {
 	Logger    *slog.Logger
 	// BatchSize bounds how many due shipments one pass attempts (default 100).
 	BatchSize int
+	// MaxReleasedRefusalAttempts bounds the attempts a shipment may fail with a refusal
+	// inbound-receiving releases (default DefaultReleasedRefusalAttempts).
+	MaxReleasedRefusalAttempts int
 }
 
 // IntakeResult says what one pass did.
@@ -50,8 +55,11 @@ type IntakeResult struct {
 
 const (
 	defaultIntakeBatch = 100
-	backoffBase        = time.Minute
-	backoffCap         = time.Hour
+	// DefaultReleasedRefusalAttempts: with the backoff below, 30 failed attempts span
+	// about 24 h, the time inbound-receiving keeps a stored answer.
+	DefaultReleasedRefusalAttempts = 30
+	backoffBase                    = time.Minute
+	backoffCap                     = time.Hour
 )
 
 // IntakeBackoff is the wait before attempt number `attempts` (the number of
@@ -156,18 +164,43 @@ func (u *IntakeInboundShipments) attempt(ctx context.Context, rec contract.Inbou
 		res.Registered++
 		return u.Shipments.MarkRegistered(ctx, ref, u.Clock.Now())
 	}
-	var refused *contract.AsnRefusedError
-	var bad *dataError
-	if (errors.As(err, &refused) && !refused.Retryable) || errors.As(err, &bad) {
+	if reason, final := u.verdict(err, rec.Attempts+1); final {
 		res.Rejected++
-		u.logger().Error("inbound shipment rejected, it will not be retried", "shipment", ref, "asn", rec.AsnNumber, "err", err)
-		return u.Shipments.MarkRejected(ctx, ref, err.Error())
+		u.logger().Error("inbound shipment rejected, it will not be retried", "shipment", ref, "asn", rec.AsnNumber, "err", reason)
+		return u.Shipments.MarkRejected(ctx, ref, reason.Error())
 	}
 	res.Retrying++
 	wait := IntakeBackoff(rec.Attempts + 1)
 	u.logger().Warn("inbound shipment not registered yet, retrying", "shipment", ref, "asn", rec.AsnNumber,
 		"attempt", rec.Attempts+1, "retryIn", wait, "err", err)
 	return u.Shipments.MarkRetry(ctx, ref, err.Error(), u.Clock.Now().Add(wait))
+}
+
+// verdict says whether a failed attempt (the attempt-th) ends the shipment. A refusal
+// inbound-receiving does not release, and data that can never be registered, end it. A
+// refusal it RELEASES (nothing committed, the same key may pass later, ADR 0037) keeps it
+// pending, retried under the same ASN number and so the same Idempotency-Key, until the
+// attempt bound ends it in the same terminal state. Anything else (a transport failure, a
+// 5xx) was never a verdict and is not bounded here.
+func (u *IntakeInboundShipments) verdict(err error, attempt int) (reason error, final bool) {
+	var refused *contract.AsnRefusedError
+	var bad *dataError
+	switch {
+	case errors.As(err, &bad):
+		return err, true
+	case errors.As(err, &refused) && !refused.Retryable:
+		return err, true
+	case errors.As(err, &refused) && attempt >= u.releasedRefusalBound():
+		return fmt.Errorf("%w (still released after %d attempts, giving up)", err, attempt), true
+	}
+	return nil, false
+}
+
+func (u *IntakeInboundShipments) releasedRefusalBound() int {
+	if u.MaxReleasedRefusalAttempts > 0 {
+		return u.MaxReleasedRefusalAttempts
+	}
+	return DefaultReleasedRefusalAttempts
 }
 
 func (u *IntakeInboundShipments) logger() *slog.Logger {

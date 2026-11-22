@@ -573,7 +573,8 @@ the delay, set `ORPHAN_HOLD_GRACE` (a Go duration, `0` = none).
    `PENDING`): not swept, because cancelling could contradict a later
    `SUCCESS`. List them with `list_network_orders` `state=SUBMITTED`.
 2. `ACKNOWLEDGED` order whose release call failed (the failure is not logged
-   and nothing retries it): release it in order-management with
+   and nothing retries it, not even a refusal order-management releases such as
+   `concurrent-modification`, ADR 0037 open points): release it in order-management with
    `POST /orders/{localOrderId}/releases`. Never cancel it: the network was told
    we will ship.
 3. A hold raised before this context could record its id (a crash between
@@ -894,11 +895,19 @@ last_error, next_attempt_at FROM inbound_shipments ORDER BY shipped_at;`
   minute doubling to one hour. `GTIN not found` means product-master does not know the
   GTIN: declare the product (the next due attempt registers the shipment). To retry
   at once, `UPDATE inbound_shipments SET next_attempt_at = now() WHERE shipment_ref = ...`.
-  `unknown-sku` means inbound-receiving's product projection has not caught up.
-- `REJECTED`: inbound-receiving refused the data (a duplicate SSCC, a carton set that
-  does not add up). Logged at `ERROR` (`inbound shipment rejected, it will not be
-  retried`). Fix the cause upstream, then `UPDATE inbound_shipments SET status = 'PENDING',
-  next_attempt_at = now() WHERE shipment_ref = ...`.
+  `unknown-sku` means inbound-receiving's product projection has not caught up. A
+  `refused the ASN: <slug>` text is a refusal inbound-receiving RELEASES (its replay class
+  `RETRYABLE`: `unknown-sku`, `duplicate-sscc`, `concurrent-modification`, ...): the same ASN
+  number is sent again under the same `Idempotency-Key` (`nf-asn-<number>`) and may pass
+  once the state changes (the product arrives, the other ASN is cancelled). It is bounded
+  to 30 attempts, about 24 h (ADR 0037).
+- `REJECTED`: inbound-receiving refused the data for good (a carton set that does not add
+  up, an ASN already closed: a refusal it stores, replays and so cannot pass) or a
+  released refusal was still refused after 30 attempts (`last_error` ends `still released
+  after 30 attempts, giving up`). Logged at `ERROR` (`inbound shipment rejected, it will
+  not be retried`). Fix the cause upstream (for a `duplicate-sscc`, cancel the other ASN),
+  then `UPDATE inbound_shipments SET status = 'PENDING', attempts = 0, next_attempt_at =
+  now() WHERE shipment_ref = ...` (`attempts = 0` restarts the bound).
 
 **Signals.** `inbound shipments processed` (Info) and `inbound shipment not registered
 yet, retrying` (Warn) log lines; `circuit_breaker_state{dependency="inbound-receiving"}` and

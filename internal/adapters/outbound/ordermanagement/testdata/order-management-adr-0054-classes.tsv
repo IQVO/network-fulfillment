@@ -1,0 +1,36 @@
+# The class table of order-management ADR 0054 section 4 (docs/docs/adr/0054-idempotency-replay-classes.md on
+# develop since PR IQVO/order-management#305, merge b11825c), one row per problem type: slug, status, replay class.
+# A COPY, not a pin: the pinned OpenAPI lists the stored and the released slugs of the keyed routes but not the
+# class of every problem type. Refresh = copy the table again, never edit a row.
+concurrent-modification	409	RETRYABLE
+downstream-not-configured	503	RETRYABLE
+downstream-unavailable	503	RETRYABLE
+empty-order-id	400	FINAL
+empty-path-id	400	FINAL
+empty-sku	400	FINAL
+held-order-must-be-ship-complete	422	FINAL
+idempotency-key-invalid	400	FINAL
+idempotency-key-required	400	FINAL
+idempotency-key-reused	409	FINAL
+insufficient-stock	503	RETRYABLE
+internal-error	500	RETRYABLE
+invalid-fulfillment-site-id	400	FINAL
+invalid-query-parameter	400	FINAL
+invalid-report-query	400	FINAL
+line-ineligible-for-resolved-path	422	RETRYABLE
+malformed-request-body	400	FINAL
+no-allocated-lines	409	RETRYABLE
+no-backordered-lines	409	RETRYABLE
+non-positive-quantity	422	FINAL
+order-already-released	409	RETRYABLE
+order-line-already-allocated	409	RETRYABLE
+order-line-not-allocated	409	RETRYABLE
+order-line-not-backordered	409	RETRYABLE
+order-line-not-found	400	RETRYABLE
+order-line-not-pending	409	RETRYABLE
+order-not-found	404	FINAL
+order-not-held	409	RETRYABLE
+order-without-lines	400	FINAL
+promise-date-not-set	409	RETRYABLE
+report-store-error	500	RETRYABLE
+unknown-process-path	400	RETRYABLE

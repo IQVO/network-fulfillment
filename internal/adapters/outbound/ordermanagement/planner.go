@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"time"
@@ -124,7 +125,7 @@ func (p *Planner) RaiseHeldOrder(ctx context.Context, req contract.HeldOrderRequ
 	var out orderResponse
 	headers := map[string]string{idempotencyKeyHeader: raiseIdempotencyKey(req.NetworkRef)}
 	if err := p.doWithHeaders(ctx, http.MethodPost, "/orders", headers, body, &out); err != nil {
-		return contract.HeldOrderResult{}, err
+		return contract.HeldOrderResult{}, asRefusal(err)
 	}
 
 	// No promise means order-management could not find a window at or
@@ -156,7 +157,7 @@ func (p *Planner) RaiseHeldOrder(ctx context.Context, req contract.HeldOrderRequ
 // order id so a retried release replays the first answer.
 func (p *Planner) ReleaseHeldOrder(ctx context.Context, id shared.LocalOrderId) error {
 	headers := map[string]string{idempotencyKeyHeader: releaseIdempotencyKey(id)}
-	return p.doWithHeaders(ctx, http.MethodPost, fmt.Sprintf("/orders/%s/releases", id), headers, nil, nil)
+	return asRefusal(p.doWithHeaders(ctx, http.MethodPost, fmt.Sprintf("/orders/%s/releases", id), headers, nil, nil))
 }
 
 // CancelHeldOrder frees the hold. order-management exposes cancellation
@@ -191,11 +192,15 @@ func (p *Planner) CancelHeldOrder(ctx context.Context, id shared.LocalOrderId) e
 type statusError struct {
 	method, path string
 	code         int
+	body         []byte // the start of a 4xx answer: its problem document, read by asRefusal
 }
 
 func (e *statusError) Error() string {
 	return fmt.Sprintf("order-management %s %s: status %d", e.method, e.path, e.code)
 }
+
+// maxProblemBytes bounds the problem document read from a 4xx answer.
+const maxProblemBytes = 16 << 10
 
 // idempotencyKeyHeader is the request header every order-management POST
 // requires (fleet REST guideline section 2).
@@ -244,7 +249,11 @@ func (p *Planner) doWithHeaders(ctx context.Context, method, path string, header
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 300 {
-		return &statusError{method: method, path: path, code: resp.StatusCode}
+		var problem []byte
+		if resp.StatusCode < 500 {
+			problem, _ = io.ReadAll(io.LimitReader(resp.Body, maxProblemBytes))
+		}
+		return &statusError{method: method, path: path, code: resp.StatusCode, body: problem}
 	}
 	if out == nil {
 		return nil
