@@ -64,13 +64,13 @@ func (u *ReturnInboundReceipts) report(ctx context.Context, facts contract.Recei
 		return u.Receipts.MarkReceiptSent(ctx, asn, u.Clock.Now())
 	case errors.Is(err, contract.ErrReceiptRefused) || errors.Is(err, errNoCartons):
 		res.Rejected++
-		u.logger().Error("inbound receipt refused, it will not be retried", "shipment", facts.Shipment.Ref, "asn", asn, "err", err)
+		u.logger().Error("inbound receipt refused, it will not be retried", "shipment", sanitizeLog(facts.Shipment.Ref), "asn", sanitizeLog(asn), "err", sanitizeErr(err))
 		return u.Receipts.MarkReceiptRejected(ctx, asn, err.Error())
 	}
 	res.Retrying++
 	wait := IntakeBackoff(facts.Attempts + 1)
-	u.logger().Warn("inbound receipt not reported yet, retrying", "shipment", facts.Shipment.Ref, "asn", asn,
-		"attempt", facts.Attempts+1, "retryIn", wait, "err", err)
+	u.logger().Warn("inbound receipt not reported yet, retrying", "shipment", sanitizeLog(facts.Shipment.Ref), "asn", sanitizeLog(asn),
+		"attempt", facts.Attempts+1, "retryIn", wait, "err", sanitizeErr(err))
 	return u.Receipts.MarkReceiptRetry(ctx, asn, err.Error(), u.Clock.Now().Add(wait))
 }
 
@@ -126,7 +126,7 @@ func BuildReceipt(f contract.ReceiptFacts, logger *slog.Logger) (contract.Inboun
 	received := map[string]contract.ReceivedCartonFact{}
 	for _, c := range f.Cartons {
 		if c.SSCC == "" {
-			logger.Warn("a received carton without an SSCC is not reported to the network", "shipment", f.Shipment.Ref, "lpn", c.LPN)
+			logger.Warn("a received carton without an SSCC is not reported to the network", "shipment", sanitizeLog(f.Shipment.Ref), "lpn", sanitizeLog(c.LPN))
 			continue
 		}
 		received[c.SSCC] = c
@@ -138,7 +138,7 @@ func BuildReceipt(f contract.ReceiptFacts, logger *slog.Logger) (contract.Inboun
 		case fd.Kind == contract.FindingMissingCarton:
 			// A closed receipt reports every unreceived manifest carton as MISSING anyway.
 		case fd.SSCC == "":
-			logger.Warn("a carton finding without an SSCC is not reported to the network", "shipment", f.Shipment.Ref, "kind", fd.Kind)
+			logger.Warn("a carton finding without an SSCC is not reported to the network", "shipment", sanitizeLog(f.Shipment.Ref), "kind", sanitizeLog(fd.Kind))
 		case fd.Kind == contract.FindingUnexpectedCarton:
 			unexpected[fd.SSCC] = true
 		default:
