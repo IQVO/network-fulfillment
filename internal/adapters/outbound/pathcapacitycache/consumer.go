@@ -235,10 +235,10 @@ func (c *Consumer) Run(ctx context.Context) error {
 		if err := c.handle(msg); err != nil {
 			if errors.Is(err, cloudevents.ErrNotCloudEvent) {
 				c.Logger.WarnContext(ctx, "skipping non-CloudEvents message",
-					"topic", msg.Topic, "offset", msg.Offset, "error", err)
+					"topic", msg.Topic, "offset", msg.Offset, "error", sanitizeErr(err))
 			} else {
 				c.Logger.ErrorContext(ctx, "path capacity cache message handling failed",
-					"topic", msg.Topic, "offset", msg.Offset, "error", err)
+					"topic", msg.Topic, "offset", msg.Offset, "error", sanitizeErr(err))
 			}
 		}
 		c.checkReady(msg)
