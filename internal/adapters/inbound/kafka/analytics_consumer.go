@@ -266,7 +266,7 @@ func (c *AnalyticsConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 		// Not a valid CloudEvent (e.g. a retired flat-envelope message):
 		// deterministic poison, dead-lettered at once without retry.
 		c.log(ctx, "analytics: message is not a valid CloudEvent, sending to dead-letter topic",
-			"topic", topic, "partition", msg.Partition, "offset", msg.Offset, "error", decodeErr)
+			"topic", topic, "partition", msg.Partition, "offset", msg.Offset, "error", sanitizeErr(decodeErr))
 		if dlqErr := c.dlqPublish(ctx, msg, decodeErr); dlqErr != nil {
 			return fmt.Errorf("analytics: publish to dead-letter topic: %w", dlqErr)
 		}
@@ -292,7 +292,7 @@ func (c *AnalyticsConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 func (c *AnalyticsConsumer) deadLetter(ctx context.Context, msg kafkago.Message, topic string, env ce.Event, phase string, cause error) error {
 	c.log(ctx, "analytics: exhausted retries, sending to dead-letter topic",
 		"topic", topic, "dlq_topic", topic+dlqTopicSuffix, "phase", phase,
-		"ce_id", env.ID(), "ce_type", env.Type(), "attempts", maxHandlerAttempts, "error", cause)
+		"ce_id", sanitizeLog(env.ID()), "ce_type", sanitizeLog(env.Type()), "attempts", maxHandlerAttempts, "error", sanitizeErr(cause))
 	if dlqErr := c.dlqPublish(ctx, msg, cause); dlqErr != nil {
 		return fmt.Errorf("analytics: publish to dead-letter topic: %w", dlqErr)
 	}
