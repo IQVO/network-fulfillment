@@ -14,7 +14,7 @@ run each layer, and what every CI job in `.github/workflows/ci.yml` does.
 | Layer | Where | How many | Run with | Needs |
 | --- | --- | --- | --- | --- |
 | Unit (domain, use cases, adapters with fakes, `httptest`) | `internal/**/*_test.go`, `cmd/netfulfil/*_test.go` | 68 test files without a build tag (not counting the BDD and architecture files below) | `make test` | Go only |
-| BDD / acceptance (godog) | `features/*.feature`, step code in `features_*_test.go` at the repo root | 20 feature files, 192 `Scenario`/`Scenario Outline` blocks that expand to 279 executed scenarios, 2292 steps; no scenario is tagged `@known-bug` any more | `make bdd` | Go only |
+| BDD / acceptance (godog) | `features/*.feature`, step code in `features_*_test.go` at the repo root | 23 feature files, 222 `Scenario`/`Scenario Outline` blocks that expand to 279 executed scenarios, 2292 steps; no scenario is tagged `@known-bug` any more | `make bdd` | Go only |
 | Integration (testcontainers) | files with `//go:build integration` | 20 files | `make integration` | Docker |
 | Architecture fitness | `internal/architecture/` | 11 files, 25 `Test*` functions | `make arch-test` | Go only |
 | Mutation | `gremlins` on `./internal/domain/networkorder` | thresholds in `.gremlins.yaml` | `make mutation` | `gremlins` v0.6.0 |
@@ -169,8 +169,8 @@ scenarios, and there are none).
 Output of `go test . -run TestFeatures -count=1 -v` on this branch:
 
 ```text
-279 scenarios (279 passed)
-2292 steps (2292 passed)
+316 scenarios (316 passed)
+2508 steps (2508 passed)
 --- PASS: TestFeatures (11.12s)
 ```
 
