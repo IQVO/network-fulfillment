@@ -110,7 +110,7 @@ func (r *OutboxRelay) Run(ctx context.Context) error {
 		n, err := r.RelayOnce(ctx)
 		var sf *sendError
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.As(err, &sf) {
-			r.logger.ErrorContext(ctx, "outbox relay pass failed", "error", err)
+			r.logger.ErrorContext(ctx, "outbox relay pass failed", "error", sanitizeErr(err))
 		}
 		if n == r.batchSize && err == nil {
 			continue
@@ -253,12 +253,12 @@ func (r *OutboxRelay) recordSendFailure(ctx context.Context, tx pgx.Tx, p pendin
 func (r *OutboxRelay) logSendFailure(ctx context.Context, p pendingRow, attempts int, err error) {
 	if r.maxAttempts > 0 && attempts >= r.maxAttempts {
 		r.logger.ErrorContext(ctx, "outbox relay: row reached the attempt cap and is excluded from future claims; re-arm it with attempts = 0 after fixing the cause",
-			"outbox_id", p.id, "topic", p.encoded.Topic, "event_type", p.encoded.EventType,
-			"key", string(p.encoded.Key), "attempts", attempts, "max_attempts", r.maxAttempts, "error", err)
+			"outbox_id", p.id, "topic", p.encoded.Topic, "event_type", sanitizeLog(p.encoded.EventType),
+			"key", sanitizeLog(string(p.encoded.Key)), "attempts", attempts, "max_attempts", r.maxAttempts, "error", sanitizeErr(err))
 		return
 	}
 	r.logger.WarnContext(ctx, "outbox relay: send failed, stopping this pass at the failed row",
-		"outbox_id", p.id, "topic", p.encoded.Topic, "event_type", p.encoded.EventType, "attempts", attempts, "error", err)
+		"outbox_id", p.id, "topic", p.encoded.Topic, "event_type", sanitizeLog(p.encoded.EventType), "attempts", attempts, "error", sanitizeErr(err))
 }
 
 // unmarshalHeaders is the inverse of marshalHeaders.

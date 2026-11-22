@@ -68,7 +68,7 @@ func handleWithDeadLetter(
 		return ctx.Err()
 	}
 	logger.Warn(name+": sending the message to the dead-letter topic",
-		"topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "error", err)
+		"topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "error", sanitizeErr(err))
 	if dlqErr := dlq(ctx, msg, err); dlqErr != nil {
 		return fmt.Errorf("%s: publish to dead-letter topic: %w", name, dlqErr)
 	}

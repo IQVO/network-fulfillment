@@ -203,7 +203,7 @@ func (c *ShipmentConfirmedConsumer) confirm(ctx context.Context, key string, env
 			// to confirm. Skipped and logged, never an error — a mixed
 			// load must not block the network's orders on it.
 			c.Logger.Info("shipment-confirmed consumer: no network order for order_id; skipping",
-				"ce_id", env.ID(), "load_id", loadId, "order_id", order.OrderId)
+				"ce_id", sanitizeLog(env.ID()), "load_id", sanitizeLog(loadId), "order_id", sanitizeLog(order.OrderId))
 			continue
 		}
 		if err := c.confirmOrder(ctx, env, loadId, order.OrderId, o.NetworkRef(), order.PackageCount); err != nil {
@@ -213,7 +213,7 @@ func (c *ShipmentConfirmedConsumer) confirm(ctx context.Context, key string, env
 	if len(d.Orders) == 0 {
 		// Schema-legal (an empty array) but nothing to confirm; logged so
 		// a producer regression is visible, not silent.
-		c.Logger.Info("shipment-confirmed consumer: ShipmentConfirmed carries no orders", "ce_id", env.ID(), "load_id", loadId)
+		c.Logger.Info("shipment-confirmed consumer: ShipmentConfirmed carries no orders", "ce_id", sanitizeLog(env.ID()), "load_id", sanitizeLog(loadId))
 	}
 	return nil
 }
@@ -231,7 +231,7 @@ func (c *ShipmentConfirmedConsumer) confirmOrder(ctx context.Context, env ce.Eve
 	if c.Defer != nil && errors.Is(err, networkorder.ErrConfirmBeforeAcknowledge) {
 		if err = c.Defer.Execute(ctx, ref, loadId, packageCount); err == nil {
 			c.Logger.Info("shipment-confirmed consumer: shipment confirmed before the order was acknowledged; deferred",
-				"ce_id", env.ID(), "load_id", loadId, "order_id", orderId)
+				"ce_id", sanitizeLog(env.ID()), "load_id", sanitizeLog(loadId), "order_id", sanitizeLog(orderId))
 			return nil
 		}
 	}

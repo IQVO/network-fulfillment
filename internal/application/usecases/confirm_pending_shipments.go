@@ -63,17 +63,17 @@ func (uc *ConfirmPendingShipments) Execute(ctx context.Context) (ConfirmPendingS
 		if err != nil {
 			res.Failed++
 			uc.logger().Error("could not settle the shipment noted before acknowledgement; retrying next pass",
-				"order", o.NetworkRef(), "shipment", fact.ShipmentRef, "err", err)
+				"order", sanitizeLog(string(o.NetworkRef())), "shipment", sanitizeLog(fact.ShipmentRef), "err", sanitizeErr(err))
 			continue
 		}
 		switch outcome {
 		case settledConfirmed:
 			res.Confirmed++
-			uc.logger().Info("shipment noted before acknowledgement confirmed", "order", o.NetworkRef(), "shipment", fact.ShipmentRef)
+			uc.logger().Info("shipment noted before acknowledgement confirmed", "order", sanitizeLog(string(o.NetworkRef())), "shipment", sanitizeLog(fact.ShipmentRef))
 		case settledDropped:
 			res.Dropped++
 			uc.logger().Info("dropped a shipment noted before acknowledgement: the order needs no confirmation",
-				"order", o.NetworkRef(), "shipment", fact.ShipmentRef, "state", o.State())
+				"order", sanitizeLog(string(o.NetworkRef())), "shipment", sanitizeLog(fact.ShipmentRef), "state", sanitizeLog(string(o.State())))
 		}
 	}
 	return res, nil

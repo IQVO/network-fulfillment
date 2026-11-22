@@ -65,7 +65,7 @@ func (uc *DeferShipmentConfirmation) note(ctx context.Context, o *networkorder.N
 	if alreadyPending {
 		if first.ShipmentRef != shipmentRef {
 			uc.logger().Warn("a second shipment arrived before the order was acknowledged; keeping the first",
-				"order", o.NetworkRef(), "pending_shipment", first.ShipmentRef, "ignored_shipment", shipmentRef)
+				"order", sanitizeLog(string(o.NetworkRef())), "pending_shipment", sanitizeLog(first.ShipmentRef), "ignored_shipment", sanitizeLog(shipmentRef))
 		}
 		return nil
 	}
