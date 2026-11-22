@@ -99,6 +99,15 @@ Fully qualified name of the A2A agent Deployment/Service (<release>-a2a, ADR 003
 {{- include "network-fulfillment.fullname" . }}-a2a
 {{- end }}
 
+{{/* agents.colocate (warehouse-infra ADR 0012): "true" iff colocate, mcp and a2a are all on; else empty. */}}
+{{- define "network-fulfillment.agentsColocated" -}}
+{{- if and (.Values.agents | default dict).colocate .Values.mcp.enabled .Values.a2a.enabled }}true{{ end -}}
+{{- end }}
+
+{{- define "network-fulfillment.agentsFullname" -}}
+{{- printf "%s-agents" (include "network-fulfillment.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{- define "network-fulfillment.projectorFullname" -}}
 {{- include "network-fulfillment.fullname" . }}-projector
 {{- end }}
