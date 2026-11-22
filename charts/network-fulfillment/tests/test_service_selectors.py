@@ -190,5 +190,47 @@ def main() -> int:
     return 0
 
 
+def agents_colocated() -> int:
+    release = Path(__file__).resolve().parents[1].name
+    agents = f"{release}-agents"
+    comp = "app.kubernetes.io/component"
+    failures: list[str] = []
+    pair = {f"{release}-mcp", f"{release}-a2a"}
+    # the every-component render that has both mcp and a2a (ENABLE_EVERYTHING, or ENABLE_ALL_COMPONENTS
+    # where ENABLE_EVERYTHING covers only the api)
+    for args in [ENABLE_EVERYTHING] + ([globals()["ENABLE_ALL_COMPONENTS"]] if "ENABLE_ALL_COMPONENTS" in globals() else []):
+        off = render(args)
+        if pair <= {d["metadata"]["name"] for d in off if d.get("kind") == "Deployment"}:
+            break
+    else:
+        failures.append("no every-component render has both the mcp and a2a Deployments")
+    docs = render(args + ["--set", "agents.colocate=true"])
+    services = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Service"}
+    deployments = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Deployment"}
+    off_deps = {d["metadata"]["name"] for d in off if d.get("kind") == "Deployment"}
+    want_deps = (off_deps - {f"{release}-mcp", f"{release}-a2a"}) | {agents}
+    if set(deployments) != want_deps:
+        failures.append(f"with agents.colocate: Deployments {sorted(deployments)}, want {sorted(want_deps)}")
+    if set(services) != {d["metadata"]["name"] for d in off if d.get("kind") == "Service"}:
+        failures.append("with agents.colocate: the set of Services changed")
+    for name, svc in services.items():
+        hit = [d for d, dep in deployments.items() if matches(selector_of(svc), pod_labels_of(dep))]
+        want = [agents] if name in (f"{release}-mcp", f"{release}-a2a") else None
+        if len(hit) != 1 or (want and hit != want):
+            failures.append(f"with agents.colocate: Service {name} selects {sorted(hit)}, want {want or 'exactly one'}")
+    dep = deployments.get(agents)
+    if dep is not None:
+        if dep["spec"]["selector"].get("matchLabels", {}).get(comp) != "agents":
+            failures.append("the agents Deployment selector.matchLabels must pin component=agents")
+        names = sorted(c["name"] for c in dep["spec"]["template"]["spec"]["containers"])
+        if names != ["a2a", "mcp"]:
+            failures.append(f"the agents Deployment must run the containers a2a and mcp, got {names}")
+    for f in failures:
+        print(f"FAIL: {f}")
+    if not failures:
+        print(f"PASS: agents.colocate: {len(services)} Services, mcp + a2a both select {agents} (containers mcp, a2a)")
+    return 1 if failures else 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main() or agents_colocated())
