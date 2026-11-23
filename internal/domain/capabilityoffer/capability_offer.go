@@ -132,11 +132,13 @@ func Compute(sku shared.SKU, siteId shared.SiteId, physicalAvailable int, throug
 	if !throughputKnown || throughputFeasible >= physicalAvailable {
 		return New(sku, siteId, physicalAvailable, physicalAvailable, BasisPhysical, computedAt)
 	}
-	qty := throughputFeasible
-	if qty < 0 {
-		qty = 0
-	}
-	return New(sku, siteId, qty, physicalAvailable, BasisThroughputConstrained, computedAt)
+	// A negative capacity figure is no capacity at all: clamp it to zero
+	// rather than let New refuse the offer. This is max() and not an
+	// `if qty < 0 { qty = 0 }` guard on purpose: the boundary mutant of that
+	// guard (`<=`) is equivalent -- its only extra case is qty == 0, where
+	// assigning 0 changes nothing -- so no test can ever kill it (harness
+	// issue #127).
+	return New(sku, siteId, max(throughputFeasible, 0), physicalAvailable, BasisThroughputConstrained, computedAt)
 }
 
 func (o CapabilityOffer) SKU() shared.SKU         { return o.sku }
