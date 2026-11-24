@@ -138,3 +138,34 @@ func TestCompute_EqualThroughputAndPhysicalIsPhysicalBasis(t *testing.T) {
 		t.Errorf("AdvertisedQuantity = %d, want 100", o.AdvertisedQuantity())
 	}
 }
+
+func TestCompute_ThroughputClampBoundaries(t *testing.T) {
+	// Exact boundary values around Compute's zero clamp, each with the
+	// throughput below physical so the clamp is reached. A throughput of 0 is
+	// the clamp's own boundary: not negative (nothing to clamp) yet a real
+	// capacity figure, so it must advertise zero on the constrained basis
+	// rather than fall back to physical.
+	tests := []struct {
+		name     string
+		feasible int
+		wantQty  int
+	}{
+		{"below the clamp is clamped to zero", -1, 0},
+		{"the clamp boundary passes through as zero", 0, 0},
+		{"just above the clamp is kept", 1, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o, err := Compute("sku-1", "site-1", 10, tt.feasible, true, now)
+			if err != nil {
+				t.Fatalf("Compute(physical 10, feasible %d): %v", tt.feasible, err)
+			}
+			if o.AdvertisedQuantity() != tt.wantQty {
+				t.Errorf("AdvertisedQuantity = %d, want %d", o.AdvertisedQuantity(), tt.wantQty)
+			}
+			if o.Basis() != BasisThroughputConstrained {
+				t.Errorf("Basis = %q, want THROUGHPUT_CONSTRAINED", o.Basis())
+			}
+		})
+	}
+}
