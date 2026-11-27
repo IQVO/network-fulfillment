@@ -23,11 +23,14 @@ gatewayApi:
 
 mcp:
   route:
-    parentRefs: *gateway
+    parentRefs: &agentRouterGateway
+      - name: agent-router
+        namespace: envoy-gateway-system
+        sectionName: http
 
 a2a:
   route:
-    parentRefs: *gateway
+    parentRefs: *agentRouterGateway
 
 analytics:
   reports:
