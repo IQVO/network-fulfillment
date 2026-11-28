@@ -77,7 +77,7 @@ Update it in the SAME change that adds or removes an integration.
   `useCases` or a read-model `projection` port.
 - `triggers[]`: `{kind: api, via: rest|mcp|a2a, ref: <operationId|tool|skill>, actor}` or
   `{kind: event, ref: <consumed CE type>, actor: system}`.
-- A context that may not call siblings (see `.claude/rules/fleet/context-boundaries.md` and this repo's
+- A context that may not call siblings (see the fleet context-boundaries rule and this repo's
   guide) has NO rest/mcp/a2a interactions, only `event.publish` plus subscriptions.
 - Names come from this repo's ubiquitous language and real use-case types of the application layer.
 
